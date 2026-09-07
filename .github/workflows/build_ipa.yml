@@ -42,6 +42,7 @@ jobs:
           mkdir -p build/Payload
           APP_DIR="build/Payload/ColorWarAI.app"
           APP_PATH=$(find build/App.xcarchive -maxdepth 6 -name '*.app' -type d -print -quit || true)
+
           if [ -n "$APP_PATH" ]; then
             cp -R "$APP_PATH" "$APP_DIR"
           else
@@ -49,10 +50,25 @@ jobs:
             cp -R build/App.xcarchive/Products/usr/local/bin/* "$APP_DIR/" 2>/dev/null || true
             printf "APPL????" > "$APP_DIR/PkgInfo"
           fi
+
           PLIST_PATH="$APP_DIR/Info.plist"
           if [ ! -f "$PLIST_PATH" ]; then
             plutil -create xml1 "$PLIST_PATH"
           fi
+
+          # 自动匹配并修复二进制文件名，解决 zsign 无法定位可执行文件的问题
+          OLD_EXEC=$(plutil -extract CFBundleExecutable raw "$PLIST_PATH" 2>/dev/null || echo "")
+          if [ -n "$OLD_EXEC" ] && [ -f "$APP_DIR/$OLD_EXEC" ]; then
+            mv "$APP_DIR/$OLD_EXEC" "$APP_DIR/ColorWarAI"
+          else
+            REAL_EXEC=$(find "$APP_DIR" -maxdepth 1 -type f ! -name "*.*" ! -name "PkgInfo" | head -n 1)
+            if [ -n "$REAL_EXEC" ]; then
+              mv "$REAL_EXEC" "$APP_DIR/ColorWarAI"
+            fi
+          fi
+
+          chmod +x "$APP_DIR/ColorWarAI"
+
           plutil -replace CFBundleDevelopmentRegion -string "en" "$PLIST_PATH"
           plutil -replace CFBundleExecutable -string "ColorWarAI" "$PLIST_PATH"
           plutil -replace CFBundleIdentifier -string "com.example.ColorWarAI" "$PLIST_PATH"
@@ -69,6 +85,7 @@ jobs:
           plutil -replace UILaunchScreen -json '{}' "$PLIST_PATH"
           plutil -replace CFBundleIconFile -string "AppIcon.png" "$PLIST_PATH"
           plutil -replace CFBundleIconFiles -json '["AppIcon","AppIcon60x60","AppIcon76x76","AppIcon83.5x83.5"]' "$PLIST_PATH"
+
           if [ -f "AppIcon.png" ]; then
             cp AppIcon.png "$APP_DIR/AppIcon.png"
             cp AppIcon.png "$APP_DIR/icon.png"
@@ -78,6 +95,7 @@ jobs:
             sips -z 167 167 AppIcon.png --out "$APP_DIR/AppIcon83.5x83.5@2x.png"
             sips -z 1024 1024 AppIcon.png --out "$APP_DIR/iTunesArtwork@2x.png"
           fi
+
           cd build
           zip -r -y ColorWarAI.ipa Payload
 
