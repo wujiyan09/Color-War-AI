@@ -56,7 +56,7 @@ jobs:
             plutil -create xml1 "$PLIST_PATH"
           fi
 
-          # 自动匹配并修复二进制文件名，解决 zsign 无法定位可执行文件的问题
+          # 匹配并修复二进制文件名
           OLD_EXEC=$(plutil -extract CFBundleExecutable raw "$PLIST_PATH" 2>/dev/null || echo "")
           if [ -n "$OLD_EXEC" ] && [ -f "$APP_DIR/$OLD_EXEC" ]; then
             mv "$APP_DIR/$OLD_EXEC" "$APP_DIR/ColorWarAI"
@@ -69,6 +69,7 @@ jobs:
 
           chmod +x "$APP_DIR/ColorWarAI"
 
+          # 基础配置
           plutil -replace CFBundleDevelopmentRegion -string "en" "$PLIST_PATH"
           plutil -replace CFBundleExecutable -string "ColorWarAI" "$PLIST_PATH"
           plutil -replace CFBundleIdentifier -string "com.example.ColorWarAI" "$PLIST_PATH"
@@ -80,9 +81,16 @@ jobs:
           plutil -replace CFBundleVersion -string "1" "$PLIST_PATH"
           plutil -replace LSRequiresIPhoneOS -bool true "$PLIST_PATH"
           plutil -replace MinimumOSVersion -string "15.0" "$PLIST_PATH"
+
+          # 核心修复：解锁 iPad 自由窗口大小 (Stage Manager / 台前调度 / 任意拉伸)
           plutil -replace UIDeviceFamily -json '[1,2]' "$PLIST_PATH"
           plutil -replace UIRequiresFullScreen -bool false "$PLIST_PATH"
           plutil -replace UILaunchScreen -json '{}' "$PLIST_PATH"
+          plutil -replace UIApplicationSceneManifest -json '{"UIApplicationSupportsMultipleScenes": true, "UISceneConfigurations": {}}' "$PLIST_PATH"
+          plutil -replace UISupportedInterfaceOrientations -json '["UIInterfaceOrientationPortrait", "UIInterfaceOrientationLandscapeLeft", "UIInterfaceOrientationLandscapeRight"]' "$PLIST_PATH"
+          plutil -replace "UISupportedInterfaceOrientations~ipad" -json '["UIInterfaceOrientationPortrait", "UIInterfaceOrientationPortraitUpsideDown", "UIInterfaceOrientationLandscapeLeft", "UIInterfaceOrientationLandscapeRight"]' "$PLIST_PATH"
+
+          # 图标配置
           plutil -replace CFBundleIconFile -string "AppIcon.png" "$PLIST_PATH"
           plutil -replace CFBundleIconFiles -json '["AppIcon","AppIcon60x60","AppIcon76x76","AppIcon83.5x83.5"]' "$PLIST_PATH"
 
