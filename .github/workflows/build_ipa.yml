@@ -13,7 +13,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 使用 jq 精确解析包含空格的 Scheme 名称
       - name: Build Archive
         run: |
           SCHEME_NAME=$(xcodebuild -list -json | jq -r '(.project // .workspace // .package).schemes[0]')
@@ -24,7 +23,9 @@ jobs:
             -destination 'generic/platform=iOS' \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            COREML_CODEGEN_LANGUAGE=Swift \
+            IPHONEOS_DEPLOYMENT_TARGET=17.0
 
       - name: Package Unsigned IPA
         run: |
