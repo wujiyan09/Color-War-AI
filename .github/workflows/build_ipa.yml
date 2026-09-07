@@ -1,0 +1,42 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 自动识别 Scheme 并构建无签名的 Archive
+      - name: Build Archive
+        run: |
+          SCHEME_NAME=$(xcodebuild -list -json | grep -A 5 '"schemes"' | head -n 2 | tail -n 1 | tr -d ' ",')
+          echo "Using scheme: $SCHEME_NAME"
+          xcodebuild archive \
+            -scheme "$SCHEME_NAME" \
+            -archivePath build/App.xcarchive \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      # 压入 Payload 文件夹封装成未签名 IPA
+      - name: Package Unsigned IPA
+        run: |
+          mkdir -p build/Payload
+          cp -R "build/App.xcarchive/Products/Applications/"*.app build/Payload/
+          cd build
+          zip -r ColorWarAI.ipa Payload
+
+      # 上传打包完成的 IPA 到 GitHub Actions 产物中
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iOS-App-IPA
+          path: build/ColorWarAI.ipa
