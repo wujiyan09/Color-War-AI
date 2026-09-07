@@ -17,11 +17,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 自动获取 Package.swift 生成的 Scheme
-          SCHEME_NAME=$(xcodebuild -list -json | jq -r '(.package.schemes // .project.schemes)[0] // empty')
+          # 提取 workspace / package / project 节点下的 Scheme 名称
+          SCHEME_NAME=$(xcodebuild -list -json | jq -r '(.workspace.schemes // .package.schemes // .project.schemes)[0] // empty')
 
           if [ -z "$SCHEME_NAME" ]; then
-            echo "ERROR: 无法解析 Package.swift 的 Scheme"
+            echo "ERROR: 无法解析 Scheme"
             xcodebuild -list
             exit 1
           fi
@@ -29,11 +29,11 @@ jobs:
           echo "Detected Scheme: $SCHEME_NAME"
           mkdir -p build
 
-          # 针对 Swift Package 项目直接执行归档
           xcodebuild archive \
             -scheme "$SCHEME_NAME" \
             -archivePath build/App.xcarchive \
             -destination 'generic/platform=iOS' \
+            -sdk iphoneos \
             -configuration Release \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
