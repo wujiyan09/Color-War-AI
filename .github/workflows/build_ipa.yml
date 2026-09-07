@@ -1,41 +1,64 @@
-name: Build iOS IPA
+name: Build Unsigned IPA
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Build Archive
         run: |
-          SCHEME_NAME=$(xcodebuild -list -json | jq -r '(.project // .workspace // .package).schemes[0]')
-          echo "Using scheme: $SCHEME_NAME"
+          set -euo pipefail
+
+          # 自动获取 Package.swift 生成的 Scheme
+          SCHEME_NAME=$(xcodebuild -list -json | jq -r '(.package.schemes // .project.schemes)[0] // empty')
+
+          if [ -z "$SCHEME_NAME" ]; then
+            echo "ERROR: 无法解析 Package.swift 的 Scheme"
+            xcodebuild -list
+            exit 1
+          fi
+
+          echo "Detected Scheme: $SCHEME_NAME"
+          mkdir -p build
+
+          # 针对 Swift Package 项目直接执行归档
           xcodebuild archive \
             -scheme "$SCHEME_NAME" \
             -archivePath build/App.xcarchive \
             -destination 'generic/platform=iOS' \
+            -configuration Release \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            COREML_CODEGEN_LANGUAGE=Swift \
-            IPHONEOS_DEPLOYMENT_TARGET=17.0
+            CODE_SIGNING_ALLOWED=NO
 
       - name: Package Unsigned IPA
         run: |
+          set -euo pipefail
+
+          APP_PATH=$(find build/App.xcarchive -maxdepth 6 -name '*.app' -type d -print -quit || true)
+
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: 未在 xcarchive 中找到 .app 包"
+            find build/App.xcarchive -maxdepth 6 || true
+            exit 1
+          fi
+
+          echo "Found App: $APP_PATH"
           mkdir -p build/Payload
-          cp -R "build/App.xcarchive/Products/Applications/"*.app build/Payload/
+          cp -R "$APP_PATH" build/Payload/
           cd build
           zip -r ColorWarAI.ipa Payload
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: iOS-App-IPA
+          name: ColorWarAI-unsigned-ipa
           path: build/ColorWarAI.ipa
