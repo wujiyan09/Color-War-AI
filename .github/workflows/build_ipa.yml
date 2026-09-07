@@ -9,7 +9,7 @@ jobs:
   build:
     runs-on: macos-latest
     permissions:
-      contents: write # 允许创建 Release 并上传 IPA
+      contents: write
 
     steps:
       - name: Checkout code
@@ -18,18 +18,12 @@ jobs:
       - name: Build Archive
         run: |
           set -euo pipefail
-
           SCHEME_NAME=$(xcodebuild -list -json | jq -r '(.workspace.schemes // .package.schemes // .project.schemes)[0] // empty')
-
           if [ -z "$SCHEME_NAME" ]; then
-            echo "ERROR: 无法解析 Scheme"
-            xcodebuild -list
+            echo "ERROR: Scheme not found"
             exit 1
           fi
-
           mkdir -p build
-
-          # 指定 TARGETED_DEVICE_FAMILY="1,2" 同时针对 iPhone 和 iPad 进行编译
           xcodebuild archive \
             -scheme "$SCHEME_NAME" \
             -archivePath build/App.xcarchive \
@@ -42,72 +36,40 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             COREML_CODEGEN_LANGUAGE=Swift
 
-      - name: Package Unsigned IPA (Fix iPad Multi-window & App Icons)
+      - name: Package Unsigned IPA
         run: |
           set -euo pipefail
-
-          # 1. 准备 Payload 目录
           mkdir -p build/Payload
           APP_DIR="build/Payload/ColorWarAI.app"
-
           APP_PATH=$(find build/App.xcarchive -maxdepth 6 -name '*.app' -type d -print -quit || true)
-
           if [ -n "$APP_PATH" ]; then
-            echo "拷贝 Xcode 生成的 App 包: $APP_PATH"
             cp -R "$APP_PATH" "$APP_DIR"
-          elif [ -d "build/App.xcarchive/Products/usr/local/bin" ]; then
-            echo "从二进制文件构建 App 包结构..."
-            BIN_NAME=$(ls build/App.xcarchive/Products/usr/local/bin | grep -v '\.mlmodelc$' | head -n 1)
+          else
             mkdir -p "$APP_DIR"
-            cp -R build/App.xcarchive/Products/usr/local/bin/* "$APP_DIR/"
+            cp -R build/App.xcarchive/Products/usr/local/bin/* "$APP_DIR/" 2>/dev/null || true
             printf "APPL????" > "$APP_DIR/PkgInfo"
-            chmod +x "$APP_DIR/$BIN_NAME"
           fi
-
-          # 2. 确保 Info.plist 存在
           PLIST_PATH="$APP_DIR/Info.plist"
           if [ ! -f "$PLIST_PATH" ]; then
-            cat << 'EOF' > "$PLIST_PATH"
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>en</string>
-    <key>CFBundleExecutable</key>
-    <string>ColorWarAI</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.example.ColorWarAI</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
-    <key>CFBundleName</key>
-    <string>ColorWarAI</string>
-    <key>CFBundleDisplayName</key>
-    <string>ColorWarAI</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-</dict>
-</plist>
-EOF
+            plutil -create xml1 "$PLIST_PATH"
           fi
-
-          # 3. 强制写入/覆盖 iPad 多窗口 & 台前调度 & 图标关键配置（使用 macOS 原生 plutil）
-          echo "注入 iPad 多窗口与图标配置到 Info.plist..."
-          plutil -replace UIDeviceFamily -json '[1, 2]' "$PLIST_PATH"
+          plutil -replace CFBundleDevelopmentRegion -string "en" "$PLIST_PATH"
+          plutil -replace CFBundleExecutable -string "ColorWarAI" "$PLIST_PATH"
+          plutil -replace CFBundleIdentifier -string "com.example.ColorWarAI" "$PLIST_PATH"
+          plutil -replace CFBundleInfoDictionaryVersion -string "6.0" "$PLIST_PATH"
+          plutil -replace CFBundleName -string "ColorWarAI" "$PLIST_PATH"
+          plutil -replace CFBundleDisplayName -string "ColorWarAI" "$PLIST_PATH"
+          plutil -replace CFBundlePackageType -string "APPL" "$PLIST_PATH"
+          plutil -replace CFBundleShortVersionString -string "1.0" "$PLIST_PATH"
+          plutil -replace CFBundleVersion -string "1" "$PLIST_PATH"
+          plutil -replace LSRequiresIPhoneOS -bool true "$PLIST_PATH"
+          plutil -replace MinimumOSVersion -string "15.0" "$PLIST_PATH"
+          plutil -replace UIDeviceFamily -json '[1,2]' "$PLIST_PATH"
           plutil -replace UIRequiresFullScreen -bool false "$PLIST_PATH"
           plutil -replace UILaunchScreen -json '{}' "$PLIST_PATH"
           plutil -replace CFBundleIconFile -string "AppIcon.png" "$PLIST_PATH"
-          plutil -replace CFBundleIconFiles -json '["AppIcon", "AppIcon60x60", "AppIcon76x76", "AppIcon83.5x83.5"]' "$PLIST_PATH"
-          plutil -replace UISupportedInterfaceOrientations -json '["UIInterfaceOrientationPortrait", "UIInterfaceOrientationLandscapeLeft", "UIInterfaceOrientationLandscapeRight"]' "$PLIST_PATH"
-          plutil -replace "UISupportedInterfaceOrientations~ipad" -json '["UIInterfaceOrientationPortrait", "UIInterfaceOrientationPortraitUpsideDown", "UIInterfaceOrientationLandscapeLeft", "UIInterfaceOrientationLandscapeRight"]' "$PLIST_PATH"
-
-          # 4. 如果仓库根目录存在 AppIcon.png，自动裁剪并放入 App 目录
+          plutil -replace CFBundleIconFiles -json '["AppIcon","AppIcon60x60","AppIcon76x76","AppIcon83.5x83.5"]' "$PLIST_PATH"
           if [ -f "AppIcon.png" ]; then
-            echo "检测到 AppIcon.png，开始裁剪并注入各个尺寸图层..."
             cp AppIcon.png "$APP_DIR/AppIcon.png"
             cp AppIcon.png "$APP_DIR/icon.png"
             sips -z 120 120 AppIcon.png --out "$APP_DIR/AppIcon60x60@2x.png"
@@ -116,12 +78,10 @@ EOF
             sips -z 167 167 AppIcon.png --out "$APP_DIR/AppIcon83.5x83.5@2x.png"
             sips -z 1024 1024 AppIcon.png --out "$APP_DIR/iTunesArtwork@2x.png"
           fi
-
-          # 5. 打包为 IPA
           cd build
           zip -r -y ColorWarAI.ipa Payload
 
-      - name: Create Release & Upload Direct IPA
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
