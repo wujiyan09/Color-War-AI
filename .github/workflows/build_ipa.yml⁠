@@ -1,0 +1,37 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Archive
+        run: |
+          xcodebuild archive \
+            -scheme Color-War-AI \
+            -archivePath build/Color-War-AI.xcarchive \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Package Unsigned IPA
+        run: |
+          mkdir -p build/Payload
+          cp -R "build/Color-War-AI.xcarchive/Products/Applications/"*.app build/Payload/
+          cd build
+          zip -r Color-War-AI.ipa Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iOS-App-IPA
+          path: build/Color-War-AI.ipa
