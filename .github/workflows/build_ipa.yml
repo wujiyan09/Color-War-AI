@@ -13,10 +13,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 自动识别 Scheme 并构建无签名的 Archive
+      # 使用 jq 精确解析包含空格的 Scheme 名称
       - name: Build Archive
         run: |
-          SCHEME_NAME=$(xcodebuild -list -json | grep -A 5 '"schemes"' | head -n 2 | tail -n 1 | tr -d ' ",')
+          SCHEME_NAME=$(xcodebuild -list -json | jq -r '(.project // .workspace // .package).schemes[0]')
           echo "Using scheme: $SCHEME_NAME"
           xcodebuild archive \
             -scheme "$SCHEME_NAME" \
@@ -26,7 +26,6 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
 
-      # 压入 Payload 文件夹封装成未签名 IPA
       - name: Package Unsigned IPA
         run: |
           mkdir -p build/Payload
@@ -34,7 +33,6 @@ jobs:
           cd build
           zip -r ColorWarAI.ipa Payload
 
-      # 上传打包完成的 IPA 到 GitHub Actions 产物中
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
