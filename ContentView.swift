@@ -30,7 +30,7 @@ struct Cell: Equatable, Sendable {
     var count = 0
 }
 
-struct FlyingOrb: Identifiable, Equatable {
+struct FlyingOrb: Identifiable, Equatable, Sendable {
     let id = UUID()
     let fromRow: Int
     let fromColumn: Int
@@ -175,6 +175,7 @@ final class NeuralAISolver: @unchecked Sendable {
     
     func getBestMove(board: [[AISolver.SimCell]], currentPlayer: Int, playerType: PlayerType, validMoves: [(Int, Int)]) -> (Int, Int)? {
         guard !validMoves.isEmpty else { return nil }
+        guard !board.isEmpty && !board[0].isEmpty else { return validMoves.randomElement() }
         
         let isModel1 = (playerType == .colorWarAI)
         let activeModel = isModel1 ? modelColorWarAI : model12x12
@@ -1028,10 +1029,10 @@ struct ModelStatusRow: View {
     let name: String, isReady: Bool, message: String
     var body: some View {
         HStack {
-            Image(systemName: isReady ? "checkmark.circle.fill" : "exclamationmark.triangle.fill").foregroundColor(isReady ? .green : .red)
+            Image(systemName: isReady ? "checkmark.circle.fill" : "exclamationmark.triangle.fill").foregroundStyle(isReady ? .green : .red)
             VStack(alignment: .leading, spacing: 2) {
                 Text(name).font(.caption.bold())
-                Text(message).font(.caption2).foregroundColor(.secondary)
+                Text(message).font(.caption2).foregroundStyle(.secondary)
             }
             Spacer()
         }
@@ -1059,8 +1060,8 @@ struct GameView: View {
                     
                     if let warning = monitor.activeWarning {
                         HStack(spacing: 6) {
-                            Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.yellow)
-                            Text(warning).font(.caption.bold()).foregroundColor(.white)
+                            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.yellow)
+                            Text(warning).font(.caption.bold()).foregroundStyle(.white)
                         }
                         .padding(.horizontal, 12).padding(.vertical, 6)
                         .background(Color.red.opacity(0.85)).cornerRadius(8)
@@ -1248,8 +1249,8 @@ struct WinnerView: View {
 
 private extension View {
     @ViewBuilder func glassPanel(cornerRadius: CGFloat) -> some View {
-        if #available(iOS 26.0, *) { self.glassEffect(.regular, in: .rect(cornerRadius: cornerRadius)) }
-        else { self.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)).overlay(RoundedRectangle(cornerRadius: cornerRadius).stroke(.white.opacity(0.15))) }
+        self.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous).stroke(Color.white.opacity(0.15), lineWidth: 0.8))
     }
 }
 
@@ -1264,14 +1265,14 @@ struct PerformanceOverlayView: View {
                 Spacer()
                 Text(String(format: "%.1f%%", monitor.cpuUsage))
                     .bold()
-                    .foregroundColor(monitor.cpuUsage > 80.0 ? .red : .green)
+                    .foregroundStyle(monitor.cpuUsage > 80.0 ? .red : .green)
             }
             HStack {
                 Text("NPU 延时:")
                 Spacer()
                 Text(String(format: "%.2f ms", monitor.npuLatencyMs))
                     .bold()
-                    .foregroundColor(.cyan)
+                    .foregroundStyle(.cyan)
             }
         }
         .font(.system(size: 12, design: .monospaced))
@@ -1281,4 +1282,3 @@ struct PerformanceOverlayView: View {
         .frame(width: 145)
     }
 }
-
