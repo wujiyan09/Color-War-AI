@@ -1,6 +1,6 @@
 # Color War AI 🔴🔵🟢🟠
 
-一个基于 **SwiftUI** 开发的极简玻璃质感棋盘连锁反应策略游戏。项目集成了 **CoreML (NPU/GPU) 深度神经网络** 与 **多线程并发 MCTS / Minimax 数学算法**，并内置了实时的硬件性能监控（CPU 使用率与 NPU 推理延迟）。
+一个基于 **SwiftUI** 开发的极简玻璃质感棋盘连锁反应策略游戏。项目集成了 **CoreML (NPU/GPU) 深度神经网络** 与 **多线程并发 MCTS / Minimax 数学算法**
 
 ---
 
