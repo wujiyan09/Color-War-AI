@@ -82,6 +82,10 @@ jobs:
           plutil -replace LSRequiresIPhoneOS -bool true "$PLIST_PATH"
           plutil -replace MinimumOSVersion -string "15.0" "$PLIST_PATH"
 
+          # 核心修复：添加 P2P 局域网搜寻与 Bonjour 权限配置
+          plutil -replace NSLocalNetworkUsageDescription -string "ColorWar需要使用本地网络搜索并连接附近的玩家进行对决" "$PLIST_PATH"
+          plutil -replace NSBonjourServices -json '["_colorwar-p2p._tcp", "_colorwar-p2p._udp"]' "$PLIST_PATH"
+
           # 核心修复：解锁 iPad 自由窗口大小 (Stage Manager / 台前调度 / 任意拉伸)
           plutil -replace UIDeviceFamily -json '[1,2]' "$PLIST_PATH"
           plutil -replace UIRequiresFullScreen -bool false "$PLIST_PATH"
