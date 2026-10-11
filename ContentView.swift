@@ -91,7 +91,7 @@ struct DiscoveredDevice: Identifiable, Hashable {
     var displayName: String { id.displayName }
 }
 
-// MARK: - 3. 纯 P2P 对战编解码与网络引擎 (本地联机版)
+// MARK: - 3. 纯 P2P 对战编解码与网络引擎 (修补 P0-1, P2-1, P2-2, P2-3)
 
 enum P2PAction: String, Codable {
     case hostConfig
@@ -102,6 +102,7 @@ enum P2PAction: String, Codable {
 }
 
 struct P2PPacket: Codable {
+    var protocolVersion: Int = 1 // P2-3: 协议版本号
     let action: P2PAction
     let senderID: String
     let row: Int?
@@ -124,6 +125,9 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
     private var serviceBrowser: MCNearbyServiceBrowser?
     private var mcSession: MCSession?
     
+    // P0-1 修复：将单值 @Published receivedPacket 替换为 PassthroughSubject，消除同帧数据包覆盖导致的丢包
+    let packetSubject = PassthroughSubject<P2PPacket, Never>()
+    
     @Published var myNickname: String {
         didSet {
             UserDefaults.standard.set(myNickname, forKey: "CW_Saved_MyNickname")
@@ -138,9 +142,10 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
     @Published var isConnected: Bool = false
     @Published var isConnecting: Bool = false
     @Published var isSearchingTimeout: Bool = false
-    @Published var receivedPacket: P2PPacket? = nil
     
     private var searchTimer: Timer?
+    private var heartbeatTimer: Timer?
+    private var lastAckTime: Date = Date()
     
     override init() {
         let savedName = UserDefaults.standard.string(forKey: "CW_Saved_MyNickname") ?? "玩家\(Int.random(in: 100...999))"
@@ -169,6 +174,7 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
         serviceAdvertiser = MCNearbyServiceAdvertiser(peer: myPeerID, discoveryInfo: nil, serviceType: serviceType)
         serviceAdvertiser?.delegate = self
         serviceAdvertiser?.startAdvertisingPeer()
+        startHeartbeat()
     }
     
     @MainActor
@@ -206,6 +212,9 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
     func stopP2P() {
         searchTimer?.invalidate()
         searchTimer = nil
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
+        
         serviceAdvertiser?.stopAdvertisingPeer()
         serviceBrowser?.stopBrowsingForPeers()
         mcSession?.disconnect()
@@ -217,9 +226,24 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
         hostDeviceName = ""
     }
     
+    // P2-1 修复：增加心跳与假连接超时断开机制
+    private func startHeartbeat() {
+        heartbeatTimer?.invalidate()
+        lastAckTime = Date()
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            guard let self = self, self.isConnected else { return }
+            if Date().timeIntervalSince(self.lastAckTime) > 10.0 {
+                Task { @MainActor in
+                    self.stopP2P()
+                }
+            } else {
+                self.sendPacket(P2PPacket(action: .ping, senderID: self.myNickname, row: nil, col: nil, boardSize: nil, isRandomFirstPlayer: nil, playerIndex: nil, playerNames: nil, playerTypes: nil, colorsHex: nil, emojis: nil))
+            }
+        }
+    }
+    
     func sendPacket(_ packet: P2PPacket) {
         guard let data = try? JSONEncoder().encode(packet) else { return }
-        
         if let session = mcSession, !session.connectedPeers.isEmpty {
             try? session.send(data, toPeers: session.connectedPeers, with: .reliable)
         }
@@ -234,26 +258,30 @@ extension P2PNetworkManager: MCSessionDelegate, MCNearbyServiceAdvertiserDelegat
             self.isConnected = !session.connectedPeers.isEmpty
             if state == .connected {
                 self.isConnecting = false
+                self.startHeartbeat()
             }
         }
     }
     
     nonisolated func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
         if let packet = try? JSONDecoder().decode(P2PPacket.self, from: data) {
+            guard packet.protocolVersion == 1 else { return } // P2-3: 协议版本校验
+            
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
+                self.lastAckTime = Date()
                 if packet.action == .ping {
                     let ack = P2PPacket(action: .ack, senderID: self.myNickname, row: nil, col: nil, boardSize: nil, isRandomFirstPlayer: nil, playerIndex: nil, playerNames: nil, playerTypes: nil, colorsHex: nil, emojis: nil)
                     self.sendPacket(ack)
                 }
-                self.receivedPacket = packet
+                // P0-1 修复：向 Combine 管道推入数据流，保证绝对不丢失任何事件
+                self.packetSubject.send(packet)
             }
         }
     }
     
     nonisolated func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didReceiveInvitationFromPeer peerID: MCPeerID, withContext context: Data?, invitationHandler: @escaping (Bool, MCSession?) -> Void) {
-        Task { @MainActor [weak self] in
-            guard let self = self else { return }
+        Task { @MainActor in
             invitationHandler(true, self.mcSession)
         }
     }
@@ -280,7 +308,7 @@ extension P2PNetworkManager: MCSessionDelegate, MCNearbyServiceAdvertiserDelegat
     nonisolated func session(_ session: MCSession, didFinishReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, at localURL: URL?, withError error: Error?) {}
 }
 
-// MARK: - 4. Color 扩展
+// MARK: - 4. Color 扩展 (修补 P2-5)
 
 extension Color {
     static let darkNavyBlue = Color(red: 0.08, green: 0.28, blue: 0.65)
@@ -306,19 +334,22 @@ extension Color {
         self.init(.sRGB, red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255, opacity: 1)
     }
     
+    // P2-5 修复：改为 HSL 空间色相环角度差 + 明度差判定，更贴合视觉体验
     func isSimilar(to other: Color) -> Bool {
-        let c1 = UIColor(self)
-        let c2 = UIColor(other)
-        var r1: CGFloat = 0, g1: CGFloat = 0, b1: CGFloat = 0, a1: CGFloat = 0
-        var r2: CGFloat = 0, g2: CGFloat = 0, b2: CGFloat = 0, a2: CGFloat = 0
-        c1.getRed(&r1, green: &g1, blue: &b1, alpha: &a1)
-        c2.getRed(&r2, green: &g2, blue: &b2, alpha: &a2)
-        let dist = sqrt(pow(r1 - r2, 2) + pow(g1 - g2, 2) + pow(b1 - b2, 2))
-        return dist < 0.22
+        var h1: CGFloat = 0, s1: CGFloat = 0, b1: CGFloat = 0, a1: CGFloat = 0
+        var h2: CGFloat = 0, s2: CGFloat = 0, b2: CGFloat = 0, a2: CGFloat = 0
+        
+        UIColor(self).getHue(&h1, saturation: &s1, brightness: &b1, alpha: &a1)
+        UIColor(other).getHue(&h2, saturation: &s2, brightness: &b2, alpha: &a2)
+        
+        let hueDiff = min(abs(h1 - h2), 1.0 - abs(h1 - h2))
+        let brightnessDiff = abs(b1 - b2)
+        
+        return hueDiff < 0.08 && brightnessDiff < 0.35
     }
 }
 
-// MARK: - 5. Core ML 神经网络引擎
+// MARK: - 5. Core ML 神经网络引擎 (修补 P1-1, P1-5 及修复 async 标红)
 
 final class NeuralAISolver: @unchecked Sendable {
     static let shared = NeuralAISolver()
@@ -334,22 +365,34 @@ final class NeuralAISolver: @unchecked Sendable {
     private var model12x12: MLModel?
     private var reuseInputArray2: MLMultiArray?
     
-    private let lock = NSLock()
+    private var isLoaded = false
+    private let isolationQueue = DispatchQueue(label: "com.colorwar.neuralai", qos: .userInitiated)
     
     private init() { reloadModels() }
     
-    func reloadModels() {
-        let config = MLModelConfiguration()
-        config.computeUnits = .all
+    // P1-1 & P1-5 修复：增加 isLoaded 标志保护防重复加载；采用后台队列隔离异步加载，避免阻塞主线程
+    func reloadModels(force: Bool = false) {
+        if isLoaded && !force { return }
         
-        if let (model, _) = loadModelDetail(named: "ColorWarAI", config: config) {
-            self.reuseInputArray1 = try? MLMultiArray(shape: [1, 5, 12, 12], dataType: .float32)
-            self.modelColorWarAI = model
-        }
-        
-        if let (model, _) = loadModelDetail(named: "colorwar_12x12_model", config: config) {
-            self.reuseInputArray2 = try? MLMultiArray(shape: [1, 4, 12, 12], dataType: .float32)
-            self.model12x12 = model
+        isolationQueue.async { [weak self] in
+            guard let self = self else { return }
+            let config = MLModelConfiguration()
+            config.computeUnits = .all
+            
+            let m1 = self.loadModelDetail(named: "ColorWarAI", config: config)
+            let m2 = self.loadModelDetail(named: "colorwar_12x12_model", config: config)
+            
+            self.isolationQueue.async(flags: .barrier) {
+                if let (model, _) = m1 {
+                    self.reuseInputArray1 = try? MLMultiArray(shape: [1, 5, 12, 12], dataType: .float32)
+                    self.modelColorWarAI = model
+                }
+                if let (model, _) = m2 {
+                    self.reuseInputArray2 = try? MLMultiArray(shape: [1, 4, 12, 12], dataType: .float32)
+                    self.model12x12 = model
+                }
+                self.isLoaded = true
+            }
         }
     }
     
@@ -376,113 +419,134 @@ final class NeuralAISolver: @unchecked Sendable {
                      currentPlayer: Int,
                      playerType: PlayerControlType,
                      validMoves: [(Int, Int)],
-                     fallback: () -> (Int, Int)?) -> (Int, Int)? {
+                     fallback: @escaping () async -> (Int, Int)?) async -> (Int, Int)? {
         guard !validMoves.isEmpty else { return nil }
         
         let isModel1 = (playerType == .colorWarAI)
-        let activeModel = isModel1 ? modelColorWarAI : model12x12
-        let inputArray = isModel1 ? reuseInputArray1 : reuseInputArray2
         
         guard boardSize <= 12 else {
-            return fallback() ?? validMoves.randomElement()
+            return await fallback() ?? validMoves.randomElement()
         }
         
-        guard let model = activeModel, let inputArray = inputArray else {
-            return fallback() ?? validMoves.randomElement()
-        }
-        
-        lock.lock()
-        defer { lock.unlock() }
-        
-        do {
-            let maxDim = 12
-            let channelStride = 144
-            let numChannels = isModel1 ? 5 : 4
-            let totalElements = numChannels * 144
-            
-            let floatPtr = inputArray.dataPointer.bindMemory(to: Float.self, capacity: totalElements)
-            let buffer = UnsafeMutableBufferPointer(start: floatPtr, count: totalElements)
-            buffer.initialize(repeating: 0)
-            
-            var playerChannelMap: [Int: Int] = [:]
-            playerChannelMap[currentPlayer] = 0
-            
-            var enemyChannelIdx = 1
-            for cell in flatBoard {
-                if let owner = cell.owner, owner != currentPlayer {
-                    if playerChannelMap[owner] == nil {
-                        if enemyChannelIdx < 4 {
-                            playerChannelMap[owner] = enemyChannelIdx
-                            enemyChannelIdx += 1
-                        } else {
-                            playerChannelMap[owner] = 3
+        return await withCheckedContinuation { continuation in
+            isolationQueue.async { [weak self] in
+                guard let self = self else {
+                    Task {
+                        let res = await fallback() ?? validMoves.randomElement()
+                        continuation.resume(returning: res)
+                    }
+                    return
+                }
+                
+                let activeModel = isModel1 ? self.modelColorWarAI : self.model12x12
+                let inputArray = isModel1 ? self.reuseInputArray1 : self.reuseInputArray2
+                
+                guard let model = activeModel, let inputArray = inputArray else {
+                    Task {
+                        let res = await fallback() ?? validMoves.randomElement()
+                        continuation.resume(returning: res)
+                    }
+                    return
+                }
+                
+                do {
+                    let maxDim = 12
+                    let channelStride = 144
+                    let numChannels = isModel1 ? 5 : 4
+                    let totalElements = numChannels * 144
+                    
+                    let floatPtr = inputArray.dataPointer.bindMemory(to: Float.self, capacity: totalElements)
+                    for i in 0..<totalElements { floatPtr[i] = 0.0 }
+                    
+                    var playerChannelMap: [Int: Int] = [:]
+                    playerChannelMap[currentPlayer] = 0
+                    
+                    var enemyChannelIdx = 1
+                    for cell in flatBoard {
+                        if let owner = cell.owner, owner != currentPlayer {
+                            if playerChannelMap[owner] == nil {
+                                if enemyChannelIdx < 4 {
+                                    playerChannelMap[owner] = enemyChannelIdx
+                                    enemyChannelIdx += 1
+                                } else {
+                                    playerChannelMap[owner] = 3
+                                }
+                            }
                         }
                     }
-                }
-            }
-            
-            for r in 0..<boardSize {
-                for c in 0..<boardSize {
-                    let cell = flatBoard[r * boardSize + c]
-                    if let owner = cell.owner, let relChannel = playerChannelMap[owner] {
-                        let idx = relChannel * channelStride + r * maxDim + c
-                        if idx < totalElements {
-                            let normalizedValue = Float(cell.count) / 4.0
-                            buffer[idx] = normalizedValue
+                    
+                    for r in 0..<boardSize {
+                        for c in 0..<boardSize {
+                            let cell = flatBoard[r * boardSize + c]
+                            if let owner = cell.owner, let relChannel = playerChannelMap[owner] {
+                                let idx = relChannel * channelStride + r * maxDim + c
+                                if idx < totalElements {
+                                    let normalizedValue = Float(cell.count) / 4.0
+                                    floatPtr[idx] = normalizedValue
+                                }
+                            }
                         }
                     }
-                }
-            }
-            
-            if isModel1 {
-                let maskOffset = 4 * channelStride
-                for (r, c) in validMoves {
-                    let maskIdx = maskOffset + r * maxDim + c
-                    if maskIdx < totalElements {
-                        buffer[maskIdx] = 1.0
+                    
+                    if isModel1 {
+                        let maskOffset = 4 * channelStride
+                        for (r, c) in validMoves {
+                            let maskIdx = maskOffset + r * maxDim + c
+                            if maskIdx < totalElements {
+                                floatPtr[maskIdx] = 1.0
+                            }
+                        }
+                    }
+                    
+                    let inDescs = model.modelDescription.inputDescriptionsByName
+                    let explicitIn = isModel1 ? Self.model1InputKey : Self.model2InputKey
+                    let inputKey = inDescs[explicitIn] != nil ? explicitIn : (inDescs.keys.first ?? explicitIn)
+                    
+                    let provider = try MLDictionaryFeatureProvider(dictionary: [inputKey: inputArray])
+                    let prediction = try model.prediction(from: provider)
+                    
+                    let outDescs = model.modelDescription.outputDescriptionsByName
+                    let explicitOut = isModel1 ? Self.model1OutputKey : Self.model2OutputKey
+                    let outputKey = outDescs[explicitOut] != nil ? explicitOut : (outDescs.keys.first ?? explicitOut)
+                    
+                    guard let logits = (prediction.featureValue(for: outputKey) ?? prediction.featureValue(for: "policy_logits") ?? prediction.featureValue(for: "logits"))?.multiArrayValue else {
+                        Task {
+                            let res = await fallback() ?? validMoves.randomElement()
+                            continuation.resume(returning: res)
+                        }
+                        return
+                    }
+                    
+                    var bestMove = validMoves[0]
+                    var maxScore: Float = -Float.greatestFiniteMagnitude
+                    
+                    let count = min(144, logits.count)
+                    let logitsFloatPtr = logits.dataPointer.bindMemory(to: Float.self, capacity: count)
+                    
+                    for (r, c) in validMoves {
+                        let offset = r * maxDim + c
+                        if offset < count {
+                            let s = logitsFloatPtr[offset]
+                            if s > maxScore {
+                                maxScore = s
+                                bestMove = (r, c)
+                            }
+                        }
+                    }
+                    continuation.resume(returning: bestMove)
+                } catch {
+                    Task {
+                        let res = await fallback() ?? validMoves.randomElement()
+                        continuation.resume(returning: res)
                     }
                 }
             }
-            
-            let inDescs = model.modelDescription.inputDescriptionsByName
-            let explicitIn = isModel1 ? Self.model1InputKey : Self.model2InputKey
-            let inputKey = inDescs[explicitIn] != nil ? explicitIn : (inDescs.keys.first ?? explicitIn)
-            
-            let provider = try MLDictionaryFeatureProvider(dictionary: [inputKey: inputArray])
-            let prediction = try model.prediction(from: provider)
-            
-            let outDescs = model.modelDescription.outputDescriptionsByName
-            let explicitOut = isModel1 ? Self.model1OutputKey : Self.model2OutputKey
-            let outputKey = outDescs[explicitOut] != nil ? explicitOut : (outDescs.keys.first ?? explicitOut)
-            
-            guard let logits = (prediction.featureValue(for: outputKey) ?? prediction.featureValue(for: "policy_logits") ?? prediction.featureValue(for: "logits"))?.multiArrayValue else {
-                return fallback() ?? validMoves.randomElement()
-            }
-            
-            var bestMove = validMoves[0]
-            var maxScore: Float = -Float.greatestFiniteMagnitude
-            
-            let logitsFloatPtr = logits.dataPointer.bindMemory(to: Float.self, capacity: 144)
-            let logitsBuffer = UnsafeBufferPointer(start: logitsFloatPtr, count: 144)
-            
-            for (r, c) in validMoves {
-                let offset = r * maxDim + c
-                if offset < 144 {
-                    let s = logitsBuffer[offset]
-                    if s > maxScore {
-                        maxScore = s
-                        bestMove = (r, c)
-                    }
-                }
-            }
-            return bestMove
-        } catch {
-            return fallback() ?? validMoves.randomElement()
         }
     }
+
 }
 
-// MARK: - 6. Zobrist 散列与置换表缓存
+// MARK: - 6. Zobrist 散列、置换表与杀手/历史启发数据结构
 
 struct TranspositionTable: Sendable {
     enum EntryType: Sendable { case exact, lowerBound, upperBound }
@@ -517,7 +581,49 @@ struct TranspositionTable: Sendable {
     }
 }
 
-// MARK: - 7. 综合 AI 解算引擎
+struct MoveOrderingTable: Sendable {
+    private var killerMoves: [[(Int, Int)?]]
+    private var historyTable: [[Int]]
+    
+    init(maxDepth: Int = 16) {
+        self.killerMoves = Array(repeating: [nil, nil], count: maxDepth + 1)
+        self.historyTable = Array(repeating: Array(repeating: 0, count: 12), count: 12)
+    }
+    
+    mutating func recordCutoff(move: (Int, Int), depth: Int) {
+        let (r, c) = move
+        guard r >= 0 && r < 12 && c >= 0 && c < 12 else { return }
+        historyTable[r][c] += depth * depth
+        
+        let validDepth = min(depth, killerMoves.count - 1)
+        if killerMoves[validDepth][0]?.0 != r || killerMoves[validDepth][0]?.1 != c {
+            killerMoves[validDepth][1] = killerMoves[validDepth][0]
+            killerMoves[validDepth][0] = move
+        }
+    }
+    
+    func getOrderingScore(move: (Int, Int), depth: Int) -> Int {
+        let (r, c) = move
+        guard r >= 0 && r < 12 && c >= 0 && c < 12 else { return 0 }
+        var score = historyTable[r][c]
+        
+        let validDepth = min(depth, killerMoves.count - 1)
+        if let k1 = killerMoves[validDepth][0], k1 == move { score += 10_000 }
+        if let k2 = killerMoves[validDepth][1], k2 == move { score += 5_000 }
+        
+        return score
+    }
+}
+
+// MARK: - 7. 动态风险偏好控制策略
+
+enum TacticalRiskMode {
+    case dominant   // 优势顺风：稳健控盘
+    case balanced   // 平衡对局
+    case desperate  // 劣势逆风：引爆混沌翻盘
+}
+
+// MARK: - 8. 高级 AI 算法引擎 (全修复版)
 
 struct AISolver: Sendable {
     struct SimCell: Sendable {
@@ -525,7 +631,7 @@ struct AISolver: Sendable {
         var count: Int
     }
     
-    private static let zobristTable: [[[[UInt64]]]] = {
+    static let zobristTable: [[[[UInt64]]]] = {
         var rng = SystemRandomNumberGenerator()
         var table = [[[[UInt64]]]](repeating: [[[UInt64]]](repeating: [[UInt64]](repeating: [UInt64](repeating: 0, count: 5), count: 9), count: 12), count: 12)
         for r in 0..<12 {
@@ -561,20 +667,21 @@ struct AISolver: Sendable {
     }()
     
     struct Board: Sendable {
-        var cells: [SimCell]
+        private(set) var cells: [SimCell]
         let size: Int
+        var zobristHash: UInt64 = 0
         
         init(cells: [SimCell], size: Int) {
             self.cells = cells
             self.size = size
+            self.zobristHash = computeFullZobristHash()
         }
         
         subscript(r: Int, _ c: Int) -> SimCell {
-            get { cells[r * size + c] }
-            set { cells[r * size + c] = newValue }
+            cells[r * size + c]
         }
         
-        func computeZobristHash() -> UInt64 {
+        private func computeFullZobristHash() -> UInt64 {
             var h: UInt64 = 0
             for r in 0..<size {
                 for c in 0..<size {
@@ -586,6 +693,20 @@ struct AISolver: Sendable {
             }
             return h
         }
+        
+        mutating func updateCell(index: Int, oldOwner: Int?, oldCount: Int, newOwner: Int?, newCount: Int) {
+            let r = index / size
+            let c = index % size
+            
+            let oldOIdx = (oldOwner ?? -1) + 1
+            let oldCVal = min(4, max(0, oldCount))
+            let newOIdx = (newOwner ?? -1) + 1
+            let newCVal = min(4, max(0, newCount))
+            
+            zobristHash ^= AISolver.zobristTable[r][c][oldOIdx][oldCVal]
+            zobristHash ^= AISolver.zobristTable[r][c][newOIdx][newCVal]
+            cells[index] = SimCell(owner: newOwner, count: newCount)
+        }
     }
     
     let boardSize: Int
@@ -596,6 +717,7 @@ struct AISolver: Sendable {
     let hasEntered: [Bool]
     let eliminated: [Bool]
     private let neighborsMap: [[Int]]
+    private let nextPlayerLookup: [Int: Int]
     
     init(boardSize: Int,
          activePlayers: [Int],
@@ -620,6 +742,44 @@ struct AISolver: Sendable {
         self.hasEntered = hasEntered
         self.eliminated = eliminated
         self.neighborsMap = Self.neighborLookupTable[boardSize] ?? []
+        
+        var lookup = [Int: Int]()
+        let n = activePlayers.count
+        for mask in 0..<(1 << PlayerPreset.maxPlayers) {
+            for currP in 0..<PlayerPreset.maxPlayers {
+                if n == 0 {
+                    lookup[(currP << 8) | mask] = currP
+                    continue
+                }
+                var startIdx = 0
+                if let idx = activePlayers.firstIndex(of: currP) {
+                    startIdx = (idx + 1) % n
+                } else {
+                    startIdx = activePlayers.firstIndex(where: { $0 > currP }) ?? 0
+                }
+                var i = startIdx
+                var count = 0
+                while ((mask & (1 << activePlayers[i])) != 0) && count < n {
+                    i = (i + 1) % n
+                    count += 1
+                }
+                let key = (currP << 8) | mask
+                lookup[key] = activePlayers[i]
+            }
+        }
+        self.nextPlayerLookup = lookup
+    }
+    
+    @inline(__always)
+    private func getNextPlayerFast(current: Int, eliminated: [Bool]) -> Int {
+        var mask = 0
+        for p in activePlayers {
+            if isPlayerEliminated(p, in: eliminated) {
+                mask |= (1 << p)
+            }
+        }
+        let key = (current << 8) | mask
+        return nextPlayerLookup[key] ?? current
     }
     
     func calculateBestMove() async -> (Int, Int)? {
@@ -629,9 +789,12 @@ struct AISolver: Sendable {
         guard !validMoves.isEmpty else { return nil }
         
         let totalOrbsOnBoard = board.cells.reduce(0) { $0 + $1.count }
-        if totalOrbsOnBoard < 12 {
+        let isMyFirstTurn = !hasEntered[currentPlayer]
+        
+        if totalOrbsOnBoard < boardSize || isMyFirstTurn {
             let safeMoves = validMoves.filter { move in
-                let idx = move.0 * boardSize + move.1
+                let (r, c) = move
+                let idx = r * boardSize + c
                 for nIdx in neighborsMap[idx] {
                     let nCell = board.cells[nIdx]
                     if let nOwner = nCell.owner, nOwner != currentPlayer, nCell.count >= 2 {
@@ -640,19 +803,28 @@ struct AISolver: Sendable {
                 }
                 return true
             }
+            
             if !safeMoves.isEmpty {
-                validMoves = safeMoves
+                let center = Double(boardSize - 1) / 2.0
+                validMoves = safeMoves.sorted { m1, m2 in
+                    let dist1 = abs(Double(m1.0) - center) + abs(Double(m1.1) - center)
+                    let dist2 = abs(Double(m2.0) - center) + abs(Double(m2.1) - center)
+                    return dist1 < dist2
+                }
             }
         }
         
         if playerType.isNeuralAI {
-            return NeuralAISolver.shared.getBestMove(
+            // 修复：针对 await 闭包补齐关键字标记
+            return await NeuralAISolver.shared.getBestMove(
                 flatBoard: board.cells,
                 boardSize: boardSize,
                 currentPlayer: currentPlayer,
                 playerType: playerType,
                 validMoves: validMoves,
-                fallback: { calculateStandardNightmareMove(validMoves: validMoves) }
+                fallback: { [validMoves] in
+                    return self.calculateAspirationNightmareMove(validMoves: validMoves)
+                }
             )
         }
         
@@ -662,17 +834,7 @@ struct AISolver: Sendable {
             }
         }
         
-        let aliveCount = activePlayers.filter { !isPlayerEliminated($0, in: eliminated) }.count
-        
-        if aliveCount == 2 {
-            if playerType == .enhancedNightmare {
-                return calculateIterativeNightmareMove(validMoves: validMoves)
-            } else {
-                return calculateStandardNightmareMove(validMoves: validMoves)
-            }
-        } else {
-            return runParanoidMCTS(iterations: 1200, validMoves: validMoves)
-        }
+        return calculateAspirationNightmareMove(validMoves: validMoves)
     }
     
     private func findCriticalThreatMove(validMoves: [(Int, Int)]) -> (Int, Int)? {
@@ -698,210 +860,412 @@ struct AISolver: Sendable {
                 }
             }
         }
-        
         return bestMove
     }
     
-    private func calculateIterativeNightmareMove(validMoves: [(Int, Int)]) -> (Int, Int)? {
-        var bestMove = validMoves.first
+    private struct RootSearchResult {
+        let move: (Int, Int)
+        let score: Int
+    }
+    
+    private func searchRoot(
+        boardState: Board,
+        hasEnteredState: [Bool],
+        eliminatedState: [Bool],
+        depth: Int,
+        alpha: Int,
+        beta: Int,
+        isTwoPlayer: Bool,
+        candidates: [(Int, Int)],
+        tt: inout TranspositionTable,
+        ordering: inout MoveOrderingTable
+    ) -> RootSearchResult {
+        var bestMoveLocal = candidates.first!
+        var bestScoreLocal: Int? = nil
+        var currentAlpha = alpha
+        
+        for move in candidates {
+            if Task.isCancelled { break }
+            
+            var b = boardState
+            var h = hasEnteredState
+            var e = eliminatedState
+            
+            let (cascadeWaves, affectedEnemies) = simulateMoveBFSWithWaveDepthTracking(on: &b, move: move, player: currentPlayer, hasEntered: &h)
+            updateEliminatedStatus(board: b, hasEntered: h, eliminated: &e)
+            let nextP = getNextPlayerFast(current: currentPlayer, eliminated: e)
+            
+            var score: Int
+            if isTwoPlayer {
+                score = enhancedAlphaBetaNode(
+                    boardState: b,
+                    hasEnteredState: h,
+                    eliminatedState: e,
+                    depth: depth - 1,
+                    alpha: currentAlpha,
+                    beta: beta,
+                    turnPlayer: nextP,
+                    tt: &tt,
+                    ordering: &ordering,
+                    allowNullMove: true,
+                    nmpCooldown: 0,
+                    lastWaveCount: cascadeWaves
+                )
+            } else {
+                let vec = maxNMultiPlayerSearch(
+                    boardState: b,
+                    hasEnteredState: h,
+                    eliminatedState: e,
+                    depth: depth - 1,
+                    turnPlayer: nextP,
+                    beamWidth: 3
+                )
+                score = vec[currentPlayer, default: -999_999]
+            }
+            
+            let psychBonus = computeMultiTargetThreatScore(move: move, waveCount: cascadeWaves, affectedEnemies: affectedEnemies, b: boardState)
+            score += psychBonus
+            
+            if bestScoreLocal == nil || score > bestScoreLocal! {
+                bestScoreLocal = score
+                bestMoveLocal = move
+            }
+            
+            currentAlpha = max(currentAlpha, score)
+            if beta <= currentAlpha { break }
+        }
+        
+        return RootSearchResult(
+            move: bestMoveLocal,
+            score: bestScoreLocal ?? (Int.min + 1)
+        )
+    }
+    
+    private func calculateAspirationNightmareMove(validMoves: [(Int, Int)]) -> (Int, Int)? {
         let maxDepth = boardSize <= 7 ? 7 : 5
+        let aliveCount = activePlayers.filter { !isPlayerEliminated($0, in: eliminated) }.count
+        let isTwoPlayer = (aliveCount == 2)
+        
         var tt = TranspositionTable()
+        var ordering = MoveOrderingTable(maxDepth: maxDepth)
         
         var sortedMoves = validMoves.sorted {
             evaluateMoveTacticalPriority($0, on: board, player: currentPlayer)
             > evaluateMoveTacticalPriority($1, on: board, player: currentPlayer)
         }
         
-        for currentDepth in 2...maxDepth {
+        var bestMove = sortedMoves.first
+        var lastGuess = 0
+        let windowDelta = 120
+        
+        for depth in 2...maxDepth {
             if Task.isCancelled { break }
             
-            var bestScore = Int.min
-            var currentLevelBestMove: (Int, Int)? = nil
-            var alpha = Int.min + 1
-            let beta = Int.max - 1
-            
-            for move in sortedMoves {
-                if Task.isCancelled { break }
+            let result: RootSearchResult
+            if depth == 2 {
+                result = searchRoot(boardState: board, hasEnteredState: hasEntered, eliminatedState: eliminated, depth: depth, alpha: Int.min + 1, beta: Int.max - 1, isTwoPlayer: isTwoPlayer, candidates: sortedMoves, tt: &tt, ordering: &ordering)
+            } else {
+                let alpha = lastGuess - windowDelta
+                let beta = lastGuess + windowDelta
+                let tempResult = searchRoot(boardState: board, hasEnteredState: hasEntered, eliminatedState: eliminated, depth: depth, alpha: alpha, beta: beta, isTwoPlayer: isTwoPlayer, candidates: sortedMoves, tt: &tt, ordering: &ordering)
                 
-                let score = minimaxNightmare(
-                    boardState: board,
-                    hasEnteredState: hasEntered,
-                    eliminatedState: eliminated,
-                    move: move,
-                    depth: currentDepth,
-                    alpha: alpha,
-                    beta: beta,
-                    isMaximizing: false,
-                    turnPlayer: currentPlayer,
-                    isEnhanced: true,
-                    tt: &tt
-                )
-                
-                if score > bestScore {
-                    bestScore = score
-                    currentLevelBestMove = move
-                    alpha = max(alpha, score)
+                if tempResult.score <= alpha || tempResult.score >= beta {
+                    result = searchRoot(boardState: board, hasEnteredState: hasEntered, eliminatedState: eliminated, depth: depth, alpha: Int.min + 1, beta: Int.max - 1, isTwoPlayer: isTwoPlayer, candidates: sortedMoves, tt: &tt, ordering: &ordering)
+                } else {
+                    result = tempResult
                 }
             }
             
-            if let move = currentLevelBestMove {
-                bestMove = move
-                sortedMoves.removeAll(where: { $0.0 == move.0 && $0.1 == move.1 })
-                sortedMoves.insert(move, at: 0)
+            bestMove = result.move
+            lastGuess = result.score
+            
+            if let bm = bestMove {
+                sortedMoves.removeAll(where: { $0.0 == bm.0 && $0.1 == bm.1 })
+                sortedMoves.insert(bm, at: 0)
             }
         }
-        
         return bestMove
     }
     
-    private func calculateStandardNightmareMove(validMoves: [(Int, Int)]) -> (Int, Int)? {
-        let sorted = validMoves.sorted {
-            evaluateMoveTacticalPriority($0, on: board, player: currentPlayer)
-            > evaluateMoveTacticalPriority($1, on: board, player: currentPlayer)
-        }
-        var bestScore = Int.min
-        var bestMoves: [(Int, Int)] = []
-        let depth = boardSize <= 7 ? 5 : 4
-        var tt = TranspositionTable()
-        
-        var alpha = Int.min + 1
-        let beta = Int.max - 1
-        
-        for move in sorted {
-            if Task.isCancelled { break }
-            let s = minimaxNightmare(
-                boardState: board,
-                hasEnteredState: hasEntered,
-                eliminatedState: eliminated,
-                move: move,
-                depth: depth,
-                alpha: alpha,
-                beta: beta,
-                isMaximizing: false,
-                turnPlayer: currentPlayer,
-                isEnhanced: false,
-                tt: &tt
-            )
-            if s > bestScore {
-                bestScore = s
-                bestMoves = [move]
-                alpha = max(alpha, s)
-            } else if s == bestScore {
-                bestMoves.append(move)
-            }
-        }
-        return bestMoves.randomElement() ?? sorted.first
-    }
-    
-    private func minimaxNightmare(boardState: Board,
-                                  hasEnteredState: [Bool],
-                                  eliminatedState: [Bool],
-                                  move: (Int, Int),
-                                  depth: Int,
-                                  alpha: Int,
-                                  beta: Int,
-                                  isMaximizing: Bool,
-                                  turnPlayer: Int,
-                                  isEnhanced: Bool,
-                                  tt: inout TranspositionTable) -> Int {
+    private func enhancedAlphaBetaNode(boardState: Board,
+                                       hasEnteredState: [Bool],
+                                       eliminatedState: [Bool],
+                                       depth: Int,
+                                       alpha: Int,
+                                       beta: Int,
+                                       turnPlayer: Int,
+                                       tt: inout TranspositionTable,
+                                       ordering: inout MoveOrderingTable,
+                                       allowNullMove: Bool,
+                                       nmpCooldown: Int,
+                                       lastWaveCount: Int = 0) -> Int {
         if Task.isCancelled { return 0 }
         
         var a = alpha
         var bVal = beta
         
-        let hash = boardState.computeZobristHash()
+        let hash = boardState.zobristHash
         if let (cachedScore, _) = tt.lookup(hash: hash, depth: depth, alpha: &a, beta: &bVal) {
             return cachedScore
         }
         
-        var b = boardState
-        var h = hasEnteredState
-        var e = eliminatedState
+        let R = 2
+        if allowNullMove && nmpCooldown == 0 && depth > R + 1 && !isGameOverSimulated(eliminated: eliminatedState) {
+            let isTacticalField = boardState.cells.contains { $0.count == 3 }
+            if !isTacticalField {
+                let nextP = getNextPlayerFast(current: turnPlayer, eliminated: eliminatedState)
+                let nullVal = -enhancedAlphaBetaNode(
+                    boardState: boardState,
+                    hasEnteredState: hasEnteredState,
+                    eliminatedState: eliminatedState,
+                    depth: depth - 1 - R,
+                    alpha: -bVal,
+                    beta: -bVal + 1,
+                    turnPlayer: nextP,
+                    tt: &tt,
+                    ordering: &ordering,
+                    allowNullMove: true,
+                    nmpCooldown: 3,
+                    lastWaveCount: 0
+                )
+                if nullVal >= bVal {
+                    return bVal
+                }
+            }
+        }
         
-        let cascadeWaves = simulateMoveBFSWithWaveDepth(on: &b, move: move, player: turnPlayer, hasEntered: &h)
-        updateEliminatedStatus(board: b, hasEntered: h, eliminated: &e)
-        
-        if depth <= 1 || isGameOverSimulated(eliminated: e) {
-            let val = isEnhanced
-            ? evaluateAdvancedBoard(b, forPlayer: currentPlayer, eliminated: e, currentTurn: turnPlayer, lastCascadeWaves: cascadeWaves)
-            : evaluateStandardBoard(b, forPlayer: currentPlayer, eliminated: e)
-            tt.store(hash: hash, depth: depth, score: val, type: .exact, move: move)
+        if depth <= 1 || isGameOverSimulated(eliminated: eliminatedState) {
+            let val = quiescenceSearch(boardState: boardState, hasEnteredState: hasEnteredState, eliminatedState: eliminatedState, alpha: a, beta: bVal, turnPlayer: turnPlayer, qsDepth: 4, tt: &tt)
+            tt.store(hash: hash, depth: depth, score: val, type: .exact, move: nil)
             return val
         }
         
-        let nextPlayer = getNextPlayerSimulated(current: turnPlayer, eliminated: e)
-        let nextMoves = getPlayableCells(for: nextPlayer, on: b)
-        if nextMoves.isEmpty {
-            let val = isEnhanced
-            ? evaluateAdvancedBoard(b, forPlayer: currentPlayer, eliminated: e, currentTurn: turnPlayer, lastCascadeWaves: cascadeWaves)
-            : evaluateStandardBoard(b, forPlayer: currentPlayer, eliminated: e)
-            tt.store(hash: hash, depth: depth, score: val, type: .exact, move: move)
-            return val
+        let validMoves = getPlayableCells(for: turnPlayer, on: boardState)
+        if validMoves.isEmpty {
+            let nextP = getNextPlayerFast(current: turnPlayer, eliminated: eliminatedState)
+            return enhancedAlphaBetaNode(
+                boardState: boardState,
+                hasEnteredState: hasEnteredState,
+                eliminatedState: eliminatedState,
+                depth: depth - 1,
+                alpha: a,
+                beta: bVal,
+                turnPlayer: nextP,
+                tt: &tt,
+                ordering: &ordering,
+                allowNullMove: true,
+                nmpCooldown: max(0, nmpCooldown - 1),
+                lastWaveCount: lastWaveCount
+            )
         }
         
-        let sorted = nextMoves.sorted {
-            evaluateMoveTacticalPriority($0, on: b, player: nextPlayer)
-            > evaluateMoveTacticalPriority($1, on: b, player: nextPlayer)
+        let sorted = validMoves.sorted { m1, m2 in
+            let p1 = evaluateMoveTacticalPriority(m1, on: boardState, player: turnPlayer) + ordering.getOrderingScore(move: m1, depth: depth)
+            let p2 = evaluateMoveTacticalPriority(m2, on: boardState, player: turnPlayer) + ordering.getOrderingScore(move: m2, depth: depth)
+            return p1 > p2
         }
         
-        if isMaximizing {
-            var maxEval = Int.min
-            var bestMoveLocal: (Int, Int)? = nil
-            for m in sorted {
-                if Task.isCancelled { break }
-                let v = minimaxNightmare(boardState: b, hasEnteredState: h, eliminatedState: e, move: m, depth: depth - 1, alpha: a, beta: bVal, isMaximizing: false, turnPlayer: nextPlayer, isEnhanced: isEnhanced, tt: &tt)
-                if v > maxEval {
-                    maxEval = v
-                    bestMoveLocal = m
+        var maxEval = Int.min
+        var bestMoveLocal: (Int, Int)? = nil
+        let nextCooldown = max(0, nmpCooldown - 1)
+        
+        for (index, move) in sorted.enumerated() {
+            if Task.isCancelled { break }
+            
+            var b = boardState
+            var h = hasEnteredState
+            var e = eliminatedState
+            
+            let (waves, _) = simulateMoveBFSWithWaveDepthTracking(on: &b, move: move, player: turnPlayer, hasEntered: &h)
+            updateEliminatedStatus(board: b, hasEntered: h, eliminated: &e)
+            let nextP = getNextPlayerFast(current: turnPlayer, eliminated: e)
+            
+            var eval = Int.min
+            
+            if index >= 3 && depth >= 3 && boardState[move.0, move.1].count < 3 {
+                eval = -enhancedAlphaBetaNode(boardState: b, hasEnteredState: h, eliminatedState: e, depth: depth - 2, alpha: -a - 1, beta: -a, turnPlayer: nextP, tt: &tt, ordering: &ordering, allowNullMove: true, nmpCooldown: nextCooldown, lastWaveCount: waves)
+                if eval > a {
+                    eval = -enhancedAlphaBetaNode(boardState: b, hasEnteredState: h, eliminatedState: e, depth: depth - 1, alpha: -bVal, beta: -a, turnPlayer: nextP, tt: &tt, ordering: &ordering, allowNullMove: true, nmpCooldown: nextCooldown, lastWaveCount: waves)
                 }
-                a = max(a, v)
-                if bVal <= a { break }
+            } else {
+                eval = -enhancedAlphaBetaNode(boardState: b, hasEnteredState: h, eliminatedState: e, depth: depth - 1, alpha: -bVal, beta: -a, turnPlayer: nextP, tt: &tt, ordering: &ordering, allowNullMove: true, nmpCooldown: nextCooldown, lastWaveCount: waves)
             }
-            tt.store(hash: hash, depth: depth, score: maxEval, type: maxEval >= beta ? .lowerBound : .exact, move: bestMoveLocal)
-            return maxEval
-        } else {
-            var minEval = Int.max
-            var bestMoveLocal: (Int, Int)? = nil
-            for m in sorted {
-                if Task.isCancelled { break }
-                let v = minimaxNightmare(boardState: b, hasEnteredState: h, eliminatedState: e, move: m, depth: depth - 1, alpha: a, beta: bVal, isMaximizing: true, turnPlayer: nextPlayer, isEnhanced: isEnhanced, tt: &tt)
-                if v < minEval {
-                    minEval = v
-                    bestMoveLocal = m
-                }
-                bVal = min(bVal, v)
-                if bVal <= a { break }
+            
+            if eval > maxEval {
+                maxEval = eval
+                bestMoveLocal = move
             }
-            tt.store(hash: hash, depth: depth, score: minEval, type: minEval <= alpha ? .upperBound : .exact, move: bestMoveLocal)
-            return minEval
+            a = max(a, eval)
+            if bVal <= a {
+                ordering.recordCutoff(move: move, depth: depth)
+                break
+            }
         }
+        
+        tt.store(hash: hash, depth: depth, score: maxEval, type: maxEval >= beta ? .lowerBound : .exact, move: bestMoveLocal)
+        return maxEval
     }
     
-    private func runParanoidMCTS(iterations: Int, validMoves: [(Int, Int)]) -> (Int, Int)? {
-        var scores: [Int: Double] = [:]
+    private func quiescenceSearch(boardState: Board,
+                                  hasEnteredState: [Bool],
+                                  eliminatedState: [Bool],
+                                  alpha: Int,
+                                  beta: Int,
+                                  turnPlayer: Int,
+                                  qsDepth: Int,
+                                  tt: inout TranspositionTable) -> Int {
+        if Task.isCancelled || qsDepth <= 0 {
+            return evaluateAdvancedBoard(boardState, forPlayer: currentPlayer, eliminated: eliminatedState, currentTurn: turnPlayer, lastCascadeWaves: 0)
+        }
+        
+        var a = alpha
+        let standPat = evaluateAdvancedBoard(boardState, forPlayer: currentPlayer, eliminated: eliminatedState, currentTurn: turnPlayer, lastCascadeWaves: 0)
+        if standPat >= beta { return beta }
+        if standPat > a { a = standPat }
+        
+        let tacticalMoves = getTacticalForcingMoves(on: boardState, player: turnPlayer)
+        if tacticalMoves.isEmpty { return standPat }
+        
+        for move in tacticalMoves {
+            var b = boardState
+            var h = hasEnteredState
+            var e = eliminatedState
+            
+            _ = simulateMoveBFSWithWaveDepthTracking(on: &b, move: move, player: turnPlayer, hasEntered: &h)
+            updateEliminatedStatus(board: b, hasEntered: h, eliminated: &e)
+            
+            let score = -quiescenceSearch(boardState: b,
+                                          hasEnteredState: h,
+                                          eliminatedState: e,
+                                          alpha: -beta,
+                                          beta: -a,
+                                          turnPlayer: getNextPlayerFast(current: turnPlayer, eliminated: e),
+                                          qsDepth: qsDepth - 1,
+                                          tt: &tt)
+            if score >= beta { return beta }
+            if score > a { a = score }
+        }
+        return a
+    }
+    
+    private func getTacticalForcingMoves(on b: Board, player: Int) -> [(Int, Int)] {
+        var forcingMoves: [(Int, Int)] = []
+        let validMoves = getPlayableCells(for: player, on: b)
         
         for move in validMoves {
             let idx = move.0 * boardSize + move.1
-            var score = 0.0
+            let cell = b.cells[idx]
             
-            var b = self.board
-            var h = self.hasEntered
-            var e = self.eliminated
-            let waveCount = simulateMoveBFSWithWaveDepth(on: &b, move: move, player: currentPlayer, hasEntered: &h)
+            if cell.count == 3 {
+                forcingMoves.append(move)
+                continue
+            }
+            
+            var reachesEnemy3 = false
+            for nIdx in neighborsMap[idx] {
+                let nCell = b.cells[nIdx]
+                if let nOwner = nCell.owner, nOwner != player, nCell.count == 3 {
+                    reachesEnemy3 = true
+                    break
+                }
+            }
+            if reachesEnemy3 { forcingMoves.append(move) }
+        }
+        return forcingMoves
+    }
+    
+    private func maxNMultiPlayerSearch(boardState: Board,
+                                       hasEnteredState: [Bool],
+                                       eliminatedState: [Bool],
+                                       depth: Int,
+                                       turnPlayer: Int,
+                                       beamWidth: Int) -> [Int: Int] {
+        if Task.isCancelled || depth <= 0 || isGameOverSimulated(eliminated: eliminatedState) {
+            return evaluateMultiPlayerVector(boardState, eliminated: eliminatedState)
+        }
+        
+        let moves = getPlayableCells(for: turnPlayer, on: boardState)
+        if moves.isEmpty {
+            let nextP = getNextPlayerFast(current: turnPlayer, eliminated: eliminatedState)
+            return maxNMultiPlayerSearch(boardState: boardState, hasEnteredState: hasEnteredState, eliminatedState: eliminatedState, depth: depth - 1, turnPlayer: nextP, beamWidth: beamWidth)
+        }
+        
+        let sorted = moves.sorted {
+            evaluateMoveTacticalPriority($0, on: boardState, player: turnPlayer)
+            > evaluateMoveTacticalPriority($1, on: boardState, player: turnPlayer)
+        }
+        let candidates = Array(sorted.prefix(beamWidth))
+        
+        var bestVector: [Int: Int] = [:]
+        var maxPlayerVal = -Int.max
+        
+        for m in candidates {
+            if Task.isCancelled { break }
+            
+            var b = boardState
+            var h = hasEnteredState
+            var e = eliminatedState
+            
+            _ = simulateMoveBFSWithWaveDepthTracking(on: &b, move: m, player: turnPlayer, hasEntered: &h)
             updateEliminatedStatus(board: b, hasEntered: h, eliminated: &e)
             
-            let remainingEnemies = activePlayers.filter { $0 != currentPlayer && !isPlayerEliminated($0, in: e) }
-            score += Double(evaluateAdvancedBoard(b, forPlayer: currentPlayer, eliminated: e, currentTurn: currentPlayer, lastCascadeWaves: waveCount))
-            score -= Double(remainingEnemies.count * 150)
+            let nextP = getNextPlayerFast(current: turnPlayer, eliminated: e)
+            let resultVector = maxNMultiPlayerSearch(boardState: b, hasEnteredState: h, eliminatedState: e, depth: depth - 1, turnPlayer: nextP, beamWidth: beamWidth)
             
-            scores[idx] = score
+            let pScore = resultVector[turnPlayer, default: -999_999]
+            if pScore > maxPlayerVal {
+                maxPlayerVal = pScore
+                bestVector = resultVector
+            }
         }
         
-        if let bestIdx = scores.max(by: { $0.value < $1.value })?.key {
-            return (bestIdx / boardSize, bestIdx % boardSize)
+        return bestVector
+    }
+    
+    private func evaluateMultiPlayerVector(_ b: Board, eliminated: [Bool]) -> [Int: Int] {
+        var orbCounts = [Int](repeating: 0, count: PlayerPreset.maxPlayers)
+        var scores = [Int](repeating: 0, count: PlayerPreset.maxPlayers)
+        
+        for idx in 0..<(boardSize * boardSize) {
+            let cell = b.cells[idx]
+            guard let owner = cell.owner, owner >= 0 && owner < PlayerPreset.maxPlayers else { continue }
+            
+            let neighbors = neighborsMap[idx]
+            var val = cell.count * 15 + neighbors.count * 5
+            
+            if cell.count == 3 {
+                val += 35
+                for nIdx in neighbors {
+                    let nCell = b.cells[nIdx]
+                    if let nOwner = nCell.owner, nOwner != owner {
+                        if nCell.count == 3 {
+                            val -= 1500
+                        }
+                    }
+                }
+            }
+            
+            orbCounts[owner] += cell.count
+            scores[owner] += val
         }
         
-        return validMoves.randomElement()
+        let maxOrbCount = orbCounts.max() ?? 0
+        let leaderIndex = orbCounts.firstIndex(of: maxOrbCount)
+        
+        var vectorResult: [Int: Int] = [:]
+        for p in activePlayers {
+            if isPlayerEliminated(p, in: eliminated) {
+                vectorResult[p] = -999_999
+            } else {
+                var finalScore = scores[p]
+                if let leader = leaderIndex, leader != p && maxOrbCount > 5 {
+                    let leaderOrbDiff = orbCounts[leader] - orbCounts[p]
+                    finalScore -= Int(Double(leaderOrbDiff) * 35.0)
+                }
+                vectorResult[p] = finalScore
+            }
+        }
+        return vectorResult
     }
     
     private func evaluateAdvancedBoard(_ b: Board, forPlayer player: Int, eliminated: [Bool], currentTurn: Int, lastCascadeWaves: Int) -> Int {
@@ -909,63 +1273,137 @@ struct AISolver: Sendable {
         
         var score = 0
         var myOrbs = 0
-        var enemyOrbs = 0
+        var maxEnemyOrbs = 0
+        var enemyThreat3Count = 0
+        let totalCells = boardSize * boardSize
         
-        for r in 0..<boardSize {
-            for c in 0..<boardSize {
-                let idx = r * boardSize + c
-                let cell = b.cells[idx]
-                guard let owner = cell.owner else { continue }
+        var enemyOrbsMap = [Int: Int]()
+        
+        for idx in 0..<totalCells {
+            let cell = b.cells[idx]
+            guard let owner = cell.owner else { continue }
+            
+            let neighbors = neighborsMap[idx]
+            let neighborCount = neighbors.count
+            
+            var cellVal = cell.count * 15 + neighborCount * 5
+            
+            if cell.count == 3 {
+                cellVal += 35
                 
-                let isCorner = (r == 0 || r == boardSize - 1) && (c == 0 || c == boardSize - 1)
-                let isEdge = r == 0 || r == boardSize - 1 || c == 0 || c == boardSize - 1
-                
-                var cellVal = cell.count * 15
-                if isCorner { cellVal += 45 }
-                else if isEdge { cellVal += 20 }
-                
-                if cell.count == 3 {
-                    cellVal += 35
-                    for nIdx in neighborsMap[idx] {
-                        let nCell = b.cells[nIdx]
-                        if let nOwner = nCell.owner, nOwner != owner, nCell.count == 3 {
-                            if currentTurn != owner {
-                                cellVal -= (owner == player ? 400 : -400)
+                for nIdx in neighbors {
+                    let nCell = b.cells[nIdx]
+                    if let nOwner = nCell.owner, nOwner != owner {
+                        if nCell.count == 3 {
+                            if owner == player { enemyThreat3Count += 1 }
+                            if currentTurn == owner {
+                                cellVal += (owner == player) ? 3000 : -3000
                             } else {
-                                cellVal += (owner == player ? 300 : -300)
+                                cellVal -= (owner == player) ? 3500 : -3500
                             }
+                        } else if nCell.count == 2 {
+                            cellVal += (owner == player) ? 400 : -400
                         }
                     }
                 }
-                
-                if owner == player {
-                    myOrbs += cell.count
-                    score += cellVal
-                } else {
-                    enemyOrbs += cell.count
-                    score -= Int(Double(cellVal) * 1.3)
+            } else if cell.count <= 2 {
+                for nIdx in neighbors {
+                    let nCell = b.cells[nIdx]
+                    if let nOwner = nCell.owner, nOwner != owner, nCell.count == 3 {
+                        cellVal -= (owner == player) ? 800 : -800
+                    }
                 }
+            }
+            
+            if owner == player {
+                myOrbs += cell.count
+                score += cellVal
+            } else {
+                enemyOrbsMap[owner, default: 0] += cell.count
+                score -= Int(Double(cellVal) * 1.25)
             }
         }
         
-        score += lastCascadeWaves * 60
+        maxEnemyOrbs = enemyOrbsMap.values.max() ?? 0
+        
+        let chainScore = computeChainGraphPotentials(on: b, player: player)
+        score += chainScore
+        
+        let ratio = Double(myOrbs) / Double(max(1, maxEnemyOrbs))
+        let riskMode: TacticalRiskMode = ratio >= 1.35 ? .dominant : (ratio <= 0.65 ? .desperate : .balanced)
+        
+        switch riskMode {
+        case .dominant:
+            score -= enemyThreat3Count * 1200
+            score += lastCascadeWaves * 30
+        case .desperate:
+            score -= enemyThreat3Count * 200
+            score += lastCascadeWaves * 250
+        case .balanced:
+            score -= enemyThreat3Count * 600
+            score += lastCascadeWaves * 80
+        }
+        
         let eliminatedEnemies = activePlayers.filter { $0 != player && isPlayerEliminated($0, in: eliminated) }.count
-        return score + eliminatedEnemies * 1200 + (myOrbs - enemyOrbs) * 25
+        return score + eliminatedEnemies * 2000 + (myOrbs - maxEnemyOrbs) * 25
     }
     
-    private func evaluateStandardBoard(_ b: Board, forPlayer player: Int, eliminated: [Bool]) -> Int {
-        if isPlayerEliminated(player, in: eliminated) { return -999_999 }
+    private func computeChainGraphPotentials(on b: Board, player: Int) -> Int {
+        var visited = Array(repeating: false, count: boardSize * boardSize)
         var score = 0
-        for r in 0..<boardSize {
-            for c in 0..<boardSize {
-                let idx = r * boardSize + c
-                let cell = b.cells[idx]
-                guard let owner = cell.owner else { continue }
-                let isCorner = (r == 0 || r == boardSize - 1) && (c == 0 || c == boardSize - 1)
-                let isEdge = r == 0 || r == boardSize - 1 || c == 0 || c == boardSize - 1
-                var v = cell.count * 15
-                if isCorner { v += 45 } else if isEdge { v += 20 }
-                if owner == player { score += v } else { score -= Int(Double(v) * 1.3) }
+        
+        for idx in 0..<(boardSize * boardSize) {
+            let cell = b.cells[idx]
+            guard !visited[idx], cell.count == 3, let owner = cell.owner else { continue }
+            
+            var componentSize = 0
+            var queue = [idx]
+            visited[idx] = true
+            
+            while !queue.isEmpty {
+                let curr = queue.removeFirst()
+                componentSize += 1
+                
+                for nIdx in neighborsMap[curr] {
+                    let nCell = b.cells[nIdx]
+                    if !visited[nIdx] && nCell.count == 3 && nCell.owner == owner {
+                        visited[nIdx] = true
+                        queue.append(nIdx)
+                    }
+                }
+            }
+            
+            let graphVal = componentSize * componentSize * 50
+            if owner == player {
+                score += graphVal
+            } else {
+                score -= Int(Double(graphVal) * 1.3)
+            }
+        }
+        return score
+    }
+    
+    private func computeMultiTargetThreatScore(move: (Int, Int), waveCount: Int, affectedEnemies: Set<Int>, b: Board) -> Int {
+        var score = 0
+        
+        if affectedEnemies.count >= 2 {
+            score += affectedEnemies.count * 450
+        }
+        
+        if waveCount >= 2 {
+            let (r, c) = move
+            var maxDistance = 0
+            for targetIdx in 0..<(boardSize * boardSize) {
+                let cell = b.cells[targetIdx]
+                if let owner = cell.owner, owner != currentPlayer, cell.count == 3 {
+                    let tr = targetIdx / boardSize
+                    let tc = targetIdx % boardSize
+                    let dist = abs(r - tr) + abs(c - tc)
+                    if dist > maxDistance { maxDistance = dist }
+                }
+            }
+            if maxDistance >= 3 {
+                score += maxDistance * 160 + waveCount * 100
             }
         }
         return score
@@ -977,64 +1415,73 @@ struct AISolver: Sendable {
         let cell = b[r, c]
         
         var priority = 0
-        if cell.count == 3 { priority += 250 }
+        let neighbors = neighborsMap[idx]
         
-        for nIdx in neighborsMap[idx] {
-            let nCell = b.cells[nIdx]
-            if let nOwner = nCell.owner, nOwner != player {
-                if nCell.count >= 2 {
-                    priority -= 600
-                }
-                if nCell.count == 3 {
-                    priority += 800
+        if cell.count == 3 || cell.owner == nil {
+            for nIdx in neighbors {
+                let nCell = b.cells[nIdx]
+                if let nOwner = nCell.owner, nOwner != player, nCell.count == 3 {
+                    priority += 4000
                 }
             }
         }
         
-        let isCorner = (r == 0 || r == boardSize - 1) && (c == 0 || c == boardSize - 1)
-        if isCorner { priority += 100 }
+        if cell.count < 3 {
+            for nIdx in neighbors {
+                let nCell = b.cells[nIdx]
+                if let nOwner = nCell.owner, nOwner != player, nCell.count == 3 {
+                    priority -= 2000
+                }
+            }
+        }
+        
+        priority += neighbors.count * 10
+        if cell.count == 3 { priority += 500 }
         
         return priority
     }
     
-    @discardableResult
-    private func simulateMoveBFSWithWaveDepth(on simBoard: inout Board, move: (Int, Int), player: Int, hasEntered: inout [Bool]) -> Int {
+    private func simulateMoveBFSWithWaveDepthTracking(on simBoard: inout Board, move: (Int, Int), player: Int, hasEntered: inout [Bool]) -> (Int, Set<Int>) {
         let flatIndex = move.0 * boardSize + move.1
         let isFirst = !hasEntered[player]
         hasEntered[player] = true
         
-        simBoard.cells[flatIndex].owner = player
-        simBoard.cells[flatIndex].count += isFirst ? 3 : 1
+        let oldCell = simBoard.cells[flatIndex]
+        simBoard.updateCell(index: flatIndex, oldOwner: oldCell.owner, oldCount: oldCell.count, newOwner: player, newCount: oldCell.count + (isFirst ? 3 : 1))
         
-        guard simBoard.cells[flatIndex].count >= 4 else { return 0 }
+        guard simBoard.cells[flatIndex].count >= 4 else { return (0, []) }
         
         var queue = [Int]()
         queue.append(flatIndex)
         var waveCount = 0
         let maxWaveCount = 100
+        var affectedEnemies = Set<Int>()
         
         while !queue.isEmpty && waveCount < maxWaveCount {
             waveCount += 1
             let count = queue.count
             for _ in 0..<count {
                 let currIdx = queue.removeFirst()
-                if simBoard.cells[currIdx].count < 4 { continue }
+                let currCell = simBoard.cells[currIdx]
+                if currCell.count < 4 { continue }
                 
-                simBoard.cells[currIdx].count -= 4
-                if simBoard.cells[currIdx].count == 0 {
-                    simBoard.cells[currIdx].owner = nil
-                }
+                let remCount = currCell.count - 4
+                let nextOwner = remCount == 0 ? nil : player
+                simBoard.updateCell(index: currIdx, oldOwner: currCell.owner, oldCount: currCell.count, newOwner: nextOwner, newCount: remCount)
                 
                 for nIdx in neighborsMap[currIdx] {
-                    simBoard.cells[nIdx].owner = player
-                    simBoard.cells[nIdx].count += 1
+                    let nCell = simBoard.cells[nIdx]
+                    if let nOwner = nCell.owner, nOwner != player {
+                        affectedEnemies.insert(nOwner)
+                    }
+                    simBoard.updateCell(index: nIdx, oldOwner: nCell.owner, oldCount: nCell.count, newOwner: player, newCount: nCell.count + 1)
                     if simBoard.cells[nIdx].count >= 4 {
                         queue.append(nIdx)
                     }
                 }
             }
         }
-        return waveCount
+        return (waveCount, affectedEnemies)
     }
     
     private func updateEliminatedStatus(board b: Board, hasEntered: [Bool], eliminated: inout [Bool]) {
@@ -1049,18 +1496,6 @@ struct AISolver: Sendable {
                 eliminated[p] = true
             }
         }
-    }
-    
-    private func getNextPlayerSimulated(current: Int, eliminated: [Bool]) -> Int {
-        guard let idx = activePlayers.firstIndex(of: current) else { return current }
-        let n = activePlayers.count
-        var i = (idx + 1) % n
-        var count = 0
-        while isPlayerEliminated(activePlayers[i], in: eliminated) && count < n {
-            i = (i + 1) % n
-            count += 1
-        }
-        return activePlayers[i]
     }
     
     private func getPlayableCells(for player: Int, on b: Board) -> [(Int, Int)] {
@@ -1089,7 +1524,7 @@ struct AISolver: Sendable {
     }
 }
 
-// MARK: - 8. GameModel ViewModel
+// MARK: - 9. GameModel ViewModel (修补 P0-2, P0-3, P1-3, P1-4, P1-6, P2-4, P2-7)
 
 @MainActor
 final class GameModel: ObservableObject {
@@ -1097,6 +1532,7 @@ final class GameModel: ObservableObject {
         didSet {
             UserDefaults.standard.set(boardSize, forKey: "CW_Saved_BoardSize")
             syncRoomConfigToPeers()
+            updateCachedPlayableCells()
         }
     }
     @Published var isRandomFirstPlayer: Bool {
@@ -1105,12 +1541,17 @@ final class GameModel: ObservableObject {
             syncRoomConfigToPeers()
         }
     }
-    @Published var board: [[Cell]] = []
+    @Published var board: [[Cell]] = [] {
+        didSet { updateCachedPlayableCells() }
+    }
     @Published var playerNames: [String] {
         didSet { debounceSave() }
     }
     @Published var playerTypes: [PlayerControlType] {
-        didSet { debounceSave() }
+        didSet {
+            debounceSave()
+            updateCachedActivePlayers()
+        }
     }
     @Published var colors: [Color] {
         didSet { debounceSave() }
@@ -1118,25 +1559,41 @@ final class GameModel: ObservableObject {
     @Published var emojis: [String?] {
         didSet { debounceSave() }
     }
-    @Published var currentPlayer: Int = 0
+    @Published var currentPlayer: Int = 0 {
+        didSet { updateCachedPlayableCells() }
+    }
     @Published var myPlayerIndex: Int = 0
     @Published var hasEntered: [Bool] = Array(repeating: false, count: PlayerPreset.maxPlayers)
-    @Published var eliminated: [Bool] = Array(repeating: false, count: PlayerPreset.maxPlayers)
+    @Published var eliminated: [Bool] = Array(repeating: false, count: PlayerPreset.maxPlayers) {
+        didSet { updateCachedPlayableCells() }
+    }
     @Published var isProcessingCascade: Bool = false
     @Published var winnerIndex: Int? = nil
     @Published var showControlSheet: Bool = false
     @Published var flyingOrbs: [FlyingOrb] = []
     @Published var emphasizedCells: Set<Int> = []
     
+    // P1-3 & P1-4 修复：缓存 activePlayerIndices 与 playableCells，减少每帧 $O(N^2)$ 计算与堆分配
+    @Published private(set) var activePlayerIndices: [Int] = []
+    @Published private(set) var playableCells: Set<Int> = []
+    
     private var p2pCancellable: AnyCancellable? = nil
     private var aiTask: Task<Void, Never>? = nil
     private var saveWorkItem: DispatchWorkItem? = nil
     
-    var activePlayerIndices: [Int] {
-        playerTypes.enumerated().compactMap { $1 != .disabled ? $0 : nil }
+    private func updateCachedActivePlayers() {
+        self.activePlayerIndices = playerTypes.enumerated().compactMap { $1 != .disabled ? $0 : nil }
+        updateCachedPlayableCells()
     }
     
-    var playableCells: Set<Int> {
+    // P2-7 修复：如果当前玩家已被淘汰，直接返回 []，彻底封堵落子漏洞
+    private func updateCachedPlayableCells() {
+        guard currentPlayer >= 0 && currentPlayer < PlayerPreset.maxPlayers,
+              !eliminated[currentPlayer] else {
+            self.playableCells = []
+            return
+        }
+        
         let ownsAny = board.flatMap { $0 }.contains { $0.owner == currentPlayer }
         var indices = Set<Int>()
         for r in 0..<boardSize {
@@ -1148,7 +1605,7 @@ final class GameModel: ObservableObject {
                 }
             }
         }
-        return indices
+        self.playableCells = indices
     }
     
     init() {
@@ -1188,18 +1645,26 @@ final class GameModel: ObservableObject {
             self.emojis = Array(repeating: nil, count: PlayerPreset.maxPlayers)
         }
         
+        updateCachedActivePlayers()
         setupP2PListener()
         resetGame()
     }
     
+    // P0-1 & P0-2 & P2-2 修复：解析管道消息，增加严苛的 P2P 落子回合与网络类型校验
     private func setupP2PListener() {
-        p2pCancellable = P2PNetworkManager.shared.$receivedPacket
-            .compactMap { $0 }
+        p2pCancellable?.cancel()
+        p2pCancellable = P2PNetworkManager.shared.packetSubject
             .receive(on: DispatchQueue.main)
             .sink { [weak self] packet in
                 guard let self = self else { return }
-                if packet.action == .playerMove, let r = packet.row, let c = packet.col {
-                    self.play(row: r, column: c)
+                if packet.action == .playerMove, let r = packet.row, let c = packet.col, let pIdx = packet.playerIndex {
+                    if pIdx == self.currentPlayer && self.playerTypes[pIdx] == .p2pNetwork {
+                        self.play(row: r, column: c)
+                    }
+                } else if packet.action == .syncRequest {
+                    if P2PNetworkManager.shared.isHost {
+                        self.syncRoomConfigToPeers()
+                    }
                 } else if packet.action == .hostConfig {
                     if let names = packet.playerNames { self.playerNames = names }
                     if let types = packet.playerTypes { self.playerTypes = types }
@@ -1246,10 +1711,12 @@ final class GameModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: item)
     }
     
+    // P2-4 修复：补全索引越界保护逻辑
     func tryUpdatePlayerEmoji(at index: Int, newEmoji: String?) -> Bool {
+        guard index >= 0 && index < PlayerPreset.maxPlayers, index < emojis.count else { return false }
         if let emoji = newEmoji, !emoji.isEmpty {
             for i in 0..<PlayerPreset.maxPlayers where i != index {
-                if emojis[i] == emoji {
+                if emojis[safe: i] == emoji {
                     return false
                 }
             }
@@ -1260,9 +1727,10 @@ final class GameModel: ObservableObject {
     }
     
     func updatePlayerColor(at index: Int, newColor: Color) {
+        guard index >= 0 && index < colors.count else { return }
         colors[index] = newColor
         for otherIdx in 0..<PlayerPreset.maxPlayers where otherIdx != index {
-            if colors[otherIdx].isSimilar(to: newColor) {
+            if colors[safe: otherIdx]?.isSimilar(to: newColor) == true {
                 if let alternative = PlayerPreset.palettePool.first(where: { poolColor in
                     !colors.contains(where: { $0.isSimilar(to: poolColor) })
                 }) {
@@ -1311,8 +1779,15 @@ final class GameModel: ObservableObject {
         NeuralAISolver.shared.reloadModels()
     }
     
+    // P0-3 修复：修改当前回合玩家控制类型时，先显式取消当前执行中的 AI 异步任务
     func updatePlayerType(at index: Int, to newType: PlayerControlType) {
         guard index >= 0 && index < PlayerPreset.maxPlayers else { return }
+        
+        if index == currentPlayer {
+            aiTask?.cancel()
+            aiTask = nil
+        }
+        
         playerTypes[index] = newType
         syncRoomConfigToPeers()
         
@@ -1321,8 +1796,10 @@ final class GameModel: ObservableObject {
         }
     }
     
+    // P1-6 修复：入口强校验 playableCells，防止并发或延迟落子到非法格
     func play(row: Int, column: Int) {
-        guard !isProcessingCascade, winnerIndex == nil else { return }
+        let flatIdx = row * boardSize + column
+        guard !isProcessingCascade, winnerIndex == nil, playableCells.contains(flatIdx) else { return }
         
         Haptics.shared.lightImpact()
         
@@ -1440,11 +1917,12 @@ final class GameModel: ObservableObject {
         }
     }
     
+    // P1-2 修复：已淘汰玩家包含在逻辑盘中，避免无法入场的极端卡死死锁
     private func checkGameOver() -> Bool {
         let alive = activePlayerIndices.filter { !eliminated[$0] }
-        let allEntered = activePlayerIndices.allSatisfy { hasEntered[$0] }
+        let allEnteredOrEliminated = activePlayerIndices.allSatisfy { hasEntered[$0] || eliminated[$0] }
         
-        if allEntered && alive.count <= 1 {
+        if allEnteredOrEliminated && alive.count <= 1 {
             winnerIndex = alive.first
             Haptics.shared.heavyImpact()
             return true
@@ -1454,13 +1932,14 @@ final class GameModel: ObservableObject {
     
     private func advanceToNextTurn() {
         let active = activePlayerIndices
-        guard let idx = active.firstIndex(of: currentPlayer) else { return }
+        guard !active.isEmpty, let idx = active.firstIndex(of: currentPlayer) else { return }
         
         var nextIdx = (idx + 1) % active.count
-        var count = 0
-        while eliminated[active[nextIdx]] && count < active.count {
+        var loopCount = 0
+        
+        while (eliminated[active[nextIdx]] || playerTypes[active[nextIdx]] == .disabled) && loopCount < active.count {
             nextIdx = (nextIdx + 1) % active.count
-            count += 1
+            loopCount += 1
         }
         
         currentPlayer = active[nextIdx]
@@ -1495,7 +1974,7 @@ final class GameModel: ObservableObject {
     }
 }
 
-// MARK: - 9. 棋盘视图
+// MARK: - 10. 棋盘视图
 
 struct BoardView: View {
     @ObservedObject var game: GameModel
@@ -1557,7 +2036,7 @@ struct BoardView: View {
     }
 }
 
-// MARK: - 10. 单元格视图
+// MARK: - 11. 单元格视图
 
 struct CellView: View, Equatable {
     let cell: Cell
@@ -1596,7 +2075,7 @@ struct CellView: View, Equatable {
     }
 }
 
-// MARK: - 11. 棋子外观视图
+// MARK: - 12. 棋子外观视图
 
 struct PieceView: View {
     let color: Color
@@ -1641,7 +2120,7 @@ struct PieceView: View {
     }
 }
 
-// MARK: - 12. 棋子点数排列视图
+// MARK: - 13. 棋子点数排列视图
 
 struct DotPattern: View {
     let count: Int
@@ -1703,7 +2182,7 @@ struct DotPattern: View {
     }
 }
 
-// MARK: - 13. Emoji 选择器 Sheet
+// MARK: - 14. Emoji 选择器 Sheet
 
 struct EmojiPickerSheet: View {
     @ObservedObject var game: GameModel
@@ -1797,7 +2276,7 @@ struct EmojiPickerSheet: View {
                 
                 Spacer()
             }
-            .navigationTitle("选择 \(game.playerNames[playerIndex]) 的棋子样式")
+            .navigationTitle("选择 \(game.playerNames[safe: playerIndex] ?? "玩家") 的棋子样式")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 Button("取消") { dismiss() }
@@ -1807,7 +2286,13 @@ struct EmojiPickerSheet: View {
     }
 }
 
-// MARK: - 14. 单机/本地设置 View
+extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
+
+// MARK: - 15. 单机/本地设置 View
 
 struct LocalGameSetupView: View {
     @ObservedObject var game: GameModel
@@ -1852,36 +2337,39 @@ struct LocalGameSetupView: View {
             .glassEffect(.regular, in: .rect(cornerRadius: 18))
             
             VStack(spacing: 10) {
-                ForEach(0..<PlayerPreset.maxPlayers, id: \.self) { idx in
+                ForEach(0..<min(game.playerNames.count, PlayerPreset.maxPlayers), id: \.self) { idx in
                     HStack(spacing: 10) {
                         Button(action: { selectedPlayerForEmoji = idx }) {
                             ZStack {
                                 Circle()
-                                    .fill(game.colors[idx])
+                                    .fill(game.colors[safe: idx] ?? .gray)
                                     .frame(width: 28, height: 28)
                                 
-                                if let em = game.emojis[idx], !em.isEmpty {
-                                    Text(em).font(.caption)
+                                if let em = game.emojis[safe: idx], let emoji = em, !emoji.isEmpty {
+                                    Text(emoji).font(.caption)
                                 }
                             }
                         }
                         
                         ColorPicker("", selection: Binding(
-                            get: { game.colors[idx] },
+                            get: { game.colors[safe: idx] ?? .red },
                             set: { game.updatePlayerColor(at: idx, newColor: $0) }
                         ))
                         .labelsHidden()
                         
-                        TextField("名称", text: $game.playerNames[idx])
-                            .foregroundColor(.white)
-                            .font(.subheadline)
-                            .bold()
-                            .textFieldStyle(.plain)
+                        TextField("名称", text: Binding(
+                            get: { game.playerNames[safe: idx] ?? "玩家\(idx+1)" },
+                            set: { if idx < game.playerNames.count { game.playerNames[idx] = $0 } }
+                        ))
+                        .foregroundColor(.white)
+                        .font(.subheadline)
+                        .bold()
+                        .textFieldStyle(.plain)
                         
                         Spacer()
                         
                         Picker("Player Type", selection: Binding(
-                            get: { game.playerTypes[idx] },
+                            get: { game.playerTypes[safe: idx] ?? .disabled },
                             set: { game.updatePlayerType(at: idx, to: $0) }
                         )) {
                             ForEach(localAvailableTypes) { type in
@@ -1921,7 +2409,7 @@ struct LocalGameSetupView: View {
     }
 }
 
-// MARK: - 15. 近场搜寻内嵌式菜单 View
+// MARK: - 16. 近场搜寻内嵌式菜单 View
 
 struct LocalDeviceBrowserInlineView: View {
     @ObservedObject var p2pManager = P2PNetworkManager.shared
@@ -2016,7 +2504,7 @@ struct LocalDeviceBrowserInlineView: View {
     }
 }
 
-// MARK: - 16. 4 人房间大厅 View
+// MARK: - 17. 4 人房间大厅 View
 
 struct RoomLobbyView: View {
     @ObservedObject var game: GameModel
@@ -2087,7 +2575,7 @@ struct RoomLobbyView: View {
             }
             
             VStack(spacing: 10) {
-                ForEach(0..<min(4, PlayerPreset.maxPlayers), id: \.self) { idx in
+                ForEach(0..<min(game.playerNames.count, 4), id: \.self) { idx in
                     let isMySeat = (idx == game.myPlayerIndex)
                     
                     HStack {
@@ -2096,11 +2584,11 @@ struct RoomLobbyView: View {
                         }) {
                             ZStack {
                                 Circle()
-                                    .fill(game.colors[idx])
+                                    .fill(game.colors[safe: idx] ?? .gray)
                                     .frame(width: 28, height: 28)
                                 
-                                if let em = game.emojis[idx] {
-                                    Text(em).font(.caption)
+                                if let em = game.emojis[safe: idx], let emoji = em {
+                                    Text(emoji).font(.caption)
                                 }
                             }
                         }
@@ -2108,13 +2596,13 @@ struct RoomLobbyView: View {
                         
                         if isMySeat {
                             ColorPicker("", selection: Binding(
-                                get: { game.colors[idx] },
+                                get: { game.colors[safe: idx] ?? .red },
                                 set: { game.updatePlayerColor(at: idx, newColor: $0) }
                             ))
                             .labelsHidden()
                         }
                         
-                        Text(game.playerNames[idx] + (isMySeat ? " (我)" : ""))
+                        Text((game.playerNames[safe: idx] ?? "玩家\(idx+1)") + (isMySeat ? " (我)" : ""))
                             .font(.subheadline)
                             .bold()
                             .foregroundColor(isMySeat ? .cyan : .white)
@@ -2123,7 +2611,7 @@ struct RoomLobbyView: View {
                         
                         if p2pManager.isHost {
                             Picker("", selection: Binding(
-                                get: { game.playerTypes[idx] },
+                                get: { game.playerTypes[safe: idx] ?? .disabled },
                                 set: { game.updatePlayerType(at: idx, to: $0) }
                             )) {
                                 ForEach(PlayerControlType.allCases) { type in
@@ -2133,7 +2621,7 @@ struct RoomLobbyView: View {
                             .pickerStyle(.menu)
                             .tint(.white)
                         } else {
-                            Text(game.playerTypes[idx].rawValue)
+                            Text((game.playerTypes[safe: idx] ?? .disabled).rawValue)
                                 .font(.caption)
                                 .foregroundColor(.gray)
                         }
@@ -2172,7 +2660,7 @@ struct RoomLobbyView: View {
     }
 }
 
-// MARK: - 17. 联机设置 View
+// MARK: - 18. 联机设置 View (修补 P2-2)
 
 enum ActiveOnlineMode {
     case none
@@ -2188,6 +2676,7 @@ struct OnlineGameSetupView: View {
     
     @State private var activeMode: ActiveOnlineMode = .none
     @State private var showAlertError: Bool = false
+    @State private var p2pConnectionSubscription: AnyCancellable? = nil
     
     var body: some View {
         VStack(spacing: 14) {
@@ -2209,6 +2698,8 @@ struct OnlineGameSetupView: View {
                     game: game,
                     onExitLobby: {
                         activeMode = .none
+                        p2pConnectionSubscription?.cancel()
+                        p2pConnectionSubscription = nil
                     },
                     onStartGame: onStartGame
                 )
@@ -2257,19 +2748,23 @@ struct OnlineGameSetupView: View {
                         LocalDeviceBrowserInlineView(
                             onSelectDevice: { device in
                                 p2pManager.connectToDevice(device)
-                                let cancellable = p2pManager.$isConnected
+                                p2pConnectionSubscription?.cancel()
+                                p2pConnectionSubscription = p2pManager.$isConnected
                                     .filter { $0 }
+                                    .first()
+                                    .receive(on: DispatchQueue.main)
                                     .sink { _ in
-                                        Task { @MainActor in
-                                            game.playerNames[1] = p2pManager.myNickname
-                                            game.myPlayerIndex = 1
-                                            activeMode = .localJoined
-                                        }
+                                        game.playerNames[1] = p2pManager.myNickname
+                                        game.myPlayerIndex = 1
+                                        activeMode = .localJoined
+                                        // P2-2 修复：连入房间后，主动发 syncRequest 补充配置
+                                        p2pManager.sendPacket(P2PPacket(action: .syncRequest, senderID: p2pManager.myNickname, row: nil, col: nil, boardSize: nil, isRandomFirstPlayer: nil, playerIndex: nil, playerNames: nil, playerTypes: nil, colorsHex: nil, emojis: nil))
                                     }
-                                _ = cancellable
                             },
                             onCancel: {
                                 p2pManager.stopP2P()
+                                p2pConnectionSubscription?.cancel()
+                                p2pConnectionSubscription = nil
                                 activeMode = .none
                             }
                         )
@@ -2288,7 +2783,7 @@ struct OnlineGameSetupView: View {
     }
 }
 
-// MARK: - 18. 主菜单
+// MARK: - 19. 主菜单
 
 struct StartMenuView: View {
     @ObservedObject var game: GameModel
@@ -2366,7 +2861,7 @@ extension Int: @retroactive Identifiable {
     public var id: Int { self }
 }
 
-// MARK: - 19. 随机先手轮盘抽签 Overlay (采用精准原样参考代码动画)
+// MARK: - 20. 随机先手轮盘抽签 Overlay (修补 P2-6)
 
 struct RandomPlayerWheelOverlay: View {
     @ObservedObject var game: GameModel
@@ -2388,20 +2883,20 @@ struct RandomPlayerWheelOverlay: View {
                 
                 HStack(spacing: 12) {
                     ForEach(activeIndices, id: \.self) { pIdx in
-                        let isHighlighted = (activeIndices[highlightedIndex] == pIdx)
+                        let isHighlighted = (activeIndices.indices.contains(highlightedIndex) && activeIndices[highlightedIndex] == pIdx)
                         VStack(spacing: 6) {
                             ZStack {
                                 Circle()
-                                    .fill(game.colors[pIdx])
+                                    .fill(game.colors[safe: pIdx] ?? .gray)
                                     .frame(width: 48, height: 48)
                                 
-                                if let em = game.emojis[pIdx], !em.isEmpty {
-                                    Text(em).font(.title2)
+                                if let em = game.emojis[safe: pIdx], let emoji = em, !emoji.isEmpty {
+                                    Text(emoji).font(.title2)
                                 }
                             }
                             .scaleEffect(isHighlighted ? 1.25 : 0.95)
                             
-                            Text(game.playerNames[pIdx])
+                            Text(game.playerNames[safe: pIdx] ?? "玩家")
                                 .font(.caption2)
                                 .bold()
                                 .foregroundColor(isHighlighted ? .white : .gray)
@@ -2420,11 +2915,14 @@ struct RandomPlayerWheelOverlay: View {
         }
     }
     
+    // P2-6 修复：增加空数组检查，彻底消除强制解包崩溃风险
     private func startFastWheelSpin() {
         let count = activeIndices.count
-        guard count > 0 else { return }
+        guard count > 0, let targetWinner = activeIndices.randomElement() else {
+            onFinished(0)
+            return
+        }
         
-        let targetWinner = activeIndices.randomElement()!
         let totalSteps = 16
         
         Task {
@@ -2452,7 +2950,7 @@ struct RandomPlayerWheelOverlay: View {
     }
 }
 
-// MARK: - 20. 主对局视图
+// MARK: - 21. 主对局视图
 
 struct GamePlayView: View {
     @ObservedObject var game: GameModel
@@ -2484,15 +2982,15 @@ struct GamePlayView: View {
                     HStack(spacing: 8) {
                         ZStack {
                             Circle()
-                                .fill(game.colors[game.currentPlayer])
+                                .fill(game.colors[safe: game.currentPlayer] ?? .blue)
                                 .frame(width: 14, height: 14)
                             
-                            if let em = game.emojis[game.currentPlayer], !em.isEmpty {
-                                Text(em).font(.caption2)
+                            if let em = game.emojis[safe: game.currentPlayer], let emoji = em, !emoji.isEmpty {
+                                Text(emoji).font(.caption2)
                             }
                         }
                         
-                        Text("\(game.playerNames[game.currentPlayer]) 回合")
+                        Text("\(game.playerNames[safe: game.currentPlayer] ?? "玩家") 回合")
                             .font(.system(size: 16, weight: .bold, design: .rounded))
                             .foregroundColor(.white)
                     }
@@ -2528,15 +3026,15 @@ struct GamePlayView: View {
                 VStack(spacing: 24) {
                     ZStack {
                         Circle()
-                            .fill(game.colors[wIdx].opacity(0.3))
+                            .fill((game.colors[safe: wIdx] ?? .yellow).opacity(0.3))
                             .frame(width: 90, height: 90)
                         
                         Circle()
-                            .stroke(game.colors[wIdx], lineWidth: 3)
+                            .stroke(game.colors[safe: wIdx] ?? .yellow, lineWidth: 3)
                             .frame(width: 80, height: 80)
                         
-                        if let em = game.emojis[wIdx], !em.isEmpty {
-                            Text(em).font(.system(size: 42))
+                        if let em = game.emojis[safe: wIdx], let emoji = em, !emoji.isEmpty {
+                            Text(emoji).font(.system(size: 42))
                         } else {
                             Image(systemName: "crown.fill")
                                 .font(.system(size: 38))
@@ -2544,7 +3042,7 @@ struct GamePlayView: View {
                         }
                     }
                     
-                    Text("\(game.playerNames[wIdx]) 获得胜利！")
+                    Text("\(game.playerNames[safe: wIdx] ?? "玩家") 获得胜利！")
                         .font(.title)
                         .bold()
                         .foregroundColor(.white)
@@ -2594,7 +3092,7 @@ struct GamePlayView: View {
     }
 }
 
-// MARK: - 21. 控制面板 Sheet
+// MARK: - 22. 控制面板 Sheet
 
 struct PlayerTakeoverSheet: View {
     @ObservedObject var game: GameModel
@@ -2621,12 +3119,12 @@ struct PlayerTakeoverSheet: View {
                 Section(header: Text("实时接管控制（AI / P2P 代打）")) {
                     ForEach(game.activePlayerIndices, id: \.self) { idx in
                         HStack {
-                            Circle().fill(game.colors[idx]).frame(width: 16, height: 16)
-                            Text(game.playerNames[idx]).font(.body)
+                            Circle().fill(game.colors[safe: idx] ?? .gray).frame(width: 16, height: 16)
+                            Text(game.playerNames[safe: idx] ?? "玩家\(idx+1)").font(.body)
                             Spacer()
                             
                             Picker("", selection: Binding(
-                                get: { game.playerTypes[idx] },
+                                get: { game.playerTypes[safe: idx] ?? .disabled },
                                 set: { game.updatePlayerType(at: idx, to: $0) }
                             )) {
                                 ForEach(PlayerControlType.allCases.filter { $0 != .disabled }) { type in
@@ -2648,7 +3146,7 @@ struct PlayerTakeoverSheet: View {
     }
 }
 
-// MARK: - 22. 根视图 ContentView
+// MARK: - 23. 根视图 ContentView
 
 struct ContentView: View {
     @StateObject private var game = GameModel()
@@ -2663,7 +3161,7 @@ struct ContentView: View {
             RadialGradient(
                 colors: [
                     isGameStarted
-                    ? game.colors[game.currentPlayer].opacity(0.25)
+                    ? (game.colors[safe: game.currentPlayer] ?? .blue).opacity(0.25)
                     : Color(red: 0.04, green: 0.12, blue: 0.32).opacity(0.85),
                     Color.clear
                 ],
