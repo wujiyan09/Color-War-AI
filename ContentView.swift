@@ -1832,7 +1832,7 @@ final class GameModel: ObservableObject {
     }
 }
 
-// MARK: - 9. 棋盘视图 (iPad/iPhone 自适应全屏重构)
+// MARK: - 9. 棋盘视图 (彻底解决 iPad 全屏模式下的布局挤压问题)
 
 struct BoardView: View {
     @ObservedObject var game: GameModel
@@ -1840,9 +1840,9 @@ struct BoardView: View {
     
     var body: some View {
         GeometryReader { proxy in
-            let availableWidth = proxy.size.width - 24
-            let availableHeight = proxy.size.height - 24
-            let minDim = max(100, min(availableWidth, availableHeight))
+            let availableWidth = max(10, proxy.size.width - 24)
+            let availableHeight = max(10, proxy.size.height - 24)
+            let minDim = min(availableWidth, availableHeight)
             
             let side = (minDim - gap * CGFloat(game.boardSize - 1)) / CGFloat(game.boardSize)
             let actualBoardDimension = side * CGFloat(game.boardSize) + gap * CGFloat(game.boardSize - 1)
@@ -1891,9 +1891,10 @@ struct BoardView: View {
                 }
             }
             .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
-            .frame(width: actualBoardDimension + 12, height: actualBoardDimension + 12)
+            .frame(width: max(0, actualBoardDimension + 12), height: max(0, actualBoardDimension + 12))
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         }
+        .clipped()
         .onDisappear {
             game.exitToMenu()
         }
@@ -2157,7 +2158,7 @@ extension Array {
     }
 }
 
-// MARK: - 14. 单机/本地设置 View (为所有卡片加上 .interactive 属性)
+// MARK: - 14. 单机/本地设置 View
 
 struct LocalGameSetupView: View {
     @ObservedObject var game: GameModel
@@ -2548,7 +2549,7 @@ struct RoomLobbyView: View {
     }
 }
 
-// MARK: - 17. 联机设置 View (带有 .interactive 卡片)
+// MARK: - 17. 联机设置 View
 
 enum ActiveOnlineMode {
     case none
@@ -2670,7 +2671,7 @@ struct OnlineGameSetupView: View {
     }
 }
 
-// MARK: - 18. 主菜单 View (透传全局渐变/背景，消除黑色遮罩)
+// MARK: - 18. 主菜单 View (完全穿透渲染底部渐变/图层，彻底消除黑屏)
 
 struct StartMenuView: View {
     @ObservedObject var game: GameModel
@@ -2682,44 +2683,40 @@ struct StartMenuView: View {
     
     var body: some View {
         NavigationStack {
-            ZStack {
-                Color.clear
+            VStack(spacing: 0) {
+                Spacer()
                 
-                VStack(spacing: 0) {
-                    Spacer()
-                    
-                    GlassEffectContainer {
-                        VStack(spacing: 16) {
-                            Text("COLOR WAR")
-                                .font(.system(size: 36, weight: .black, design: .rounded))
-                                .foregroundStyle(
-                                    LinearGradient(
-                                        colors: [.white, .white.opacity(0.7)],
-                                        startPoint: .top,
-                                        endPoint: .bottom
-                                    )
+                GlassEffectContainer {
+                    VStack(spacing: 16) {
+                        Text("COLOR WAR")
+                            .font(.system(size: 36, weight: .black, design: .rounded))
+                            .foregroundStyle(
+                                LinearGradient(
+                                    colors: [.white, .white.opacity(0.7)],
+                                    startPoint: .top,
+                                    endPoint: .bottom
                                 )
-                            
-                            if selectedTab == 0 {
-                                LocalGameSetupView(game: game) {
-                                    isSpinningRandomWheel = true
-                                }
-                                .transition(.opacity.combined(with: .scale(scale: 0.98)))
-                            } else {
-                                OnlineGameSetupView(game: game) {
-                                    isSpinningRandomWheel = true
-                                }
-                                .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                            )
+                        
+                        if selectedTab == 0 {
+                            LocalGameSetupView(game: game) {
+                                isSpinningRandomWheel = true
                             }
+                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                        } else {
+                            OnlineGameSetupView(game: game) {
+                                isSpinningRandomWheel = true
+                            }
+                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
                         }
                     }
-                    .frame(maxWidth: 440)
-                    
-                    Spacer()
                 }
-                .padding(.horizontal, 20)
+                .frame(maxWidth: 440)
+                
+                Spacer()
             }
-            .background(Color.clear)
+            .padding(.horizontal, 20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .toolbar {
                 ToolbarItem(placement: .principal) {
                     Picker("Game Mode", selection: $selectedTab) {
@@ -2769,7 +2766,8 @@ struct StartMenuView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
         }
-        .background(Color.clear)
+        .scrollContentBackground(.hidden)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -2862,7 +2860,7 @@ struct RandomPlayerWheelOverlay: View {
     }
 }
 
-// MARK: - 20. 主对局视图 (全屏约束重组)
+// MARK: - 20. 主对局视图 (增加高优先级安全布局，防止顶部栏挤出屏幕)
 
 struct GamePlayView: View {
     @ObservedObject var game: GameModel
@@ -2924,14 +2922,14 @@ struct GamePlayView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 12)
-                .zIndex(20)
+                .layoutPriority(1)
                 
-                Spacer(minLength: 12)
+                Spacer(minLength: 8)
                 
                 BoardView(game: game)
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, 12)
                 
-                Spacer(minLength: 12)
+                Spacer(minLength: 8)
             }
             .safeAreaPadding(.all)
             
@@ -3062,7 +3060,7 @@ struct PlayerTakeoverSheet: View {
     }
 }
 
-// MARK: - 22. 根视图 ContentView (精准渲染暗蓝/黑深色渐变与相册背景)
+// MARK: - 22. 根视图 ContentView (全屏图层约束与大范围渐变光晕)
 
 struct ContentView: View {
     @StateObject private var game = GameModel()
@@ -3078,19 +3076,20 @@ struct ContentView: View {
                 Image(uiImage: customImg)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
+                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
                     .ignoresSafeArea()
                     .overlay(Color.black.opacity(0.35))
             } else {
                 RadialGradient(
                     colors: [
                         isGameStarted
-                        ? (game.colors[safe: game.currentPlayer] ?? .blue).opacity(0.35)
-                        : Color(red: 0.08, green: 0.28, blue: 0.65).opacity(0.85),
+                        ? (game.colors[safe: game.currentPlayer] ?? .blue).opacity(0.40)
+                        : Color(red: 0.08, green: 0.28, blue: 0.68).opacity(0.90),
                         Color(red: 0.03, green: 0.05, blue: 0.10)
                     ],
                     center: .center,
-                    startRadius: 50,
-                    endRadius: 600
+                    startRadius: 80,
+                    endRadius: 900
                 )
                 .ignoresSafeArea()
                 .animation(.easeInOut(duration: 0.8), value: isGameStarted ? game.currentPlayer : -1)
