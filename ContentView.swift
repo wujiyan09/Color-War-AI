@@ -1810,7 +1810,7 @@ final class GameModel: ObservableObject {
     }
 }
 
-// MARK: - 9. 棋盘视图
+// MARK: - 9. 棋盘视图 (适配多任务/iPadOS 死区及自适应尺寸)
 
 struct BoardView: View {
     @ObservedObject var game: GameModel
@@ -1818,7 +1818,10 @@ struct BoardView: View {
     
     var body: some View {
         GeometryReader { proxy in
-            let side = (proxy.size.width - 12 - gap * CGFloat(game.boardSize - 1)) / CGFloat(game.boardSize)
+            // 计算可用容器的正方形内切尺寸（精准自适应屏幕或窗口）
+            let minDim = min(proxy.size.width, proxy.size.height)
+            let side = (minDim - 12 - gap * CGFloat(game.boardSize - 1)) / CGFloat(game.boardSize)
+            let actualBoardDimension = side * CGFloat(game.boardSize) + gap * CGFloat(game.boardSize - 1) + 12
             
             ZStack(alignment: .topLeading) {
                 VStack(spacing: gap) {
@@ -1835,7 +1838,7 @@ struct BoardView: View {
                                     active: game.emphasizedCells.contains(index)
                                 )
                                 .equatable()
-                                .frame(width: side, height: side)
+                                .frame(width: max(0, side), height: max(0, side))
                                 .contentShape(Rectangle())
                                 .onTapGesture {
                                     if game.playerTypes[safe: game.currentPlayer] == .human && game.playableCells.contains(index) {
@@ -1864,6 +1867,8 @@ struct BoardView: View {
                 }
             }
             .glassEffect(.regular, in: .rect(cornerRadius: 16))
+            .frame(width: actualBoardDimension, height: actualBoardDimension)
+            .position(x: proxy.size.width / 2, y: proxy.size.height / 2) // 居中于多任务可用的父容器中
         }
         .aspectRatio(1, contentMode: .fit)
         .onDisappear {
@@ -2029,88 +2034,89 @@ struct EmojiPickerSheet: View {
     
     var body: some View {
         NavigationStack {
-            VStack(spacing: 20) {
-                if let err = errorMessage {
-                    Text(err)
-                        .foregroundColor(.red)
-                        .font(.caption)
-                        .bold()
-                }
-                
-                Button(action: {
-                    _ = game.tryUpdatePlayerEmoji(at: playerIndex, newEmoji: nil)
-                    dismiss()
-                }) {
-                    HStack {
-                        Image(systemName: "paintpalette.fill")
-                        Text("使用默认纯色/拟态棋子")
+            ScrollView {
+                VStack(spacing: 20) {
+                    if let err = errorMessage {
+                        Text(err)
+                            .foregroundColor(.red)
+                            .font(.caption)
+                            .bold()
                     }
-                    .font(.subheadline)
-                    .bold()
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .contentShape(Capsule())
-                    .glassEffect(.regular.interactive(), in: .capsule)
-                }
-                .buttonStyle(.plain)
-                .padding(.top)
-                
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 6), spacing: 16) {
-                    ForEach(PlayerPreset.emojiPresets, id: \.self) { emoji in
-                        let isOccupied = game.emojis.enumerated().contains { $0.offset != playerIndex && $0.element == emoji }
-                        
-                        Button(action: {
-                            if game.tryUpdatePlayerEmoji(at: playerIndex, newEmoji: emoji) {
-                                dismiss()
-                            } else {
-                                errorMessage = "‘\(emoji)’ 已被占用！"
-                            }
-                        }) {
-                            ZStack {
-                                Circle()
-                                    .fill(isOccupied ? Color.red.opacity(0.2) : Color.white.opacity(0.1))
-                                Text(emoji)
-                                    .font(.title2)
-                            }
-                            .frame(width: 44, height: 44)
-                            .overlay(
-                                Circle().stroke(isOccupied ? Color.red.opacity(0.6) : Color.white.opacity(0.2), lineWidth: 1)
-                            )
-                        }
-                    }
-                }
-                .padding()
-                
-                Divider().background(Color.white.opacity(0.2))
-                
-                HStack {
-                    TextField("输入任意 Emoji", text: $customEmojiText)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 180)
                     
                     Button(action: {
-                        let trimmed = customEmojiText.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !trimmed.isEmpty {
-                            if game.tryUpdatePlayerEmoji(at: playerIndex, newEmoji: String(trimmed.prefix(1))) {
-                                dismiss()
-                            } else {
-                                errorMessage = "该 Emoji 已被占用！"
-                            }
-                        }
+                        _ = game.tryUpdatePlayerEmoji(at: playerIndex, newEmoji: nil)
+                        dismiss()
                     }) {
-                        Text("设定")
-                            .font(.subheadline)
-                            .bold()
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 8)
-                            .contentShape(Capsule())
-                            .glassEffect(.regular.tint(.darkNavyBlue).interactive(), in: .capsule)
+                        HStack {
+                            Image(systemName: "paintpalette.fill")
+                            Text("使用默认纯色/拟态棋子")
+                        }
+                        .font(.subheadline)
+                        .bold()
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .contentShape(Capsule())
+                        .glassEffect(.regular.interactive(), in: .capsule)
                     }
                     .buttonStyle(.plain)
+                    .padding(.top)
+                    
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 6), spacing: 16) {
+                        ForEach(PlayerPreset.emojiPresets, id: \.self) { emoji in
+                            let isOccupied = game.emojis.enumerated().contains { $0.offset != playerIndex && $0.element == emoji }
+                            
+                            Button(action: {
+                                if game.tryUpdatePlayerEmoji(at: playerIndex, newEmoji: emoji) {
+                                    dismiss()
+                                } else {
+                                    errorMessage = "‘\(emoji)’ 已被占用！"
+                                }
+                            }) {
+                                ZStack {
+                                    Circle()
+                                        .fill(isOccupied ? Color.red.opacity(0.2) : Color.white.opacity(0.1))
+                                    Text(emoji)
+                                        .font(.title2)
+                                }
+                                .frame(width: 44, height: 44)
+                                .overlay(
+                                    Circle().stroke(isOccupied ? Color.red.opacity(0.6) : Color.white.opacity(0.2), lineWidth: 1)
+                                )
+                            }
+                        }
+                    }
+                    .padding(.horizontal)
+                    
+                    Divider().background(Color.white.opacity(0.2))
+                    
+                    HStack {
+                        TextField("输入任意 Emoji", text: $customEmojiText)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 180)
+                        
+                        Button(action: {
+                            let trimmed = customEmojiText.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !trimmed.isEmpty {
+                                if game.tryUpdatePlayerEmoji(at: playerIndex, newEmoji: String(trimmed.prefix(1))) {
+                                    dismiss()
+                                } else {
+                                    errorMessage = "该 Emoji 已被占用！"
+                                }
+                            }
+                        }) {
+                            Text("设定")
+                                .font(.subheadline)
+                                .bold()
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                .contentShape(Capsule())
+                                .glassEffect(.regular.tint(.darkNavyBlue).interactive(), in: .capsule)
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
-                
-                Spacer()
+                .padding(.bottom, 20)
             }
             .navigationTitle("选择 \(game.playerNames[safe: playerIndex] ?? "玩家") 的棋子样式")
             .navigationBarTitleDisplayMode(.inline)
@@ -2128,7 +2134,7 @@ extension Array {
     }
 }
 
-// MARK: - 14. 单机/本地设置 View
+// MARK: - 14. 单机/本地设置 View (支持窗口高度自适应滚动)
 
 struct LocalGameSetupView: View {
     @ObservedObject var game: GameModel
@@ -2172,53 +2178,57 @@ struct LocalGameSetupView: View {
             .padding()
             .glassEffect(.regular, in: .rect(cornerRadius: 18))
             
-            VStack(spacing: 10) {
-                ForEach(0..<min(game.playerNames.count, PlayerPreset.maxPlayers), id: \.self) { idx in
-                    HStack(spacing: 10) {
-                        Button(action: { selectedPlayerForEmoji = IdentifiableInt(id: idx) }) {
-                            ZStack {
-                                Circle()
-                                    .fill(game.colors[safe: idx] ?? .gray)
-                                    .frame(width: 28, height: 28)
-                                
-                                if let em = game.emojis[safe: idx], let emoji = em, !emoji.isEmpty {
-                                    Text(emoji).font(.caption)
+            // 加入 ScrollView 防止 iPadOS 27 多任务/分屏高度较小时玩家列表内容被遮挡
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 10) {
+                    ForEach(0..<min(game.playerNames.count, PlayerPreset.maxPlayers), id: \.self) { idx in
+                        HStack(spacing: 10) {
+                            Button(action: { selectedPlayerForEmoji = IdentifiableInt(id: idx) }) {
+                                ZStack {
+                                    Circle()
+                                        .fill(game.colors[safe: idx] ?? .gray)
+                                        .frame(width: 28, height: 28)
+                                    
+                                    if let em = game.emojis[safe: idx], let emoji = em, !emoji.isEmpty {
+                                        Text(emoji).font(.caption)
+                                    }
                                 }
                             }
-                        }
-                        
-                        ColorPicker("", selection: Binding(
-                            get: { game.colors[safe: idx] ?? .red },
-                            set: { game.updatePlayerColor(at: idx, newColor: $0) }
-                        ))
-                        .labelsHidden()
-                        
-                        TextField("名称", text: Binding(
-                            get: { game.playerNames[safe: idx] ?? "玩家\(idx+1)" },
-                            set: { if idx < game.playerNames.count { game.playerNames[idx] = $0 } }
-                        ))
-                        .foregroundColor(.white)
-                        .font(.subheadline)
-                        .bold()
-                        .textFieldStyle(.plain)
-                        
-                        Spacer()
-                        
-                        Picker("Player Type", selection: Binding(
-                            get: { game.playerTypes[safe: idx] ?? .disabled },
-                            set: { game.updatePlayerType(at: idx, to: $0) }
-                        )) {
-                            ForEach(localAvailableTypes) { type in
-                                Text(type.rawValue).tag(type)
+                            
+                            ColorPicker("", selection: Binding(
+                                get: { game.colors[safe: idx] ?? .red },
+                                set: { game.updatePlayerColor(at: idx, newColor: $0) }
+                            ))
+                            .labelsHidden()
+                            
+                            TextField("名称", text: Binding(
+                                get: { game.playerNames[safe: idx] ?? "玩家\(idx+1)" },
+                                set: { if idx < game.playerNames.count { game.playerNames[idx] = $0 } }
+                            ))
+                            .foregroundColor(.white)
+                            .font(.subheadline)
+                            .bold()
+                            .textFieldStyle(.plain)
+                            
+                            Spacer()
+                            
+                            Picker("Player Type", selection: Binding(
+                                get: { game.playerTypes[safe: idx] ?? .disabled },
+                                set: { game.updatePlayerType(at: idx, to: $0) }
+                            )) {
+                                ForEach(localAvailableTypes) { type in
+                                    Text(type.rawValue).tag(type)
+                                }
                             }
+                            .pickerStyle(.menu)
+                            .tint(.white)
                         }
-                        .pickerStyle(.menu)
-                        .tint(.white)
+                        .padding(.horizontal, 8)
                     }
-                    .padding(.horizontal, 8)
                 }
+                .padding(12)
             }
-            .padding(12)
+            .frame(maxHeight: 280) // 约束最大可滚动高度以配合弹性动画
             .glassEffect(.regular, in: .rect(cornerRadius: 18))
             
             Button(action: onStartGame) {
@@ -2308,27 +2318,30 @@ struct LocalDeviceBrowserInlineView: View {
                     }
                     .padding()
                 } else {
-                    VStack(spacing: 8) {
-                        ForEach(p2pManager.discoveredDevices) { device in
-                            Button(action: { onSelectDevice(device) }) {
-                                HStack {
-                                    Image(systemName: "bonjour")
-                                        .foregroundColor(.green)
-                                    Text(device.displayName)
-                                        .bold()
-                                        .foregroundColor(.white)
-                                    Spacer()
-                                    Text("点击加入")
-                                        .font(.caption)
-                                        .foregroundColor(.cyan)
+                    ScrollView {
+                        VStack(spacing: 8) {
+                            ForEach(p2pManager.discoveredDevices) { device in
+                                Button(action: { onSelectDevice(device) }) {
+                                    HStack {
+                                        Image(systemName: "bonjour")
+                                            .foregroundColor(.green)
+                                        Text(device.displayName)
+                                            .bold()
+                                            .foregroundColor(.white)
+                                        Spacer()
+                                        Text("点击加入")
+                                            .font(.caption)
+                                            .foregroundColor(.cyan)
+                                    }
+                                    .padding(12)
+                                    .contentShape(Rectangle())
+                                    .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 12))
                                 }
-                                .padding(12)
-                                .contentShape(Rectangle())
-                                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 12))
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
                         }
                     }
+                    .frame(maxHeight: 180)
                 }
             }
         }
@@ -2407,62 +2420,65 @@ struct RoomLobbyView: View {
                 .glassEffect(.regular, in: .rect(cornerRadius: 18))
             }
             
-            VStack(spacing: 10) {
-                ForEach(0..<min(game.playerNames.count, 4), id: \.self) { idx in
-                    let isMySeat = (idx == game.myPlayerIndex)
-                    
-                    HStack {
-                        Button(action: {
-                            if isMySeat { selectedPlayerForEmoji = IdentifiableInt(id: idx) }
-                        }) {
-                            ZStack {
-                                Circle()
-                                    .fill(game.colors[safe: idx] ?? .gray)
-                                    .frame(width: 28, height: 28)
-                                
-                                if let em = game.emojis[safe: idx], let emoji = em {
-                                    Text(emoji).font(.caption)
+            ScrollView {
+                VStack(spacing: 10) {
+                    ForEach(0..<min(game.playerNames.count, 4), id: \.self) { idx in
+                        let isMySeat = (idx == game.myPlayerIndex)
+                        
+                        HStack {
+                            Button(action: {
+                                if isMySeat { selectedPlayerForEmoji = IdentifiableInt(id: idx) }
+                            }) {
+                                ZStack {
+                                    Circle()
+                                        .fill(game.colors[safe: idx] ?? .gray)
+                                        .frame(width: 28, height: 28)
+                                    
+                                    if let em = game.emojis[safe: idx], let emoji = em {
+                                        Text(emoji).font(.caption)
+                                    }
                                 }
                             }
-                        }
-                        .disabled(!isMySeat)
-                        
-                        if isMySeat {
-                            ColorPicker("", selection: Binding(
-                                get: { game.colors[safe: idx] ?? .red },
-                                set: { game.updatePlayerColor(at: idx, newColor: $0) }
-                            ))
-                            .labelsHidden()
-                        }
-                        
-                        Text((game.playerNames[safe: idx] ?? "玩家\(idx+1)") + (isMySeat ? " (我)" : ""))
-                            .font(.subheadline)
-                            .bold()
-                            .foregroundColor(isMySeat ? .cyan : .white)
-                        
-                        Spacer()
-                        
-                        if p2pManager.isHost {
-                            Picker("", selection: Binding(
-                                get: { game.playerTypes[safe: idx] ?? .disabled },
-                                set: { game.updatePlayerType(at: idx, to: $0) }
-                            )) {
-                                ForEach(PlayerControlType.allCases) { type in
-                                    Text(type.rawValue).tag(type)
-                                }
+                            .disabled(!isMySeat)
+                            
+                            if isMySeat {
+                                ColorPicker("", selection: Binding(
+                                    get: { game.colors[safe: idx] ?? .red },
+                                    set: { game.updatePlayerColor(at: idx, newColor: $0) }
+                                ))
+                                .labelsHidden()
                             }
-                            .pickerStyle(.menu)
-                            .tint(.white)
-                        } else {
-                            Text((game.playerTypes[safe: idx] ?? .disabled).rawValue)
-                                .font(.caption)
-                                .foregroundColor(.gray)
+                            
+                            Text((game.playerNames[safe: idx] ?? "玩家\(idx+1)") + (isMySeat ? " (我)" : ""))
+                                .font(.subheadline)
+                                .bold()
+                                .foregroundColor(isMySeat ? .cyan : .white)
+                            
+                            Spacer()
+                            
+                            if p2pManager.isHost {
+                                Picker("", selection: Binding(
+                                    get: { game.playerTypes[safe: idx] ?? .disabled },
+                                    set: { game.updatePlayerType(at: idx, to: $0) }
+                                )) {
+                                    ForEach(PlayerControlType.allCases) { type in
+                                        Text(type.rawValue).tag(type)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                                .tint(.white)
+                            } else {
+                                Text((game.playerTypes[safe: idx] ?? .disabled).rawValue)
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                            }
                         }
+                        .padding(10)
+                        .glassEffect(.regular, in: .rect(cornerRadius: 18))
                     }
-                    .padding(10)
-                    .glassEffect(.regular, in: .rect(cornerRadius: 18))
                 }
             }
+            .frame(maxHeight: 220)
             
             if p2pManager.isHost {
                 Button(action: onStartGame) {
@@ -2612,7 +2628,7 @@ struct OnlineGameSetupView: View {
     }
 }
 
-// MARK: - 18. 主菜单
+// MARK: - 18. 主菜单 (增加滚动与多任务安全区支持)
 
 struct StartMenuView: View {
     @ObservedObject var game: GameModel
@@ -2633,39 +2649,43 @@ struct StartMenuView: View {
                 )
                 .ignoresSafeArea()
                 
-                VStack(spacing: 0) {
-                    Spacer()
-                    
-                    GlassEffectContainer {
-                        VStack(spacing: 18) {
-                            Text("COLOR WAR")
-                                .font(.system(size: 38, weight: .black, design: .rounded))
-                                .foregroundStyle(
-                                    LinearGradient(
-                                        colors: [.white, .white.opacity(0.7)],
-                                        startPoint: .top,
-                                        endPoint: .bottom
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(spacing: 0) {
+                        Spacer(minLength: 20)
+                        
+                        GlassEffectContainer {
+                            VStack(spacing: 18) {
+                                Text("COLOR WAR")
+                                    .font(.system(size: 38, weight: .black, design: .rounded))
+                                    .foregroundStyle(
+                                        LinearGradient(
+                                            colors: [.white, .white.opacity(0.7)],
+                                            startPoint: .top,
+                                            endPoint: .bottom
+                                        )
                                     )
-                                )
-                            
-                            if selectedTab == 0 {
-                                LocalGameSetupView(game: game) {
-                                    isSpinningRandomWheel = true
+                                
+                                if selectedTab == 0 {
+                                    LocalGameSetupView(game: game) {
+                                        isSpinningRandomWheel = true
+                                    }
+                                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                                } else {
+                                    OnlineGameSetupView(game: game) {
+                                        isSpinningRandomWheel = true
+                                    }
+                                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
                                 }
-                                .transition(.opacity.combined(with: .scale(scale: 0.98)))
-                            } else {
-                                OnlineGameSetupView(game: game) {
-                                    isSpinningRandomWheel = true
-                                }
-                                .transition(.opacity.combined(with: .scale(scale: 0.98)))
                             }
                         }
+                        .frame(maxWidth: 460)
+                        .padding(.horizontal, 16)
+                        
+                        Spacer(minLength: 20)
                     }
-                    .frame(maxWidth: 420)
-                    
-                    Spacer()
+                    .frame(minHeight: UIScreen.main.bounds.height - 100)
                 }
-                .padding(.horizontal)
+                .safeAreaPadding(.bottom)
             }
             .toolbar {
                 ToolbarItem(placement: .principal) {
@@ -2731,6 +2751,7 @@ struct RandomPlayerWheelOverlay: View {
             .padding(32)
             .glassEffect(.regular, in: .rect(cornerRadius: 28))
             .frame(maxWidth: 380)
+            .padding(.horizontal, 20)
         }
         .onAppear {
             startFastWheelSpin()
@@ -2771,7 +2792,7 @@ struct RandomPlayerWheelOverlay: View {
     }
 }
 
-// MARK: - 20. 主对局视图
+// MARK: - 20. 主对局视图 (加入对局顶部栏/底部死区防御与棋盘绝对居中)
 
 struct GamePlayView: View {
     @ObservedObject var game: GameModel
@@ -2780,7 +2801,8 @@ struct GamePlayView: View {
     
     var body: some View {
         ZStack {
-            VStack {
+            VStack(spacing: 0) {
+                // 顶部控制条（严格限制在 Safe Area 死区内部）
                 HStack {
                     Button(action: {
                         game.exitToMenu()
@@ -2831,15 +2853,18 @@ struct GamePlayView: View {
                     }
                     .buttonStyle(.plain)
                 }
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
                 
-                Spacer()
+                Spacer(minLength: 12)
                 
+                // 棋盘自适应承载容器（防触碰系统死区）
                 BoardView(game: game)
+                    .padding(.horizontal, 12)
                 
-                Spacer()
+                Spacer(minLength: 12)
             }
-            .padding()
+            .safeAreaPadding(.all) // 精准避开状态栏与 Home Bar
             
             if let wIdx = game.winnerIndex {
                 Color.black.opacity(0.8).ignoresSafeArea()
@@ -2904,6 +2929,7 @@ struct GamePlayView: View {
                 .padding(28)
                 .glassEffect(.regular, in: .rect(cornerRadius: 24))
                 .frame(maxWidth: 420)
+                .padding(.horizontal, 20)
                 .transition(.scale.combined(with: .opacity))
             }
         }
@@ -2967,7 +2993,7 @@ struct PlayerTakeoverSheet: View {
     }
 }
 
-// MARK: - 22. 根视图 ContentView
+// MARK: - 22. 根视图 ContentView (死区适配与渐变层绘制)
 
 struct ContentView: View {
     @StateObject private var game = GameModel()
@@ -2976,6 +3002,7 @@ struct ContentView: View {
     
     var body: some View {
         ZStack {
+            // 底层全屏色（渲染突破 Safe Area）
             Color(red: 0.05, green: 0.06, blue: 0.09)
                 .ignoresSafeArea()
             
