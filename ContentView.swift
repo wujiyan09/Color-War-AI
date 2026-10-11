@@ -145,13 +145,12 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
     }
     
     private func rebuildPeerID() {
-        let name = myNickname.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.myPeerID = MCPeerID(displayName: name.isEmpty ? "匿名玩家" : String(name.prefix(63)))
+        self.myPeerID = MCPeerID(displayName: myNickname.isEmpty ? "匿名玩家" : myNickname)
         setupMCSession()
     }
     
     private func setupMCSession() {
-        mcSession = MCSession(peer: myPeerID, securityIdentity: nil, encryptionPreference: .none)
+        mcSession = MCSession(peer: myPeerID, securityIdentity: nil, encryptionPreference: .required)
         mcSession?.delegate = self
     }
     
@@ -586,12 +585,10 @@ struct AISolver: Sendable {
             let safeMoves = validMoves.filter { move in
                 let (r, c) = move
                 let idx = r * boardSize + c
-                if idx < neighborsMap.count {
-                    for nIdx in neighborsMap[idx] {
-                        let nCell = board.cells[nIdx]
-                        if let nOwner = nCell.owner, nOwner != currentPlayer, nCell.count >= 2 {
-                            return false
-                        }
+                for nIdx in neighborsMap[idx] {
+                    let nCell = board.cells[nIdx]
+                    if let nOwner = nCell.owner, nOwner != currentPlayer, nCell.count >= 2 {
+                        return false
                     }
                 }
                 return true
@@ -622,17 +619,14 @@ struct AISolver: Sendable {
         
         for move in validMoves {
             let idx = move.0 * boardSize + move.1
-            guard idx < board.cells.count else { continue }
             let cell = board.cells[idx]
             
             if cell.count == 3 || cell.owner == nil {
                 var enemy3Count = 0
-                if idx < neighborsMap.count {
-                    for nIdx in neighborsMap[idx] {
-                        let nCell = board.cells[nIdx]
-                        if let nOwner = nCell.owner, nOwner != currentPlayer, nCell.count == 3 {
-                            enemy3Count += 1
-                        }
+                for nIdx in neighborsMap[idx] {
+                    let nCell = board.cells[nIdx]
+                    if let nOwner = nCell.owner, nOwner != currentPlayer, nCell.count == 3 {
+                        enemy3Count += 1
                     }
                 }
                 
@@ -936,7 +930,6 @@ struct AISolver: Sendable {
         
         for move in validMoves {
             let idx = move.0 * boardSize + move.1
-            guard idx < b.cells.count else { continue }
             let cell = b.cells[idx]
             
             if cell.count == 3 {
@@ -945,13 +938,11 @@ struct AISolver: Sendable {
             }
             
             var reachesEnemy3 = false
-            if idx < neighborsMap.count {
-                for nIdx in neighborsMap[idx] {
-                    let nCell = b.cells[nIdx]
-                    if let nOwner = nCell.owner, nOwner != player, nCell.count == 3 {
-                        reachesEnemy3 = true
-                        break
-                    }
+            for nIdx in neighborsMap[idx] {
+                let nCell = b.cells[nIdx]
+                if let nOwner = nCell.owner, nOwner != player, nCell.count == 3 {
+                    reachesEnemy3 = true
+                    break
                 }
             }
             if reachesEnemy3 { forcingMoves.append(move) }
@@ -960,11 +951,11 @@ struct AISolver: Sendable {
     }
     
     private func maxNMultiPlayerSearch(boardState: Board,
-                                      hasEnteredState: [Bool],
-                                      eliminatedState: [Bool],
-                                      depth: Int,
-                                      turnPlayer: Int,
-                                      beamWidth: Int) -> [Int: Int] {
+                                       hasEnteredState: [Bool],
+                                       eliminatedState: [Bool],
+                                       depth: Int,
+                                       turnPlayer: Int,
+                                       beamWidth: Int) -> [Int: Int] {
         if Task.isCancelled || depth <= 0 || isGameOverSimulated(eliminated: eliminatedState) {
             return evaluateMultiPlayerVector(boardState, eliminated: eliminatedState)
         }
@@ -1012,11 +1003,10 @@ struct AISolver: Sendable {
         var scores = [Int](repeating: 0, count: PlayerPreset.maxPlayers)
         
         for idx in 0..<(boardSize * boardSize) {
-            guard idx < b.cells.count else { continue }
             let cell = b.cells[idx]
             guard let owner = cell.owner, owner >= 0 && owner < PlayerPreset.maxPlayers else { continue }
             
-            let neighbors = idx < neighborsMap.count ? neighborsMap[idx] : []
+            let neighbors = neighborsMap[idx]
             var val = cell.count * 15 + neighbors.count * 5
             
             if cell.count == 3 {
@@ -1061,7 +1051,7 @@ struct AISolver: Sendable {
         var myOrbs = 0
         var maxEnemyOrbs = 0
         var enemyThreat3Count = 0
-        let totalCells = min(b.cells.count, boardSize * boardSize)
+        let totalCells = boardSize * boardSize
         
         var enemyOrbsMap = [Int: Int]()
         
@@ -1069,7 +1059,7 @@ struct AISolver: Sendable {
             let cell = b.cells[idx]
             guard let owner = cell.owner else { continue }
             
-            let neighbors = idx < neighborsMap.count ? neighborsMap[idx] : []
+            let neighbors = neighborsMap[idx]
             let neighborCount = neighbors.count
             
             var cellVal = cell.count * 15 + neighborCount * 5
@@ -1135,10 +1125,10 @@ struct AISolver: Sendable {
     }
     
     private func computeChainGraphPotentials(on b: Board, player: Int) -> Int {
-        var visited = Array(repeating: false, count: b.cells.count)
+        var visited = Array(repeating: false, count: boardSize * boardSize)
         var score = 0
         
-        for idx in 0..<b.cells.count {
+        for idx in 0..<(boardSize * boardSize) {
             let cell = b.cells[idx]
             guard !visited[idx], cell.count == 3, let owner = cell.owner else { continue }
             
@@ -1150,15 +1140,11 @@ struct AISolver: Sendable {
                 let curr = queue.removeFirst()
                 componentSize += 1
                 
-                if curr < neighborsMap.count {
-                    for nIdx in neighborsMap[curr] {
-                        if nIdx < b.cells.count {
-                            let nCell = b.cells[nIdx]
-                            if !visited[nIdx] && nCell.count == 3 && nCell.owner == owner {
-                                visited[nIdx] = true
-                                queue.append(nIdx)
-                            }
-                        }
+                for nIdx in neighborsMap[curr] {
+                    let nCell = b.cells[nIdx]
+                    if !visited[nIdx] && nCell.count == 3 && nCell.owner == owner {
+                        visited[nIdx] = true
+                        queue.append(nIdx)
                     }
                 }
             }
@@ -1183,7 +1169,7 @@ struct AISolver: Sendable {
         if waveCount >= 2 {
             let (r, c) = move
             var maxDistance = 0
-            for targetIdx in 0..<b.cells.count {
+            for targetIdx in 0..<(boardSize * boardSize) {
                 let cell = b.cells[targetIdx]
                 if let owner = cell.owner, owner != currentPlayer, cell.count == 3 {
                     let tr = targetIdx / boardSize
@@ -1202,11 +1188,10 @@ struct AISolver: Sendable {
     private func evaluateMoveTacticalPriority(_ move: (Int, Int), on b: Board, player: Int) -> Int {
         let (r, c) = move
         let idx = r * boardSize + c
-        guard idx < b.cells.count else { return 0 }
         let cell = b[r, c]
         
         var priority = 0
-        let neighbors = idx < neighborsMap.count ? neighborsMap[idx] : []
+        let neighbors = neighborsMap[idx]
         
         if cell.count == 3 || cell.owner == nil {
             for nIdx in neighbors {
@@ -1234,8 +1219,6 @@ struct AISolver: Sendable {
     
     private func simulateMoveBFSWithWaveDepthTracking(on simBoard: inout Board, move: (Int, Int), player: Int, hasEntered: inout [Bool]) -> (Int, Set<Int>) {
         let flatIndex = move.0 * boardSize + move.1
-        guard flatIndex < simBoard.cells.count, player >= 0 && player < hasEntered.count else { return (0, []) }
-        
         let isFirst = !hasEntered[player]
         hasEntered[player] = true
         
@@ -1255,7 +1238,6 @@ struct AISolver: Sendable {
             let count = queue.count
             for _ in 0..<count {
                 let currIdx = queue.removeFirst()
-                guard currIdx < simBoard.cells.count else { continue }
                 let currCell = simBoard.cells[currIdx]
                 if currCell.count < 4 { continue }
                 
@@ -1263,18 +1245,14 @@ struct AISolver: Sendable {
                 let nextOwner = remCount == 0 ? nil : player
                 simBoard.updateCell(index: currIdx, oldOwner: currCell.owner, oldCount: currCell.count, newOwner: nextOwner, newCount: remCount)
                 
-                if currIdx < neighborsMap.count {
-                    for nIdx in neighborsMap[currIdx] {
-                        if nIdx < simBoard.cells.count {
-                            let nCell = simBoard.cells[nIdx]
-                            if let nOwner = nCell.owner, nOwner != player {
-                                affectedEnemies.insert(nOwner)
-                            }
-                            simBoard.updateCell(index: nIdx, oldOwner: nCell.owner, oldCount: nCell.count, newOwner: player, newCount: nCell.count + 1)
-                            if simBoard.cells[nIdx].count >= 4 {
-                                queue.append(nIdx)
-                            }
-                        }
+                for nIdx in neighborsMap[currIdx] {
+                    let nCell = simBoard.cells[nIdx]
+                    if let nOwner = nCell.owner, nOwner != player {
+                        affectedEnemies.insert(nOwner)
+                    }
+                    simBoard.updateCell(index: nIdx, oldOwner: nCell.owner, oldCount: nCell.count, newOwner: player, newCount: nCell.count + 1)
+                    if simBoard.cells[nIdx].count >= 4 {
+                        queue.append(nIdx)
                     }
                 }
             }
@@ -1289,11 +1267,9 @@ struct AISolver: Sendable {
                 appears[o] = true
             }
         }
-        for p in activePlayers where p >= 0 && p < hasEntered.count && p < eliminated.count {
-            if hasEntered[p] && !eliminated[p] {
-                if !appears[p] {
-                    eliminated[p] = true
-                }
+        for p in activePlayers where hasEntered[p] && !eliminated[p] {
+            if !appears[p] {
+                eliminated[p] = true
             }
         }
     }
@@ -1305,12 +1281,9 @@ struct AISolver: Sendable {
         
         for r in 0..<boardSize {
             for c in 0..<boardSize {
-                let idx = r * boardSize + c
-                if idx < b.cells.count {
-                    let owner = b.cells[idx].owner
-                    if ownsAny ? (owner == player) : (owner == nil) {
-                        moves.append((r, c))
-                    }
+                let owner = b[r, c].owner
+                if ownsAny ? (owner == player) : (owner == nil) {
+                    moves.append((r, c))
                 }
             }
         }
@@ -1390,7 +1363,6 @@ final class GameModel: ObservableObject {
     
     private func updateCachedPlayableCells() {
         guard currentPlayer >= 0 && currentPlayer < PlayerPreset.maxPlayers,
-              currentPlayer < eliminated.count,
               !eliminated[currentPlayer] else {
             self.playableCells = []
             return
@@ -1400,12 +1372,10 @@ final class GameModel: ObservableObject {
         var indices = Set<Int>()
         for r in 0..<boardSize {
             for c in 0..<boardSize {
-                if r < board.count && c < board[r].count {
-                    let cell = board[r][c]
-                    let idx = r * boardSize + c
-                    if ownsAny ? (cell.owner == currentPlayer) : (cell.owner == nil) {
-                        indices.insert(idx)
-                    }
+                let cell = board[r][c]
+                let idx = r * boardSize + c
+                if ownsAny ? (cell.owner == currentPlayer) : (cell.owner == nil) {
+                    indices.insert(idx)
                 }
             }
         }
@@ -1420,6 +1390,7 @@ final class GameModel: ObservableObject {
         if let data = UserDefaults.standard.data(forKey: "CW_Saved_PlayerTypes"),
            let decoded = try? JSONDecoder().decode([PlayerControlType].self, from: data),
            decoded.count == PlayerPreset.maxPlayers {
+            // 剔除旧版的 NPU 枚举兼容
             self.playerTypes = decoded.map { type in
                 (type.rawValue.contains("NPU")) ? .enhancedNightmare : type
             }
@@ -1463,7 +1434,7 @@ final class GameModel: ObservableObject {
             .sink { [weak self] packet in
                 guard let self = self else { return }
                 if packet.action == .playerMove, let r = packet.row, let c = packet.col, let pIdx = packet.playerIndex {
-                    if pIdx == self.currentPlayer && self.playerTypes[safe: pIdx] == .p2pNetwork {
+                    if pIdx == self.currentPlayer && self.playerTypes[pIdx] == .p2pNetwork {
                         self.play(row: r, column: c)
                     }
                 } else if packet.action == .syncRequest {
@@ -1621,25 +1592,18 @@ final class GameModel: ObservableObject {
     
     private func resolveMove(row: Int, column: Int, player: Int) async {
         isProcessingCascade = true
-        guard player >= 0 && player < hasEntered.count else {
-            isProcessingCascade = false
-            return
-        }
-        
         let isFirst = !hasEntered[player]
         hasEntered[player] = true
         
         do {
             withAnimation(.spring(response: 0.22, dampingFraction: 0.62)) {
-                if row < board.count && column < board[row].count {
-                    board[row][column].owner = player
-                    board[row][column].count += isFirst ? 3 : 1
-                    emphasizedCells = [row * boardSize + column]
-                }
+                board[row][column].owner = player
+                board[row][column].count += isFirst ? 3 : 1
+                emphasizedCells = [row * boardSize + column]
             }
             try await Task.sleep(nanoseconds: 210_000_000)
             
-            var wave: [(Int, Int)] = (row < board.count && column < board[row].count && board[row][column].count >= 4) ? [(row, column)] : []
+            var wave: [(Int, Int)] = board[row][column].count >= 4 ? [(row, column)] : []
             let dirs = [(-1,0), (1,0), (0,-1), (0,1)]
             
             while !wave.isEmpty {
@@ -1664,10 +1628,8 @@ final class GameModel: ObservableObject {
                 
                 withAnimation(.easeIn(duration: 0.07)) {
                     for (r, c) in exploding {
-                        if r < board.count && c < board[r].count {
-                            board[r][c].count -= 4
-                            board[r][c].owner = board[r][c].count == 0 ? nil : player
-                        }
+                        board[r][c].count -= 4
+                        board[r][c].owner = board[r][c].count == 0 ? nil : player
                     }
                     flyingOrbs = transfers
                 }
@@ -1683,11 +1645,9 @@ final class GameModel: ObservableObject {
                 var changed = Set<Int>()
                 withAnimation(.spring(response: 0.18, dampingFraction: 0.68)) {
                     for orb in flyingOrbs {
-                        if orb.toRow < board.count && orb.toColumn < board[orb.toRow].count {
-                            board[orb.toRow][orb.toColumn].owner = player
-                            board[orb.toRow][orb.toColumn].count += 1
-                            changed.insert(orb.toRow * boardSize + orb.toColumn)
-                        }
+                        board[orb.toRow][orb.toColumn].owner = player
+                        board[orb.toRow][orb.toColumn].count += 1
+                        changed.insert(orb.toRow * boardSize + orb.toColumn)
                     }
                     flyingOrbs = []
                     emphasizedCells = changed
@@ -1697,10 +1657,7 @@ final class GameModel: ObservableObject {
                 wave = changed.compactMap {
                     let r = $0 / boardSize
                     let c = $0 % boardSize
-                    if r < board.count && c < board[r].count {
-                        return board[r][c].count >= 4 ? (r, c) : nil
-                    }
-                    return nil
+                    return board[r][c].count >= 4 ? (r, c) : nil
                 }
             }
             
@@ -1722,21 +1679,19 @@ final class GameModel: ObservableObject {
         var appears = [Bool](repeating: false, count: PlayerPreset.maxPlayers)
         for row in board {
             for cell in row {
-                if let o = cell.owner, o >= 0 && o < PlayerPreset.maxPlayers { appears[o] = true }
+                if let o = cell.owner { appears[o] = true }
             }
         }
         for p in activePlayerIndices {
-            if p < hasEntered.count && p < eliminated.count {
-                if hasEntered[p] && !appears[p] {
-                    eliminated[p] = true
-                }
+            if hasEntered[p] && !appears[p] {
+                eliminated[p] = true
             }
         }
     }
     
     private func checkGameOver() -> Bool {
-        let alive = activePlayerIndices.filter { $0 < eliminated.count && !eliminated[$0] }
-        let allEnteredOrEliminated = activePlayerIndices.allSatisfy { $0 < hasEntered.count && $0 < eliminated.count && (hasEntered[$0] || eliminated[$0]) }
+        let alive = activePlayerIndices.filter { !eliminated[$0] }
+        let allEnteredOrEliminated = activePlayerIndices.allSatisfy { hasEntered[$0] || eliminated[$0] }
         
         if allEnteredOrEliminated && alive.count <= 1 {
             winnerIndex = alive.first
@@ -1753,13 +1708,7 @@ final class GameModel: ObservableObject {
         var nextIdx = (idx + 1) % active.count
         var loopCount = 0
         
-        while loopCount < active.count {
-            let p = active[nextIdx]
-            if p < eliminated.count && p < playerTypes.count {
-                if !eliminated[p] && playerTypes[p] != .disabled {
-                    break
-                }
-            }
+        while (eliminated[active[nextIdx]] || playerTypes[active[nextIdx]] == .disabled) && loopCount < active.count {
             nextIdx = (nextIdx + 1) % active.count
             loopCount += 1
         }
@@ -1770,7 +1719,6 @@ final class GameModel: ObservableObject {
     
     private func checkAndRunAITurn() {
         aiTask?.cancel()
-        guard currentPlayer < playerTypes.count else { return }
         let currentType = playerTypes[currentPlayer]
         guard currentType.isAI && winnerIndex == nil else { return }
         
@@ -1813,19 +1761,19 @@ struct BoardView: View {
                         HStack(spacing: gap) {
                             ForEach(0..<game.boardSize, id: \.self) { c in
                                 let index = r * game.boardSize + c
-                                let cell = (r < game.board.count && c < game.board[r].count) ? game.board[r][c] : Cell(owner: nil, count: 0)
+                                let cell = game.board[r][c]
                                 
                                 CellView(
                                     cell: cell,
-                                    color: cell.owner.flatMap { game.colors[safe: $0] },
-                                    emoji: cell.owner.flatMap { game.emojis[safe: $0] },
+                                    color: cell.owner.map { game.colors[$0] },
+                                    emoji: cell.owner.flatMap { game.emojis[safe: $0] ?? nil },
                                     active: game.emphasizedCells.contains(index)
                                 )
                                 .equatable()
                                 .frame(width: side, height: side)
                                 .contentShape(Rectangle())
                                 .onTapGesture {
-                                    if game.playerTypes[safe: game.currentPlayer] == .human && game.playableCells.contains(index) {
+                                    if game.playerTypes[game.currentPlayer] == .human && game.playableCells.contains(index) {
                                         game.play(row: r, column: c)
                                     }
                                 }
@@ -1837,8 +1785,8 @@ struct BoardView: View {
                 
                 ForEach(game.flyingOrbs) { orb in
                     PieceView(
-                        color: game.colors[safe: orb.player] ?? .gray,
-                        emoji: game.emojis[safe: orb.player] ?? nil,
+                        color: game.colors[orb.player],
+                        emoji: game.emojis[orb.player],
                         count: 1,
                         size: max(8, side * 0.40)
                     )
@@ -3009,3 +2957,5 @@ struct ContentView: View {
         }
     }
 }
+
+
