@@ -64,7 +64,6 @@ struct PlayerPreset {
     
     static let defaultNames = ["玩家1", "玩家2", "玩家3", "玩家4", "玩家5", "玩家6", "玩家7", "玩家8"]
     
-    // 统一设计语言：全图卡片容器圆角
     static let cardCornerRadius: CGFloat = 20.0
 }
 
@@ -1338,7 +1337,7 @@ struct AISolver: Sendable {
     }
 }
 
-// MARK: - 8. GameModel ViewModel (增加自定义背景图逻辑)
+// MARK: - 8. GameModel ViewModel (修正自定义背景图读取与擦除)
 
 @MainActor
 final class GameModel: ObservableObject {
@@ -1386,7 +1385,6 @@ final class GameModel: ObservableObject {
     @Published var flyingOrbs: [FlyingOrb] = []
     @Published var emphasizedCells: Set<Int> = []
     
-    // 自定义背景图片
     @Published var customBackgroundImage: UIImage? = nil
     
     @Published private(set) var activePlayerIndices: [Int] = []
@@ -1468,10 +1466,12 @@ final class GameModel: ObservableObject {
             self.emojis = Array(repeating: nil, count: PlayerPreset.maxPlayers)
         }
         
-        // 读取持久化的自定义背景图
         if let imgData = UserDefaults.standard.data(forKey: "CW_Saved_CustomBackground"),
+           !imgData.isEmpty,
            let img = UIImage(data: imgData) {
             self.customBackgroundImage = img
+        } else {
+            self.customBackgroundImage = nil
         }
         
         self.activePlayerIndices = self.playerTypes.enumerated().compactMap { $1 != .disabled ? $0 : nil }
@@ -1832,7 +1832,7 @@ final class GameModel: ObservableObject {
     }
 }
 
-// MARK: - 9. 棋盘视图 (死区与自适应正方形网格)
+// MARK: - 9. 棋盘视图
 
 struct BoardView: View {
     @ObservedObject var game: GameModel
@@ -2155,7 +2155,7 @@ extension Array {
     }
 }
 
-// MARK: - 14. 单机/本地设置 View (仅仅玩家列表区域允许滚动)
+// MARK: - 14. 单机/本地设置 View (支持自适应全展示与玻璃交互背景)
 
 struct LocalGameSetupView: View {
     @ObservedObject var game: GameModel
@@ -2170,8 +2170,60 @@ struct LocalGameSetupView: View {
         PlayerControlType.allCases.filter { $0 != .p2pNetwork }
     }
     
+    @ViewBuilder
+    private var playerRowsContent: some View {
+        VStack(spacing: 10) {
+            ForEach(0..<min(game.playerNames.count, PlayerPreset.maxPlayers), id: \.self) { idx in
+                HStack(spacing: 8) {
+                    Button(action: { selectedPlayerForEmoji = IdentifiableInt(id: idx) }) {
+                        ZStack {
+                            Circle()
+                                .fill(game.colors[safe: idx] ?? .gray)
+                                .frame(width: 26, height: 26)
+                            
+                            if let em = game.emojis[safe: idx], let emoji = em, !emoji.isEmpty {
+                                Text(emoji).font(.caption2)
+                            }
+                        }
+                    }
+                    
+                    ColorPicker("", selection: Binding(
+                        get: { game.colors[safe: idx] ?? .red },
+                        set: { game.updatePlayerColor(at: idx, newColor: $0) }
+                    ))
+                    .labelsHidden()
+                    
+                    TextField("名称", text: Binding(
+                        get: { game.playerNames[safe: idx] ?? "玩家\(idx+1)" },
+                        set: { if idx < game.playerNames.count { game.playerNames[idx] = $0 } }
+                    ))
+                    .foregroundColor(.white)
+                    .font(.subheadline)
+                    .bold()
+                    .textFieldStyle(.plain)
+                    
+                    Spacer(minLength: 4)
+                    
+                    Picker("Player Type", selection: Binding(
+                        get: { game.playerTypes[safe: idx] ?? .disabled },
+                        set: { game.updatePlayerType(at: idx, to: $0) }
+                    )) {
+                        ForEach(localAvailableTypes) { type in
+                            Text(type.rawValue).tag(type)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .tint(.white)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 2)
+            }
+        }
+        .padding(.vertical, 10)
+    }
+    
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 14) {
             VStack(spacing: 10) {
                 HStack {
                     Text("网格尺寸: \(game.boardSize) × \(game.boardSize)")
@@ -2199,59 +2251,16 @@ struct LocalGameSetupView: View {
             .padding(12)
             .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
-            // 独立可视的玩家列表滚动区域（窗口变小时允许滚动）
-            ScrollView(.vertical, showsIndicators: true) {
-                VStack(spacing: 8) {
-                    ForEach(0..<min(game.playerNames.count, PlayerPreset.maxPlayers), id: \.self) { idx in
-                        HStack(spacing: 8) {
-                            Button(action: { selectedPlayerForEmoji = IdentifiableInt(id: idx) }) {
-                                ZStack {
-                                    Circle()
-                                        .fill(game.colors[safe: idx] ?? .gray)
-                                        .frame(width: 26, height: 26)
-                                    
-                                    if let em = game.emojis[safe: idx], let emoji = em, !emoji.isEmpty {
-                                        Text(emoji).font(.caption2)
-                                    }
-                                }
-                            }
-                            
-                            ColorPicker("", selection: Binding(
-                                get: { game.colors[safe: idx] ?? .red },
-                                set: { game.updatePlayerColor(at: idx, newColor: $0) }
-                            ))
-                            .labelsHidden()
-                            
-                            TextField("名称", text: Binding(
-                                get: { game.playerNames[safe: idx] ?? "玩家\(idx+1)" },
-                                set: { if idx < game.playerNames.count { game.playerNames[idx] = $0 } }
-                            ))
-                            .foregroundColor(.white)
-                            .font(.subheadline)
-                            .bold()
-                            .textFieldStyle(.plain)
-                            
-                            Spacer()
-                            
-                            Picker("Player Type", selection: Binding(
-                                get: { game.playerTypes[safe: idx] ?? .disabled },
-                                set: { game.updatePlayerType(at: idx, to: $0) }
-                            )) {
-                                ForEach(localAvailableTypes) { type in
-                                    Text(type.rawValue).tag(type)
-                                }
-                            }
-                            .pickerStyle(.menu)
-                            .tint(.white)
-                        }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 2)
-                    }
+            // 使用 ViewThatFits 保证：屏幕高度充足时默认全部展示；窗口过小时自动启用滚动
+            ViewThatFits(in: .vertical) {
+                playerRowsContent
+                
+                ScrollView(.vertical, showsIndicators: true) {
+                    playerRowsContent
                 }
-                .padding(.vertical, 8)
+                .frame(maxHeight: 240)
             }
-            .frame(maxHeight: 220) // 给玩家列表设定适度的最大高度
-            .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
             Button(action: onStartGame) {
                 HStack {
@@ -2368,11 +2377,11 @@ struct LocalDeviceBrowserInlineView: View {
             }
         }
         .padding()
-        .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
     }
 }
 
-// MARK: - 16. 4 人房间大厅 View
+// MARK: - 16. 4 人房间大厅 View (带自适应展示与玻璃交互背景)
 
 struct RoomLobbyView: View {
     @ObservedObject var game: GameModel
@@ -2381,6 +2390,66 @@ struct RoomLobbyView: View {
     let onStartGame: () -> Void
     
     @State private var selectedPlayerForEmoji: IdentifiableInt? = nil
+    
+    @ViewBuilder
+    private var roomPlayerRowsContent: some View {
+        VStack(spacing: 8) {
+            ForEach(0..<min(game.playerNames.count, 4), id: \.self) { idx in
+                let isMySeat = (idx == game.myPlayerIndex)
+                
+                HStack {
+                    Button(action: {
+                        if isMySeat { selectedPlayerForEmoji = IdentifiableInt(id: idx) }
+                    }) {
+                        ZStack {
+                            Circle()
+                                .fill(game.colors[safe: idx] ?? .gray)
+                                .frame(width: 26, height: 26)
+                            
+                            if let em = game.emojis[safe: idx], let emoji = em {
+                                Text(emoji).font(.caption2)
+                            }
+                        }
+                    }
+                    .disabled(!isMySeat)
+                    
+                    if isMySeat {
+                        ColorPicker("", selection: Binding(
+                            get: { game.colors[safe: idx] ?? .red },
+                            set: { game.updatePlayerColor(at: idx, newColor: $0) }
+                        ))
+                        .labelsHidden()
+                    }
+                    
+                    Text((game.playerNames[safe: idx] ?? "玩家\(idx+1)") + (isMySeat ? " (我)" : ""))
+                        .font(.subheadline)
+                        .bold()
+                        .foregroundColor(isMySeat ? .cyan : .white)
+                    
+                    Spacer()
+                    
+                    if p2pManager.isHost {
+                        Picker("", selection: Binding(
+                            get: { game.playerTypes[safe: idx] ?? .disabled },
+                            set: { game.updatePlayerType(at: idx, to: $0) }
+                        )) {
+                            ForEach(PlayerControlType.allCases) { type in
+                                Text(type.rawValue).tag(type)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .tint(.white)
+                    } else {
+                        Text((game.playerTypes[safe: idx] ?? .disabled).rawValue)
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                    }
+                }
+                .padding(8)
+            }
+        }
+        .padding(6)
+    }
     
     var body: some View {
         VStack(spacing: 12) {
@@ -2442,65 +2511,15 @@ struct RoomLobbyView: View {
                 .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             }
             
-            ScrollView(.vertical, showsIndicators: true) {
-                VStack(spacing: 8) {
-                    ForEach(0..<min(game.playerNames.count, 4), id: \.self) { idx in
-                        let isMySeat = (idx == game.myPlayerIndex)
-                        
-                        HStack {
-                            Button(action: {
-                                if isMySeat { selectedPlayerForEmoji = IdentifiableInt(id: idx) }
-                            }) {
-                                ZStack {
-                                    Circle()
-                                        .fill(game.colors[safe: idx] ?? .gray)
-                                        .frame(width: 26, height: 26)
-                                    
-                                    if let em = game.emojis[safe: idx], let emoji = em {
-                                        Text(emoji).font(.caption2)
-                                    }
-                                }
-                            }
-                            .disabled(!isMySeat)
-                            
-                            if isMySeat {
-                                ColorPicker("", selection: Binding(
-                                    get: { game.colors[safe: idx] ?? .red },
-                                    set: { game.updatePlayerColor(at: idx, newColor: $0) }
-                                ))
-                                .labelsHidden()
-                            }
-                            
-                            Text((game.playerNames[safe: idx] ?? "玩家\(idx+1)") + (isMySeat ? " (我)" : ""))
-                                .font(.subheadline)
-                                .bold()
-                                .foregroundColor(isMySeat ? .cyan : .white)
-                            
-                            Spacer()
-                            
-                            if p2pManager.isHost {
-                                Picker("", selection: Binding(
-                                    get: { game.playerTypes[safe: idx] ?? .disabled },
-                                    set: { game.updatePlayerType(at: idx, to: $0) }
-                                )) {
-                                    ForEach(PlayerControlType.allCases) { type in
-                                        Text(type.rawValue).tag(type)
-                                    }
-                                }
-                                .pickerStyle(.menu)
-                                .tint(.white)
-                            } else {
-                                Text((game.playerTypes[safe: idx] ?? .disabled).rawValue)
-                                    .font(.caption)
-                                    .foregroundColor(.gray)
-                            }
-                        }
-                        .padding(8)
-                        .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius - 4))
-                    }
+            ViewThatFits(in: .vertical) {
+                roomPlayerRowsContent
+                
+                ScrollView(.vertical, showsIndicators: true) {
+                    roomPlayerRowsContent
                 }
+                .frame(maxHeight: 180)
             }
-            .frame(maxHeight: 180)
+            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
             if p2pManager.isHost {
                 Button(action: onStartGame) {
@@ -2650,19 +2669,19 @@ struct OnlineGameSetupView: View {
     }
 }
 
-// MARK: - 18. 主菜单 (绝对居中防滑，自带背景更换入口)
+// MARK: - 18. 主菜单 (绝对居中防滑，修复 PhotosPicker 相册选图响应)
 
 struct StartMenuView: View {
     @ObservedObject var game: GameModel
     @Binding var isSpinningRandomWheel: Bool
     
     @State private var selectedTab: Int = 0
+    @State private var showPhotoPicker: Bool = false
     @State private var selectedPhotosItem: PhotosPickerItem? = nil
     
     var body: some View {
         NavigationStack {
             ZStack {
-                // 主界面卡片垂直居中展示
                 VStack(spacing: 0) {
                     Spacer()
                     
@@ -2691,11 +2710,11 @@ struct StartMenuView: View {
                             }
                         }
                     }
-                    .frame(maxWidth: 420)
+                    .frame(maxWidth: 440)
                     
                     Spacer()
                 }
-                .padding(.horizontal, 16)
+                .padding(.horizontal, 20)
             }
             .toolbar {
                 ToolbarItem(placement: .principal) {
@@ -2707,10 +2726,11 @@ struct StartMenuView: View {
                     .frame(width: 200)
                 }
                 
-                // 自定义背景选择按钮
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
-                        PhotosPicker(selection: $selectedPhotosItem, matching: .images) {
+                        Button {
+                            showPhotoPicker = true
+                        } label: {
                             Label("从相册选择背景", systemImage: "photo.on.rectangle")
                         }
                         
@@ -2730,16 +2750,20 @@ struct StartMenuView: View {
                     }
                 }
             }
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(.hidden, for: .navigationBar)
+            .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhotosItem, matching: .images)
             .onChange(of: selectedPhotosItem) { newItem in
+                guard let newItem = newItem else { return }
                 Task {
-                    if let data = try? await newItem?.loadTransferable(type: Data.self),
+                    if let data = try? await newItem.loadTransferable(type: Data.self),
                        let uiImage = UIImage(data: data) {
-                        game.saveCustomBackground(uiImage)
+                        await MainActor.run {
+                            game.saveCustomBackground(uiImage)
+                        }
                     }
                 }
             }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.hidden, for: .navigationBar)
         }
     }
 }
@@ -3032,7 +3056,7 @@ struct PlayerTakeoverSheet: View {
     }
 }
 
-// MARK: - 22. 根视图 ContentView (包含自定义背景渲染)
+// MARK: - 22. 根视图 ContentView (背景完整保底绘制)
 
 struct ContentView: View {
     @StateObject private var game = GameModel()
@@ -3041,17 +3065,18 @@ struct ContentView: View {
     
     var body: some View {
         ZStack {
-            // 背景底色与自定义图片渲染
+            // 背景保底暗黑色，防止极速切换时闪烁
+            Color(red: 0.05, green: 0.06, blue: 0.09)
+                .ignoresSafeArea()
+            
+            // 背景渲染分流：优先展示自定义图，无自定义图时精准渲染深蓝渐变
             if let customImg = game.customBackgroundImage {
                 Image(uiImage: customImg)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
                     .ignoresSafeArea()
-                    .overlay(Color.black.opacity(0.35)) // 加一层柔和遮罩以保障 UI 文字可读性
+                    .overlay(Color.black.opacity(0.35))
             } else {
-                Color(red: 0.05, green: 0.06, blue: 0.09)
-                    .ignoresSafeArea()
-                
                 RadialGradient(
                     colors: [
                         isGameStarted
