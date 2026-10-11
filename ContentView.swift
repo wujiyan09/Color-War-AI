@@ -1474,7 +1474,7 @@ final class GameModel: ObservableObject {
         let item = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
             UserDefaults.standard.set(self.playerNames, forKey: "CW_Saved_PlayerNames")
-            if let encoded = try? JSONDecoder().encode(self.playerTypes) {
+            if let encoded = try? JSONEncoder().encode(self.playerTypes) {
                 UserDefaults.standard.set(encoded, forKey: "CW_Saved_PlayerTypes")
             }
             let hexes = self.colors.map { $0.toHex() }
@@ -2957,4 +2957,5 @@ struct ContentView: View {
         }
     }
 }
+
 
