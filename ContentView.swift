@@ -3,6 +3,7 @@ import Combine
 import UIKit
 import QuartzCore
 import MultipeerConnectivity
+import PhotosUI
 
 // MARK: - 1. 原生 Haptic 触觉反馈引擎
 
@@ -62,6 +63,9 @@ struct PlayerPreset {
     ]
     
     static let defaultNames = ["玩家1", "玩家2", "玩家3", "玩家4", "玩家5", "玩家6", "玩家7", "玩家8"]
+    
+    // 统一设计语言：全图卡片容器圆角
+    static let cardCornerRadius: CGFloat = 20.0
 }
 
 struct Cell: Equatable, Sendable {
@@ -1334,7 +1338,7 @@ struct AISolver: Sendable {
     }
 }
 
-// MARK: - 8. GameModel ViewModel
+// MARK: - 8. GameModel ViewModel (增加自定义背景图逻辑)
 
 @MainActor
 final class GameModel: ObservableObject {
@@ -1381,6 +1385,9 @@ final class GameModel: ObservableObject {
     @Published var showControlSheet: Bool = false
     @Published var flyingOrbs: [FlyingOrb] = []
     @Published var emphasizedCells: Set<Int> = []
+    
+    // 自定义背景图片
+    @Published var customBackgroundImage: UIImage? = nil
     
     @Published private(set) var activePlayerIndices: [Int] = []
     @Published private(set) var playableCells: Set<Int> = []
@@ -1461,11 +1468,26 @@ final class GameModel: ObservableObject {
             self.emojis = Array(repeating: nil, count: PlayerPreset.maxPlayers)
         }
         
+        // 读取持久化的自定义背景图
+        if let imgData = UserDefaults.standard.data(forKey: "CW_Saved_CustomBackground"),
+           let img = UIImage(data: imgData) {
+            self.customBackgroundImage = img
+        }
+        
         self.activePlayerIndices = self.playerTypes.enumerated().compactMap { $1 != .disabled ? $0 : nil }
         self.playableCells = []
         
         setupP2PListener()
         resetGame()
+    }
+    
+    func saveCustomBackground(_ image: UIImage?) {
+        self.customBackgroundImage = image
+        if let img = image, let data = img.jpegData(compressionQuality: 0.8) {
+            UserDefaults.standard.set(data, forKey: "CW_Saved_CustomBackground")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "CW_Saved_CustomBackground")
+        }
     }
     
     private func setupP2PListener() {
@@ -1810,7 +1832,7 @@ final class GameModel: ObservableObject {
     }
 }
 
-// MARK: - 9. 棋盘视图 (适配多任务/iPadOS 死区及自适应尺寸)
+// MARK: - 9. 棋盘视图 (死区与自适应正方形网格)
 
 struct BoardView: View {
     @ObservedObject var game: GameModel
@@ -1818,7 +1840,6 @@ struct BoardView: View {
     
     var body: some View {
         GeometryReader { proxy in
-            // 计算可用容器的正方形内切尺寸（精准自适应屏幕或窗口）
             let minDim = min(proxy.size.width, proxy.size.height)
             let side = (minDim - 12 - gap * CGFloat(game.boardSize - 1)) / CGFloat(game.boardSize)
             let actualBoardDimension = side * CGFloat(game.boardSize) + gap * CGFloat(game.boardSize - 1) + 12
@@ -1866,9 +1887,9 @@ struct BoardView: View {
                     .allowsHitTesting(false)
                 }
             }
-            .glassEffect(.regular, in: .rect(cornerRadius: 16))
+            .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             .frame(width: actualBoardDimension, height: actualBoardDimension)
-            .position(x: proxy.size.width / 2, y: proxy.size.height / 2) // 居中于多任务可用的父容器中
+            .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
         }
         .aspectRatio(1, contentMode: .fit)
         .onDisappear {
@@ -2134,7 +2155,7 @@ extension Array {
     }
 }
 
-// MARK: - 14. 单机/本地设置 View (支持窗口高度自适应滚动)
+// MARK: - 14. 单机/本地设置 View (仅仅玩家列表区域允许滚动)
 
 struct LocalGameSetupView: View {
     @ObservedObject var game: GameModel
@@ -2150,8 +2171,8 @@ struct LocalGameSetupView: View {
     }
     
     var body: some View {
-        VStack(spacing: 14) {
-            VStack(spacing: 12) {
+        VStack(spacing: 12) {
+            VStack(spacing: 10) {
                 HStack {
                     Text("网格尺寸: \(game.boardSize) × \(game.boardSize)")
                         .font(.subheadline)
@@ -2175,22 +2196,22 @@ struct LocalGameSetupView: View {
                 }
                 .tint(Color.darkNavyBlue)
             }
-            .padding()
-            .glassEffect(.regular, in: .rect(cornerRadius: 18))
+            .padding(12)
+            .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
-            // 加入 ScrollView 防止 iPadOS 27 多任务/分屏高度较小时玩家列表内容被遮挡
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 10) {
+            // 独立可视的玩家列表滚动区域（窗口变小时允许滚动）
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(spacing: 8) {
                     ForEach(0..<min(game.playerNames.count, PlayerPreset.maxPlayers), id: \.self) { idx in
-                        HStack(spacing: 10) {
+                        HStack(spacing: 8) {
                             Button(action: { selectedPlayerForEmoji = IdentifiableInt(id: idx) }) {
                                 ZStack {
                                     Circle()
                                         .fill(game.colors[safe: idx] ?? .gray)
-                                        .frame(width: 28, height: 28)
+                                        .frame(width: 26, height: 26)
                                     
                                     if let em = game.emojis[safe: idx], let emoji = em, !emoji.isEmpty {
-                                        Text(emoji).font(.caption)
+                                        Text(emoji).font(.caption2)
                                     }
                                 }
                             }
@@ -2224,12 +2245,13 @@ struct LocalGameSetupView: View {
                             .tint(.white)
                         }
                         .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
                     }
                 }
-                .padding(12)
+                .padding(.vertical, 8)
             }
-            .frame(maxHeight: 280) // 约束最大可滚动高度以配合弹性动画
-            .glassEffect(.regular, in: .rect(cornerRadius: 18))
+            .frame(maxHeight: 220) // 给玩家列表设定适度的最大高度
+            .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
             Button(action: onStartGame) {
                 HStack {
@@ -2238,7 +2260,7 @@ struct LocalGameSetupView: View {
                 }
                 .foregroundColor(.white)
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 14)
+                .padding(.vertical, 12)
                 .contentShape(Capsule())
                 .glassEffect(.regular.tint(.darkNavyBlue).interactive(), in: .capsule)
             }
@@ -2260,7 +2282,7 @@ struct LocalDeviceBrowserInlineView: View {
     let onCancel: () -> Void
     
     var body: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 12) {
             HStack {
                 Text("🌐 附近的 Color War 房间列表")
                     .font(.subheadline)
@@ -2318,7 +2340,7 @@ struct LocalDeviceBrowserInlineView: View {
                     }
                     .padding()
                 } else {
-                    ScrollView {
+                    ScrollView(.vertical, showsIndicators: true) {
                         VStack(spacing: 8) {
                             ForEach(p2pManager.discoveredDevices) { device in
                                 Button(action: { onSelectDevice(device) }) {
@@ -2333,9 +2355,9 @@ struct LocalDeviceBrowserInlineView: View {
                                             .font(.caption)
                                             .foregroundColor(.cyan)
                                     }
-                                    .padding(12)
+                                    .padding(10)
                                     .contentShape(Rectangle())
-                                    .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 12))
+                                    .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius - 6))
                                 }
                                 .buttonStyle(.plain)
                             }
@@ -2346,7 +2368,7 @@ struct LocalDeviceBrowserInlineView: View {
             }
         }
         .padding()
-        .glassEffect(.regular, in: .rect(cornerRadius: 18))
+        .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
     }
 }
 
@@ -2361,7 +2383,7 @@ struct RoomLobbyView: View {
     @State private var selectedPlayerForEmoji: IdentifiableInt? = nil
     
     var body: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 12) {
             HStack {
                 Text(p2pManager.isHost ? "🏠 房主房间: \(p2pManager.myNickname)" : "🔗 已加入房间: \(p2pManager.hostDeviceName)")
                     .font(.headline)
@@ -2377,11 +2399,11 @@ struct RoomLobbyView: View {
                         .foregroundColor(.white.opacity(0.8))
                 }
             }
-            .padding(12)
-            .glassEffect(.regular, in: .rect(cornerRadius: 18))
+            .padding(10)
+            .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
             if p2pManager.isHost {
-                VStack(spacing: 10) {
+                VStack(spacing: 8) {
                     HStack {
                         Text("网格尺寸: \(game.boardSize) × \(game.boardSize)")
                             .font(.caption)
@@ -2405,8 +2427,8 @@ struct RoomLobbyView: View {
                     }
                     .tint(Color.darkNavyBlue)
                 }
-                .padding(12)
-                .glassEffect(.regular, in: .rect(cornerRadius: 18))
+                .padding(10)
+                .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             } else {
                 HStack {
                     Text("房主设定尺寸: \(game.boardSize) × \(game.boardSize)")
@@ -2416,12 +2438,12 @@ struct RoomLobbyView: View {
                 .font(.caption)
                 .bold()
                 .foregroundColor(.cyan)
-                .padding(12)
-                .glassEffect(.regular, in: .rect(cornerRadius: 18))
+                .padding(10)
+                .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             }
             
-            ScrollView {
-                VStack(spacing: 10) {
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(spacing: 8) {
                     ForEach(0..<min(game.playerNames.count, 4), id: \.self) { idx in
                         let isMySeat = (idx == game.myPlayerIndex)
                         
@@ -2432,10 +2454,10 @@ struct RoomLobbyView: View {
                                 ZStack {
                                     Circle()
                                         .fill(game.colors[safe: idx] ?? .gray)
-                                        .frame(width: 28, height: 28)
+                                        .frame(width: 26, height: 26)
                                     
                                     if let em = game.emojis[safe: idx], let emoji = em {
-                                        Text(emoji).font(.caption)
+                                        Text(emoji).font(.caption2)
                                     }
                                 }
                             }
@@ -2473,12 +2495,12 @@ struct RoomLobbyView: View {
                                     .foregroundColor(.gray)
                             }
                         }
-                        .padding(10)
-                        .glassEffect(.regular, in: .rect(cornerRadius: 18))
+                        .padding(8)
+                        .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius - 4))
                     }
                 }
             }
-            .frame(maxHeight: 220)
+            .frame(maxHeight: 180)
             
             if p2pManager.isHost {
                 Button(action: onStartGame) {
@@ -2488,7 +2510,7 @@ struct RoomLobbyView: View {
                     }
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
+                    .padding(.vertical, 12)
                     .contentShape(Capsule())
                     .glassEffect(.regular.tint(.darkNavyBlue).interactive(), in: .capsule)
                 }
@@ -2497,7 +2519,7 @@ struct RoomLobbyView: View {
                 Text("等待房主 \(p2pManager.hostDeviceName) 启动对局...")
                     .font(.subheadline)
                     .foregroundColor(.cyan)
-                    .padding()
+                    .padding(.vertical, 6)
             }
         }
         .sheet(item: $selectedPlayerForEmoji) { item in
@@ -2525,7 +2547,7 @@ struct OnlineGameSetupView: View {
     @State private var p2pConnectionSubscription: AnyCancellable? = nil
     
     var body: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 12) {
             HStack {
                 Text("我的玩家昵称:")
                     .font(.subheadline)
@@ -2537,7 +2559,7 @@ struct OnlineGameSetupView: View {
                     .frame(maxWidth: 180)
             }
             .padding(10)
-            .glassEffect(.regular, in: .rect(cornerRadius: 18))
+            .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
             if activeMode == .localHost || activeMode == .localJoined {
                 RoomLobbyView(
@@ -2550,7 +2572,7 @@ struct OnlineGameSetupView: View {
                     onStartGame: onStartGame
                 )
             } else {
-                VStack(spacing: 14) {
+                VStack(spacing: 12) {
                     HStack {
                         Text("🌐 本地局域网联机")
                             .font(.headline)
@@ -2617,7 +2639,7 @@ struct OnlineGameSetupView: View {
                     }
                 }
                 .padding()
-                .glassEffect(.regular, in: .rect(cornerRadius: 18))
+                .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             }
         }
         .alert("连接失败", isPresented: $showAlertError) {
@@ -2628,64 +2650,52 @@ struct OnlineGameSetupView: View {
     }
 }
 
-// MARK: - 18. 主菜单 (增加滚动与多任务安全区支持)
+// MARK: - 18. 主菜单 (绝对居中防滑，自带背景更换入口)
 
 struct StartMenuView: View {
     @ObservedObject var game: GameModel
     @Binding var isSpinningRandomWheel: Bool
     
     @State private var selectedTab: Int = 0
+    @State private var selectedPhotosItem: PhotosPickerItem? = nil
     
     var body: some View {
         NavigationStack {
             ZStack {
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.04, green: 0.12, blue: 0.32),
-                        Color(red: 0.03, green: 0.05, blue: 0.12)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .ignoresSafeArea()
-                
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(spacing: 0) {
-                        Spacer(minLength: 20)
-                        
-                        GlassEffectContainer {
-                            VStack(spacing: 18) {
-                                Text("COLOR WAR")
-                                    .font(.system(size: 38, weight: .black, design: .rounded))
-                                    .foregroundStyle(
-                                        LinearGradient(
-                                            colors: [.white, .white.opacity(0.7)],
-                                            startPoint: .top,
-                                            endPoint: .bottom
-                                        )
+                // 主界面卡片垂直居中展示
+                VStack(spacing: 0) {
+                    Spacer()
+                    
+                    GlassEffectContainer {
+                        VStack(spacing: 16) {
+                            Text("COLOR WAR")
+                                .font(.system(size: 36, weight: .black, design: .rounded))
+                                .foregroundStyle(
+                                    LinearGradient(
+                                        colors: [.white, .white.opacity(0.7)],
+                                        startPoint: .top,
+                                        endPoint: .bottom
                                     )
-                                
-                                if selectedTab == 0 {
-                                    LocalGameSetupView(game: game) {
-                                        isSpinningRandomWheel = true
-                                    }
-                                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
-                                } else {
-                                    OnlineGameSetupView(game: game) {
-                                        isSpinningRandomWheel = true
-                                    }
-                                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                                )
+                            
+                            if selectedTab == 0 {
+                                LocalGameSetupView(game: game) {
+                                    isSpinningRandomWheel = true
                                 }
+                                .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                            } else {
+                                OnlineGameSetupView(game: game) {
+                                    isSpinningRandomWheel = true
+                                }
+                                .transition(.opacity.combined(with: .scale(scale: 0.98)))
                             }
                         }
-                        .frame(maxWidth: 460)
-                        .padding(.horizontal, 16)
-                        
-                        Spacer(minLength: 20)
                     }
-                    .frame(minHeight: UIScreen.main.bounds.height - 100)
+                    .frame(maxWidth: 420)
+                    
+                    Spacer()
                 }
-                .safeAreaPadding(.bottom)
+                .padding(.horizontal, 16)
             }
             .toolbar {
                 ToolbarItem(placement: .principal) {
@@ -2694,11 +2704,42 @@ struct StartMenuView: View {
                         Text("P2P 联机").tag(1)
                     }
                     .pickerStyle(.segmented)
-                    .frame(width: 210)
+                    .frame(width: 200)
+                }
+                
+                // 自定义背景选择按钮
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        PhotosPicker(selection: $selectedPhotosItem, matching: .images) {
+                            Label("从相册选择背景", systemImage: "photo.on.rectangle")
+                        }
+                        
+                        if game.customBackgroundImage != nil {
+                            Button(role: .destructive) {
+                                game.saveCustomBackground(nil)
+                            } label: {
+                                Label("清除自定义背景", systemImage: "trash")
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "photo.badge.plus")
+                            .foregroundColor(.white)
+                            .font(.system(size: 16, weight: .medium))
+                            .padding(8)
+                            .glassEffect(.regular.interactive(), in: .circle)
+                    }
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
+            .onChange(of: selectedPhotosItem) { newItem in
+                Task {
+                    if let data = try? await newItem?.loadTransferable(type: Data.self),
+                       let uiImage = UIImage(data: data) {
+                        game.saveCustomBackground(uiImage)
+                    }
+                }
+            }
         }
     }
 }
@@ -2748,8 +2789,8 @@ struct RandomPlayerWheelOverlay: View {
                 }
                 .padding(.horizontal)
             }
-            .padding(32)
-            .glassEffect(.regular, in: .rect(cornerRadius: 28))
+            .padding(28)
+            .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             .frame(maxWidth: 380)
             .padding(.horizontal, 20)
         }
@@ -2792,7 +2833,7 @@ struct RandomPlayerWheelOverlay: View {
     }
 }
 
-// MARK: - 20. 主对局视图 (加入对局顶部栏/底部死区防御与棋盘绝对居中)
+// MARK: - 20. 主对局视图
 
 struct GamePlayView: View {
     @ObservedObject var game: GameModel
@@ -2802,7 +2843,6 @@ struct GamePlayView: View {
     var body: some View {
         ZStack {
             VStack(spacing: 0) {
-                // 顶部控制条（严格限制在 Safe Area 死区内部）
                 HStack {
                     Button(action: {
                         game.exitToMenu()
@@ -2856,15 +2896,14 @@ struct GamePlayView: View {
                 .padding(.horizontal, 12)
                 .padding(.top, 8)
                 
-                Spacer(minLength: 12)
+                Spacer(minLength: 10)
                 
-                // 棋盘自适应承载容器（防触碰系统死区）
                 BoardView(game: game)
                     .padding(.horizontal, 12)
                 
-                Spacer(minLength: 12)
+                Spacer(minLength: 10)
             }
-            .safeAreaPadding(.all) // 精准避开状态栏与 Home Bar
+            .safeAreaPadding(.all)
             
             if let wIdx = game.winnerIndex {
                 Color.black.opacity(0.8).ignoresSafeArea()
@@ -2927,7 +2966,7 @@ struct GamePlayView: View {
                     }
                 }
                 .padding(28)
-                .glassEffect(.regular, in: .rect(cornerRadius: 24))
+                .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
                 .frame(maxWidth: 420)
                 .padding(.horizontal, 20)
                 .transition(.scale.combined(with: .opacity))
@@ -2993,7 +3032,7 @@ struct PlayerTakeoverSheet: View {
     }
 }
 
-// MARK: - 22. 根视图 ContentView (死区适配与渐变层绘制)
+// MARK: - 22. 根视图 ContentView (包含自定义背景渲染)
 
 struct ContentView: View {
     @StateObject private var game = GameModel()
@@ -3002,23 +3041,31 @@ struct ContentView: View {
     
     var body: some View {
         ZStack {
-            // 底层全屏色（渲染突破 Safe Area）
-            Color(red: 0.05, green: 0.06, blue: 0.09)
+            // 背景底色与自定义图片渲染
+            if let customImg = game.customBackgroundImage {
+                Image(uiImage: customImg)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .ignoresSafeArea()
+                    .overlay(Color.black.opacity(0.35)) // 加一层柔和遮罩以保障 UI 文字可读性
+            } else {
+                Color(red: 0.05, green: 0.06, blue: 0.09)
+                    .ignoresSafeArea()
+                
+                RadialGradient(
+                    colors: [
+                        isGameStarted
+                        ? (game.colors[safe: game.currentPlayer] ?? .blue).opacity(0.25)
+                        : Color(red: 0.04, green: 0.12, blue: 0.32).opacity(0.85),
+                        Color.clear
+                    ],
+                    center: .center,
+                    startRadius: 40,
+                    endRadius: 450
+                )
                 .ignoresSafeArea()
-            
-            RadialGradient(
-                colors: [
-                    isGameStarted
-                    ? (game.colors[safe: game.currentPlayer] ?? .blue).opacity(0.25)
-                    : Color(red: 0.04, green: 0.12, blue: 0.32).opacity(0.85),
-                    Color.clear
-                ],
-                center: .center,
-                startRadius: 40,
-                endRadius: 450
-            )
-            .ignoresSafeArea()
-            .animation(.easeInOut(duration: 0.8), value: isGameStarted ? game.currentPlayer : -1)
+                .animation(.easeInOut(duration: 0.8), value: isGameStarted ? game.currentPlayer : -1)
+            }
             
             if isGameStarted {
                 GamePlayView(
