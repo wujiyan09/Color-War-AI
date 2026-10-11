@@ -91,7 +91,12 @@ struct DiscoveredDevice: Identifiable, Hashable {
     var displayName: String { id.displayName }
 }
 
-// MARK: - 3. 纯 P2P 对战编解码与网络引擎 (修补 P0-1, P2-1, P2-2, P2-3)
+// 👈 替代扩展 Int，符合 SwiftUI 规范的局部包装结构体
+struct IdentifiableInt: Identifiable {
+    let id: Int
+}
+
+// MARK: - 3. 纯 P2P 对战编解码与网络引擎
 
 enum P2PAction: String, Codable {
     case hostConfig
@@ -102,7 +107,7 @@ enum P2PAction: String, Codable {
 }
 
 struct P2PPacket: Codable {
-    var protocolVersion: Int = 1 // P2-3: 协议版本号
+    var protocolVersion: Int = 1
     let action: P2PAction
     let senderID: String
     let row: Int?
@@ -125,16 +130,9 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
     private var serviceBrowser: MCNearbyServiceBrowser?
     private var mcSession: MCSession?
     
-    // P0-1 修复：将单值 @Published receivedPacket 替换为 PassthroughSubject，消除同帧数据包覆盖导致的丢包
     let packetSubject = PassthroughSubject<P2PPacket, Never>()
     
-    @Published var myNickname: String {
-        didSet {
-            UserDefaults.standard.set(myNickname, forKey: "CW_Saved_MyNickname")
-            rebuildPeerID()
-        }
-    }
-    
+    @Published var myNickname: String = "玩家\(Int.random(in: 100...999))"
     @Published var hostDeviceName: String = ""
     @Published var discoveredDevices: [DiscoveredDevice] = []
     @Published var connectedPeers: [String] = []
@@ -148,9 +146,9 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
     private var lastAckTime: Date = Date()
     
     override init() {
+        super.init()
         let savedName = UserDefaults.standard.string(forKey: "CW_Saved_MyNickname") ?? "玩家\(Int.random(in: 100...999))"
         self.myNickname = savedName
-        super.init()
         rebuildPeerID()
     }
     
@@ -226,7 +224,6 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
         hostDeviceName = ""
     }
     
-    // P2-1 修复：增加心跳与假连接超时断开机制
     private func startHeartbeat() {
         heartbeatTimer?.invalidate()
         lastAckTime = Date()
@@ -265,7 +262,7 @@ extension P2PNetworkManager: MCSessionDelegate, MCNearbyServiceAdvertiserDelegat
     
     nonisolated func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
         if let packet = try? JSONDecoder().decode(P2PPacket.self, from: data) {
-            guard packet.protocolVersion == 1 else { return } // P2-3: 协议版本校验
+            guard packet.protocolVersion == 1 else { return }
             
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
@@ -274,7 +271,6 @@ extension P2PNetworkManager: MCSessionDelegate, MCNearbyServiceAdvertiserDelegat
                     let ack = P2PPacket(action: .ack, senderID: self.myNickname, row: nil, col: nil, boardSize: nil, isRandomFirstPlayer: nil, playerIndex: nil, playerNames: nil, playerTypes: nil, colorsHex: nil, emojis: nil)
                     self.sendPacket(ack)
                 }
-                // P0-1 修复：向 Combine 管道推入数据流，保证绝对不丢失任何事件
                 self.packetSubject.send(packet)
             }
         }
@@ -308,7 +304,7 @@ extension P2PNetworkManager: MCSessionDelegate, MCNearbyServiceAdvertiserDelegat
     nonisolated func session(_ session: MCSession, didFinishReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, at localURL: URL?, withError error: Error?) {}
 }
 
-// MARK: - 4. Color 扩展 (修补 P2-5)
+// MARK: - 4. Color 扩展
 
 extension Color {
     static let darkNavyBlue = Color(red: 0.08, green: 0.28, blue: 0.65)
@@ -334,7 +330,6 @@ extension Color {
         self.init(.sRGB, red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255, opacity: 1)
     }
     
-    // P2-5 修复：改为 HSL 空间色相环角度差 + 明度差判定，更贴合视觉体验
     func isSimilar(to other: Color) -> Bool {
         var h1: CGFloat = 0, s1: CGFloat = 0, b1: CGFloat = 0, a1: CGFloat = 0
         var h2: CGFloat = 0, s2: CGFloat = 0, b2: CGFloat = 0, a2: CGFloat = 0
@@ -349,10 +344,12 @@ extension Color {
     }
 }
 
-// MARK: - 5. Core ML 神经网络引擎 (修补 P1-1, P1-5 及修复 async 标红)
+// MARK: - 5. Core ML 神经网络引擎
 
 final class NeuralAISolver: @unchecked Sendable {
     static let shared = NeuralAISolver()
+    
+    @MainActor static let isUsingFallbackSubject = CurrentValueSubject<Bool, Never>(false)
     
     private static let model1InputKey = "board_input"
     private static let model1OutputKey = "policy_logits"
@@ -368,16 +365,15 @@ final class NeuralAISolver: @unchecked Sendable {
     private var isLoaded = false
     private let isolationQueue = DispatchQueue(label: "com.colorwar.neuralai", qos: .userInitiated)
     
-    private init() { reloadModels() }
+    private init() {}
     
-    // P1-1 & P1-5 修复：增加 isLoaded 标志保护防重复加载；采用后台队列隔离异步加载，避免阻塞主线程
     func reloadModels(force: Bool = false) {
         if isLoaded && !force { return }
         
         isolationQueue.async { [weak self] in
             guard let self = self else { return }
             let config = MLModelConfiguration()
-            config.computeUnits = .all
+            config.computeUnits = .cpuOnly
             
             let m1 = self.loadModelDetail(named: "ColorWarAI", config: config)
             let m2 = self.loadModelDetail(named: "colorwar_12x12_model", config: config)
@@ -425,12 +421,16 @@ final class NeuralAISolver: @unchecked Sendable {
         let isModel1 = (playerType == .colorWarAI)
         
         guard boardSize <= 12 else {
+            print("⚠️ [NeuralAI Fallback] 棋盘尺寸超过 12x12，自动切换至高阶算法。")
+            Task { @MainActor in Self.isUsingFallbackSubject.send(true) }
             return await fallback() ?? validMoves.randomElement()
         }
         
         return await withCheckedContinuation { continuation in
             isolationQueue.async { [weak self] in
                 guard let self = self else {
+                    print("⚠️ [NeuralAI Fallback] 实例释放，退回算法。")
+                    Task { @MainActor in Self.isUsingFallbackSubject.send(true) }
                     Task {
                         let res = await fallback() ?? validMoves.randomElement()
                         continuation.resume(returning: res)
@@ -442,6 +442,8 @@ final class NeuralAISolver: @unchecked Sendable {
                 let inputArray = isModel1 ? self.reuseInputArray1 : self.reuseInputArray2
                 
                 guard let model = activeModel, let inputArray = inputArray else {
+                    print("⚠️ [NeuralAI Fallback] Core ML 模型 (\(playerType.rawValue)) 未就绪/未打入包，已无缝降级至‘算法-噩梦 (加强版)’！")
+                    Task { @MainActor in Self.isUsingFallbackSubject.send(true) }
                     Task {
                         let res = await fallback() ?? validMoves.randomElement()
                         continuation.resume(returning: res)
@@ -510,12 +512,17 @@ final class NeuralAISolver: @unchecked Sendable {
                     let outputKey = outDescs[explicitOut] != nil ? explicitOut : (outDescs.keys.first ?? explicitOut)
                     
                     guard let logits = (prediction.featureValue(for: outputKey) ?? prediction.featureValue(for: "policy_logits") ?? prediction.featureValue(for: "logits"))?.multiArrayValue else {
+                        print("⚠️ [NeuralAI Fallback] 输出 Logits 错误，退回算法。")
+                        Task { @MainActor in Self.isUsingFallbackSubject.send(true) }
                         Task {
                             let res = await fallback() ?? validMoves.randomElement()
                             continuation.resume(returning: res)
                         }
                         return
                     }
+                    
+                    Task { @MainActor in Self.isUsingFallbackSubject.send(false) }
+                    print("🧠 [NeuralAI Normal] Core ML (\(playerType.rawValue)) NPU 推理成功！")
                     
                     var bestMove = validMoves[0]
                     var maxScore: Float = -Float.greatestFiniteMagnitude
@@ -535,6 +542,8 @@ final class NeuralAISolver: @unchecked Sendable {
                     }
                     continuation.resume(returning: bestMove)
                 } catch {
+                    print("⚠️ [NeuralAI Fallback] 预测引发异常: \(error.localizedDescription)")
+                    Task { @MainActor in Self.isUsingFallbackSubject.send(true) }
                     Task {
                         let res = await fallback() ?? validMoves.randomElement()
                         continuation.resume(returning: res)
@@ -543,7 +552,6 @@ final class NeuralAISolver: @unchecked Sendable {
             }
         }
     }
-
 }
 
 // MARK: - 6. Zobrist 散列、置换表与杀手/历史启发数据结构
@@ -623,7 +631,7 @@ enum TacticalRiskMode {
     case desperate  // 劣势逆风：引爆混沌翻盘
 }
 
-// MARK: - 8. 高级 AI 算法引擎 (全修复版)
+// MARK: - 8. 高级 AI 算法引擎
 
 struct AISolver: Sendable {
     struct SimCell: Sendable {
@@ -815,7 +823,6 @@ struct AISolver: Sendable {
         }
         
         if playerType.isNeuralAI {
-            // 修复：针对 await 闭包补齐关键字标记
             return await NeuralAISolver.shared.getBestMove(
                 flatBoard: board.cells,
                 boardSize: boardSize,
@@ -1524,7 +1531,7 @@ struct AISolver: Sendable {
     }
 }
 
-// MARK: - 9. GameModel ViewModel (修补 P0-2, P0-3, P1-3, P1-4, P1-6, P2-4, P2-7)
+// MARK: - 9. GameModel ViewModel
 
 @MainActor
 final class GameModel: ObservableObject {
@@ -1573,11 +1580,13 @@ final class GameModel: ObservableObject {
     @Published var flyingOrbs: [FlyingOrb] = []
     @Published var emphasizedCells: Set<Int> = []
     
-    // P1-3 & P1-4 修复：缓存 activePlayerIndices 与 playableCells，减少每帧 $O(N^2)$ 计算与堆分配
+    @Published var isAIFallbackActive: Bool = false
+    
     @Published private(set) var activePlayerIndices: [Int] = []
     @Published private(set) var playableCells: Set<Int> = []
     
     private var p2pCancellable: AnyCancellable? = nil
+    private var fallbackCancellable: AnyCancellable? = nil
     private var aiTask: Task<Void, Never>? = nil
     private var saveWorkItem: DispatchWorkItem? = nil
     
@@ -1586,7 +1595,6 @@ final class GameModel: ObservableObject {
         updateCachedPlayableCells()
     }
     
-    // P2-7 修复：如果当前玩家已被淘汰，直接返回 []，彻底封堵落子漏洞
     private func updateCachedPlayableCells() {
         guard currentPlayer >= 0 && currentPlayer < PlayerPreset.maxPlayers,
               !eliminated[currentPlayer] else {
@@ -1647,10 +1655,14 @@ final class GameModel: ObservableObject {
         
         updateCachedActivePlayers()
         setupP2PListener()
+        
+        fallbackCancellable = NeuralAISolver.isUsingFallbackSubject
+            .receive(on: DispatchQueue.main)
+            .assign(to: \.isAIFallbackActive, on: self)
+        
         resetGame()
     }
     
-    // P0-1 & P0-2 & P2-2 修复：解析管道消息，增加严苛的 P2P 落子回合与网络类型校验
     private func setupP2PListener() {
         p2pCancellable?.cancel()
         p2pCancellable = P2PNetworkManager.shared.packetSubject
@@ -1711,7 +1723,6 @@ final class GameModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: item)
     }
     
-    // P2-4 修复：补全索引越界保护逻辑
     func tryUpdatePlayerEmoji(at index: Int, newEmoji: String?) -> Bool {
         guard index >= 0 && index < PlayerPreset.maxPlayers, index < emojis.count else { return false }
         if let emoji = newEmoji, !emoji.isEmpty {
@@ -1779,7 +1790,6 @@ final class GameModel: ObservableObject {
         NeuralAISolver.shared.reloadModels()
     }
     
-    // P0-3 修复：修改当前回合玩家控制类型时，先显式取消当前执行中的 AI 异步任务
     func updatePlayerType(at index: Int, to newType: PlayerControlType) {
         guard index >= 0 && index < PlayerPreset.maxPlayers else { return }
         
@@ -1796,7 +1806,6 @@ final class GameModel: ObservableObject {
         }
     }
     
-    // P1-6 修复：入口强校验 playableCells，防止并发或延迟落子到非法格
     func play(row: Int, column: Int) {
         let flatIdx = row * boardSize + column
         guard !isProcessingCascade, winnerIndex == nil, playableCells.contains(flatIdx) else { return }
@@ -1917,7 +1926,6 @@ final class GameModel: ObservableObject {
         }
     }
     
-    // P1-2 修复：已淘汰玩家包含在逻辑盘中，避免无法入场的极端卡死死锁
     private func checkGameOver() -> Bool {
         let alive = activePlayerIndices.filter { !eliminated[$0] }
         let allEnteredOrEliminated = activePlayerIndices.allSatisfy { hasEntered[$0] || eliminated[$0] }
@@ -2297,7 +2305,7 @@ extension Array {
 struct LocalGameSetupView: View {
     @ObservedObject var game: GameModel
     let onStartGame: () -> Void
-    @State private var selectedPlayerForEmoji: Int? = nil
+    @State private var selectedPlayerForEmoji: IdentifiableInt? = nil
     
     var isPlayerCountValid: Bool {
         game.activePlayerIndices.count >= 2
@@ -2339,7 +2347,7 @@ struct LocalGameSetupView: View {
             VStack(spacing: 10) {
                 ForEach(0..<min(game.playerNames.count, PlayerPreset.maxPlayers), id: \.self) { idx in
                     HStack(spacing: 10) {
-                        Button(action: { selectedPlayerForEmoji = idx }) {
+                        Button(action: { selectedPlayerForEmoji = IdentifiableInt(id: idx) }) {
                             ZStack {
                                 Circle()
                                     .fill(game.colors[safe: idx] ?? .gray)
@@ -2400,11 +2408,8 @@ struct LocalGameSetupView: View {
             .opacity(isPlayerCountValid ? 1.0 : 0.4)
             .disabled(!isPlayerCountValid)
         }
-        .sheet(item: Binding<Int?>(
-            get: { selectedPlayerForEmoji },
-            set: { selectedPlayerForEmoji = $0 }
-        )) { idx in
-            EmojiPickerSheet(game: game, playerIndex: idx)
+        .sheet(item: $selectedPlayerForEmoji) { item in
+            EmojiPickerSheet(game: game, playerIndex: item.id)
         }
     }
 }
@@ -2512,7 +2517,7 @@ struct RoomLobbyView: View {
     let onExitLobby: () -> Void
     let onStartGame: () -> Void
     
-    @State private var selectedPlayerForEmoji: Int? = nil
+    @State private var selectedPlayerForEmoji: IdentifiableInt? = nil
     
     var body: some View {
         VStack(spacing: 14) {
@@ -2580,7 +2585,7 @@ struct RoomLobbyView: View {
                     
                     HStack {
                         Button(action: {
-                            if isMySeat { selectedPlayerForEmoji = idx }
+                            if isMySeat { selectedPlayerForEmoji = IdentifiableInt(id: idx) }
                         }) {
                             ZStack {
                                 Circle()
@@ -2651,16 +2656,13 @@ struct RoomLobbyView: View {
                     .padding()
             }
         }
-        .sheet(item: Binding<Int?>(
-            get: { selectedPlayerForEmoji },
-            set: { selectedPlayerForEmoji = $0 }
-        )) { idx in
-            EmojiPickerSheet(game: game, playerIndex: idx)
+        .sheet(item: $selectedPlayerForEmoji) { item in
+            EmojiPickerSheet(game: game, playerIndex: item.id)
         }
     }
 }
 
-// MARK: - 18. 联机设置 View (修补 P2-2)
+// MARK: - 18. 联机设置 View
 
 enum ActiveOnlineMode {
     case none
@@ -2757,7 +2759,6 @@ struct OnlineGameSetupView: View {
                                         game.playerNames[1] = p2pManager.myNickname
                                         game.myPlayerIndex = 1
                                         activeMode = .localJoined
-                                        // P2-2 修复：连入房间后，主动发 syncRequest 补充配置
                                         p2pManager.sendPacket(P2PPacket(action: .syncRequest, senderID: p2pManager.myNickname, row: nil, col: nil, boardSize: nil, isRandomFirstPlayer: nil, playerIndex: nil, playerNames: nil, playerTypes: nil, colorsHex: nil, emojis: nil))
                                     }
                             },
@@ -2857,11 +2858,7 @@ struct StartMenuView: View {
     }
 }
 
-extension Int: @retroactive Identifiable {
-    public var id: Int { self }
-}
-
-// MARK: - 20. 随机先手轮盘抽签 Overlay (修补 P2-6)
+// MARK: - 20. 随机先手轮盘抽签 Overlay
 
 struct RandomPlayerWheelOverlay: View {
     @ObservedObject var game: GameModel
@@ -2915,7 +2912,6 @@ struct RandomPlayerWheelOverlay: View {
         }
     }
     
-    // P2-6 修复：增加空数组检查，彻底消除强制解包崩溃风险
     private func startFastWheelSpin() {
         let count = activeIndices.count
         guard count > 0, let targetWinner = activeIndices.randomElement() else {
@@ -2993,6 +2989,21 @@ struct GamePlayView: View {
                         Text("\(game.playerNames[safe: game.currentPlayer] ?? "玩家") 回合")
                             .font(.system(size: 16, weight: .bold, design: .rounded))
                             .foregroundColor(.white)
+                        
+                        if game.playerTypes[game.currentPlayer].isNeuralAI {
+                            HStack(spacing: 3) {
+                                Image(systemName: game.isAIFallbackActive ? "exclamationmark.triangle.fill" : "cpu.fill")
+                                Text(game.isAIFallbackActive ? "算法降级" : "NPU加速")
+                            }
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(game.isAIFallbackActive ? .yellow : .green)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule()
+                                    .fill(game.isAIFallbackActive ? Color.yellow.opacity(0.2) : Color.green.opacity(0.2))
+                            )
+                        }
                     }
                     .padding(.horizontal, 18)
                     .padding(.vertical, 10)
