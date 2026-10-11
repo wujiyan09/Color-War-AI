@@ -91,7 +91,7 @@ struct IdentifiableInt: Identifiable {
     let id: Int
 }
 
-// MARK: - 3. 纯 P2P 对战编解码与网络引擎
+// MARK: - 3. 纯 P2P 对战编解码与网络引擎 (延迟生命周期)
 
 enum P2PAction: String, Codable {
     case hostConfig
@@ -210,8 +210,13 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
         heartbeatTimer = nil
         
         serviceAdvertiser?.stopAdvertisingPeer()
+        serviceAdvertiser = nil
         serviceBrowser?.stopBrowsingForPeers()
+        serviceBrowser = nil
+        
         mcSession?.disconnect()
+        mcSession = nil
+        
         isConnected = false
         isConnecting = false
         isSearchingTimeout = false
@@ -729,10 +734,10 @@ struct AISolver: Sendable {
     private func calculateAspirationNightmareMove(validMoves: [(Int, Int)]) -> (Int, Int)? {
         let maxDepth: Int
         switch boardSize {
-        case ...6: maxDepth = 7
-        case 7...8: maxDepth = 5
-        case 9...10: maxDepth = 4
-        default: maxDepth = 3
+        case ...6: maxDepth = 6
+        case 7...8: maxDepth = 4
+        case 9...10: maxDepth = 3
+        default: maxDepth = 2
         }
         
         let aliveCount = activePlayers.filter { !isPlayerEliminated($0, in: eliminated) }.count
@@ -827,7 +832,7 @@ struct AISolver: Sendable {
         }
         
         if depth <= 1 || isGameOverSimulated(eliminated: eliminatedState) {
-            let val = quiescenceSearch(boardState: boardState, hasEnteredState: hasEnteredState, eliminatedState: eliminatedState, alpha: a, beta: bVal, turnPlayer: turnPlayer, qsDepth: 4, tt: &tt)
+            let val = quiescenceSearch(boardState: boardState, hasEnteredState: hasEnteredState, eliminatedState: eliminatedState, alpha: a, beta: bVal, turnPlayer: turnPlayer, qsDepth: 3, tt: &tt)
             tt.store(hash: hash, depth: depth, score: val, type: .exact, move: nil)
             return val
         }
@@ -1809,7 +1814,7 @@ final class GameModel: ObservableObject {
         let currentType = playerTypes[currentPlayer]
         guard currentType.isAI && winnerIndex == nil else { return }
         
-        aiTask = Task(priority: .userInitiated) {
+        aiTask = Task(priority: .utility) {
             try? await Task.sleep(nanoseconds: 250_000_000)
             if Task.isCancelled { return }
             
@@ -1832,7 +1837,7 @@ final class GameModel: ObservableObject {
     }
 }
 
-// MARK: - 9. 棋盘视图 (彻底解决 iPad 全屏模式下的布局挤压问题)
+// MARK: - 9. 棋盘视图 (高优先级隔离，防止挤推顶部控制栏)
 
 struct BoardView: View {
     @ObservedObject var game: GameModel
@@ -1901,7 +1906,7 @@ struct BoardView: View {
     }
 }
 
-// MARK: - 10. 单元格视图
+// MARK: - 10. 单元格视图 (Equatable)
 
 struct CellView: View, Equatable {
     let cell: Cell
@@ -2158,7 +2163,7 @@ extension Array {
     }
 }
 
-// MARK: - 14. 单机/本地设置 View
+// MARK: - 14. 单机/本地设置 View (使用 LazyVStack 降低渲染负担)
 
 struct LocalGameSetupView: View {
     @ObservedObject var game: GameModel
@@ -2175,7 +2180,7 @@ struct LocalGameSetupView: View {
     
     @ViewBuilder
     private var playerRowsContent: some View {
-        VStack(spacing: 10) {
+        LazyVStack(spacing: 10) {
             ForEach(0..<min(game.playerNames.count, PlayerPreset.maxPlayers), id: \.self) { idx in
                 HStack(spacing: 8) {
                     Button(action: { selectedPlayerForEmoji = IdentifiableInt(id: idx) }) {
@@ -2549,7 +2554,7 @@ struct RoomLobbyView: View {
     }
 }
 
-// MARK: - 17. 联机设置 View
+// MARK: - 17. 联机设置 View (绑定生命周期，离开自动停止广播)
 
 enum ActiveOnlineMode {
     case none
@@ -2663,6 +2668,12 @@ struct OnlineGameSetupView: View {
                 .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             }
         }
+        .onDisappear {
+            p2pManager.stopP2P()
+            p2pConnectionSubscription?.cancel()
+            p2pConnectionSubscription = nil
+            activeMode = .none
+        }
         .alert("连接失败", isPresented: $showAlertError) {
             Button("确定", role: .cancel) { }
         } message: {
@@ -2671,7 +2682,7 @@ struct OnlineGameSetupView: View {
     }
 }
 
-// MARK: - 18. 主菜单 View (完全穿透渲染底部渐变/图层，彻底消除黑屏)
+// MARK: - 18. 主菜单 View (彻底透传渲染底层渐变/图层，清空黑屏宿主)
 
 struct StartMenuView: View {
     @ObservedObject var game: GameModel
@@ -2686,29 +2697,27 @@ struct StartMenuView: View {
             VStack(spacing: 0) {
                 Spacer()
                 
-                GlassEffectContainer {
-                    VStack(spacing: 16) {
-                        Text("COLOR WAR")
-                            .font(.system(size: 36, weight: .black, design: .rounded))
-                            .foregroundStyle(
-                                LinearGradient(
-                                    colors: [.white, .white.opacity(0.7)],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                )
+                VStack(spacing: 16) {
+                    Text("COLOR WAR")
+                        .font(.system(size: 36, weight: .black, design: .rounded))
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [.white, .white.opacity(0.7)],
+                                startPoint: .top,
+                                endPoint: .bottom
                             )
-                        
-                        if selectedTab == 0 {
-                            LocalGameSetupView(game: game) {
-                                isSpinningRandomWheel = true
-                            }
-                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
-                        } else {
-                            OnlineGameSetupView(game: game) {
-                                isSpinningRandomWheel = true
-                            }
-                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                        )
+                    
+                    if selectedTab == 0 {
+                        LocalGameSetupView(game: game) {
+                            isSpinningRandomWheel = true
                         }
+                        .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                    } else {
+                        OnlineGameSetupView(game: game) {
+                            isSpinningRandomWheel = true
+                        }
+                        .transition(.opacity.combined(with: .scale(scale: 0.98)))
                     }
                 }
                 .frame(maxWidth: 440)
@@ -2717,6 +2726,7 @@ struct StartMenuView: View {
             }
             .padding(.horizontal, 20)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.clear)
             .toolbar {
                 ToolbarItem(placement: .principal) {
                     Picker("Game Mode", selection: $selectedTab) {
@@ -2767,6 +2777,7 @@ struct StartMenuView: View {
             .toolbarBackground(.hidden, for: .navigationBar)
         }
         .scrollContentBackground(.hidden)
+        .background(Color.clear)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
@@ -2860,7 +2871,7 @@ struct RandomPlayerWheelOverlay: View {
     }
 }
 
-// MARK: - 20. 主对局视图 (增加高优先级安全布局，防止顶部栏挤出屏幕)
+// MARK: - 20. 主对局视图 (高优先级布局，强行锚定 Safe Area)
 
 struct GamePlayView: View {
     @ObservedObject var game: GameModel
@@ -3060,7 +3071,7 @@ struct PlayerTakeoverSheet: View {
     }
 }
 
-// MARK: - 22. 根视图 ContentView (全屏图层约束与大范围渐变光晕)
+// MARK: - 22. 根视图 ContentView (采用开销极低且表现力极佳的 LinearGradient)
 
 struct ContentView: View {
     @StateObject private var game = GameModel()
@@ -3080,16 +3091,15 @@ struct ContentView: View {
                     .ignoresSafeArea()
                     .overlay(Color.black.opacity(0.35))
             } else {
-                RadialGradient(
+                LinearGradient(
                     colors: [
                         isGameStarted
-                        ? (game.colors[safe: game.currentPlayer] ?? .blue).opacity(0.40)
-                        : Color(red: 0.08, green: 0.28, blue: 0.68).opacity(0.90),
+                        ? (game.colors[safe: game.currentPlayer] ?? .blue).opacity(0.35)
+                        : Color(red: 0.08, green: 0.28, blue: 0.65).opacity(0.85),
                         Color(red: 0.03, green: 0.05, blue: 0.10)
                     ],
-                    center: .center,
-                    startRadius: 80,
-                    endRadius: 900
+                    startPoint: .top,
+                    endPoint: .bottom
                 )
                 .ignoresSafeArea()
                 .animation(.easeInOut(duration: 0.8), value: isGameStarted ? game.currentPlayer : -1)
