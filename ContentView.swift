@@ -1,5 +1,4 @@
 import SwiftUI
-import CoreML
 import Combine
 import UIKit
 import QuartzCore
@@ -28,8 +27,6 @@ final class Haptics {
 
 enum PlayerControlType: String, CaseIterable, Identifiable, Codable {
     case human = "真人"
-    case colorWarAI = "ColorWarAI (NPU)"
-    case colorWar12x12 = "12x12 AI (NPU)"
     case mathNightmare = "算法-噩梦"
     case enhancedNightmare = "算法-噩梦 (加强版)"
     case p2pNetwork = "网络玩家 (P2P)"
@@ -38,11 +35,7 @@ enum PlayerControlType: String, CaseIterable, Identifiable, Codable {
     var id: String { rawValue }
     
     var isAI: Bool {
-        self != .human && self != .disabled && self != .p2pNetwork
-    }
-    
-    var isNeuralAI: Bool {
-        self == .colorWarAI || self == .colorWar12x12
+        self == .mathNightmare || self == .enhancedNightmare
     }
 }
 
@@ -91,7 +84,6 @@ struct DiscoveredDevice: Identifiable, Hashable {
     var displayName: String { id.displayName }
 }
 
-// 👈 替代扩展 Int，符合 SwiftUI 规范的局部包装结构体
 struct IdentifiableInt: Identifiable {
     let id: Int
 }
@@ -344,217 +336,7 @@ extension Color {
     }
 }
 
-// MARK: - 5. Core ML 神经网络引擎
-
-final class NeuralAISolver: @unchecked Sendable {
-    static let shared = NeuralAISolver()
-    
-    @MainActor static let isUsingFallbackSubject = CurrentValueSubject<Bool, Never>(false)
-    
-    private static let model1InputKey = "board_input"
-    private static let model1OutputKey = "policy_logits"
-    private static let model2InputKey = "board_input"
-    private static let model2OutputKey = "policy_logits"
-    
-    private var modelColorWarAI: MLModel?
-    private var reuseInputArray1: MLMultiArray?
-    
-    private var model12x12: MLModel?
-    private var reuseInputArray2: MLMultiArray?
-    
-    private var isLoaded = false
-    private let isolationQueue = DispatchQueue(label: "com.colorwar.neuralai", qos: .userInitiated)
-    
-    private init() {}
-    
-    func reloadModels(force: Bool = false) {
-        if isLoaded && !force { return }
-        
-        isolationQueue.async { [weak self] in
-            guard let self = self else { return }
-            let config = MLModelConfiguration()
-            config.computeUnits = .cpuOnly
-            
-            let m1 = self.loadModelDetail(named: "ColorWarAI", config: config)
-            let m2 = self.loadModelDetail(named: "colorwar_12x12_model", config: config)
-            
-            self.isolationQueue.async(flags: .barrier) {
-                if let (model, _) = m1 {
-                    self.reuseInputArray1 = try? MLMultiArray(shape: [1, 5, 12, 12], dataType: .float32)
-                    self.modelColorWarAI = model
-                }
-                if let (model, _) = m2 {
-                    self.reuseInputArray2 = try? MLMultiArray(shape: [1, 4, 12, 12], dataType: .float32)
-                    self.model12x12 = model
-                }
-                self.isLoaded = true
-            }
-        }
-    }
-    
-    private func loadModelDetail(named name: String, config: MLModelConfiguration) -> (MLModel, String)? {
-        if let url = Bundle.main.url(forResource: name, withExtension: "mlmodelc"),
-           let m = try? MLModel(contentsOf: url, configuration: config) {
-            return (m, "OK")
-        }
-        let allCompiled = Bundle.main.urls(forResourcesWithExtension: "mlmodelc", subdirectory: nil) ?? []
-        if let matchedURL = allCompiled.first(where: { $0.deletingPathExtension().lastPathComponent == name }),
-           let m = try? MLModel(contentsOf: matchedURL, configuration: config) {
-            return (m, "OK")
-        }
-        if let rawURL = Bundle.main.url(forResource: name, withExtension: "mlmodel"),
-           let compiledURL = try? MLModel.compileModel(at: rawURL),
-           let m = try? MLModel(contentsOf: compiledURL, configuration: config) {
-            return (m, "OK")
-        }
-        return nil
-    }
-    
-    func getBestMove(flatBoard: [AISolver.SimCell],
-                     boardSize: Int,
-                     currentPlayer: Int,
-                     playerType: PlayerControlType,
-                     validMoves: [(Int, Int)],
-                     fallback: @escaping () async -> (Int, Int)?) async -> (Int, Int)? {
-        guard !validMoves.isEmpty else { return nil }
-        
-        let isModel1 = (playerType == .colorWarAI)
-        
-        guard boardSize <= 12 else {
-            print("⚠️ [NeuralAI Fallback] 棋盘尺寸超过 12x12，自动切换至高阶算法。")
-            Task { @MainActor in Self.isUsingFallbackSubject.send(true) }
-            return await fallback() ?? validMoves.randomElement()
-        }
-        
-        return await withCheckedContinuation { continuation in
-            isolationQueue.async { [weak self] in
-                guard let self = self else {
-                    print("⚠️ [NeuralAI Fallback] 实例释放，退回算法。")
-                    Task { @MainActor in Self.isUsingFallbackSubject.send(true) }
-                    Task {
-                        let res = await fallback() ?? validMoves.randomElement()
-                        continuation.resume(returning: res)
-                    }
-                    return
-                }
-                
-                let activeModel = isModel1 ? self.modelColorWarAI : self.model12x12
-                let inputArray = isModel1 ? self.reuseInputArray1 : self.reuseInputArray2
-                
-                guard let model = activeModel, let inputArray = inputArray else {
-                    print("⚠️ [NeuralAI Fallback] Core ML 模型 (\(playerType.rawValue)) 未就绪/未打入包，已无缝降级至‘算法-噩梦 (加强版)’！")
-                    Task { @MainActor in Self.isUsingFallbackSubject.send(true) }
-                    Task {
-                        let res = await fallback() ?? validMoves.randomElement()
-                        continuation.resume(returning: res)
-                    }
-                    return
-                }
-                
-                do {
-                    let maxDim = 12
-                    let channelStride = 144
-                    let numChannels = isModel1 ? 5 : 4
-                    let totalElements = numChannels * 144
-                    
-                    let floatPtr = inputArray.dataPointer.bindMemory(to: Float.self, capacity: totalElements)
-                    for i in 0..<totalElements { floatPtr[i] = 0.0 }
-                    
-                    var playerChannelMap: [Int: Int] = [:]
-                    playerChannelMap[currentPlayer] = 0
-                    
-                    var enemyChannelIdx = 1
-                    for cell in flatBoard {
-                        if let owner = cell.owner, owner != currentPlayer {
-                            if playerChannelMap[owner] == nil {
-                                if enemyChannelIdx < 4 {
-                                    playerChannelMap[owner] = enemyChannelIdx
-                                    enemyChannelIdx += 1
-                                } else {
-                                    playerChannelMap[owner] = 3
-                                }
-                            }
-                        }
-                    }
-                    
-                    for r in 0..<boardSize {
-                        for c in 0..<boardSize {
-                            let cell = flatBoard[r * boardSize + c]
-                            if let owner = cell.owner, let relChannel = playerChannelMap[owner] {
-                                let idx = relChannel * channelStride + r * maxDim + c
-                                if idx < totalElements {
-                                    let normalizedValue = Float(cell.count) / 4.0
-                                    floatPtr[idx] = normalizedValue
-                                }
-                            }
-                        }
-                    }
-                    
-                    if isModel1 {
-                        let maskOffset = 4 * channelStride
-                        for (r, c) in validMoves {
-                            let maskIdx = maskOffset + r * maxDim + c
-                            if maskIdx < totalElements {
-                                floatPtr[maskIdx] = 1.0
-                            }
-                        }
-                    }
-                    
-                    let inDescs = model.modelDescription.inputDescriptionsByName
-                    let explicitIn = isModel1 ? Self.model1InputKey : Self.model2InputKey
-                    let inputKey = inDescs[explicitIn] != nil ? explicitIn : (inDescs.keys.first ?? explicitIn)
-                    
-                    let provider = try MLDictionaryFeatureProvider(dictionary: [inputKey: inputArray])
-                    let prediction = try model.prediction(from: provider)
-                    
-                    let outDescs = model.modelDescription.outputDescriptionsByName
-                    let explicitOut = isModel1 ? Self.model1OutputKey : Self.model2OutputKey
-                    let outputKey = outDescs[explicitOut] != nil ? explicitOut : (outDescs.keys.first ?? explicitOut)
-                    
-                    guard let logits = (prediction.featureValue(for: outputKey) ?? prediction.featureValue(for: "policy_logits") ?? prediction.featureValue(for: "logits"))?.multiArrayValue else {
-                        print("⚠️ [NeuralAI Fallback] 输出 Logits 错误，退回算法。")
-                        Task { @MainActor in Self.isUsingFallbackSubject.send(true) }
-                        Task {
-                            let res = await fallback() ?? validMoves.randomElement()
-                            continuation.resume(returning: res)
-                        }
-                        return
-                    }
-                    
-                    Task { @MainActor in Self.isUsingFallbackSubject.send(false) }
-                    print("🧠 [NeuralAI Normal] Core ML (\(playerType.rawValue)) NPU 推理成功！")
-                    
-                    var bestMove = validMoves[0]
-                    var maxScore: Float = -Float.greatestFiniteMagnitude
-                    
-                    let count = min(144, logits.count)
-                    let logitsFloatPtr = logits.dataPointer.bindMemory(to: Float.self, capacity: count)
-                    
-                    for (r, c) in validMoves {
-                        let offset = r * maxDim + c
-                        if offset < count {
-                            let s = logitsFloatPtr[offset]
-                            if s > maxScore {
-                                maxScore = s
-                                bestMove = (r, c)
-                            }
-                        }
-                    }
-                    continuation.resume(returning: bestMove)
-                } catch {
-                    print("⚠️ [NeuralAI Fallback] 预测引发异常: \(error.localizedDescription)")
-                    Task { @MainActor in Self.isUsingFallbackSubject.send(true) }
-                    Task {
-                        let res = await fallback() ?? validMoves.randomElement()
-                        continuation.resume(returning: res)
-                    }
-                }
-            }
-        }
-    }
-}
-
-// MARK: - 6. Zobrist 散列、置换表与杀手/历史启发数据结构
+// MARK: - 5. Zobrist 散列、置换表与杀手/历史启发数据结构
 
 struct TranspositionTable: Sendable {
     enum EntryType: Sendable { case exact, lowerBound, upperBound }
@@ -623,7 +405,7 @@ struct MoveOrderingTable: Sendable {
     }
 }
 
-// MARK: - 7. 动态风险偏好控制策略
+// MARK: - 6. 动态风险偏好控制策略
 
 enum TacticalRiskMode {
     case dominant   // 优势顺风：稳健控盘
@@ -631,7 +413,7 @@ enum TacticalRiskMode {
     case desperate  // 劣势逆风：引爆混沌翻盘
 }
 
-// MARK: - 8. 高级 AI 算法引擎
+// MARK: - 7. 算法 AI 求解引擎
 
 struct AISolver: Sendable {
     struct SimCell: Sendable {
@@ -820,19 +602,6 @@ struct AISolver: Sendable {
                     return dist1 < dist2
                 }
             }
-        }
-        
-        if playerType.isNeuralAI {
-            return await NeuralAISolver.shared.getBestMove(
-                flatBoard: board.cells,
-                boardSize: boardSize,
-                currentPlayer: currentPlayer,
-                playerType: playerType,
-                validMoves: validMoves,
-                fallback: { [validMoves] in
-                    return self.calculateAspirationNightmareMove(validMoves: validMoves)
-                }
-            )
         }
         
         if playerType == .enhancedNightmare {
@@ -1531,7 +1300,7 @@ struct AISolver: Sendable {
     }
 }
 
-// MARK: - 9. GameModel ViewModel
+// MARK: - 8. GameModel ViewModel
 
 @MainActor
 final class GameModel: ObservableObject {
@@ -1580,13 +1349,10 @@ final class GameModel: ObservableObject {
     @Published var flyingOrbs: [FlyingOrb] = []
     @Published var emphasizedCells: Set<Int> = []
     
-    @Published var isAIFallbackActive: Bool = false
-    
     @Published private(set) var activePlayerIndices: [Int] = []
     @Published private(set) var playableCells: Set<Int> = []
     
     private var p2pCancellable: AnyCancellable? = nil
-    private var fallbackCancellable: AnyCancellable? = nil
     private var aiTask: Task<Void, Never>? = nil
     private var saveWorkItem: DispatchWorkItem? = nil
     
@@ -1624,10 +1390,13 @@ final class GameModel: ObservableObject {
         if let data = UserDefaults.standard.data(forKey: "CW_Saved_PlayerTypes"),
            let decoded = try? JSONDecoder().decode([PlayerControlType].self, from: data),
            decoded.count == PlayerPreset.maxPlayers {
-            self.playerTypes = decoded
+            // 剔除旧版的 NPU 枚举兼容
+            self.playerTypes = decoded.map { type in
+                (type.rawValue.contains("NPU")) ? .enhancedNightmare : type
+            }
         } else {
             self.playerTypes = [
-                .human, .colorWarAI, .enhancedNightmare, .colorWar12x12,
+                .human, .mathNightmare, .enhancedNightmare, .human,
                 .disabled, .disabled, .disabled, .disabled
             ]
         }
@@ -1655,11 +1424,6 @@ final class GameModel: ObservableObject {
         
         updateCachedActivePlayers()
         setupP2PListener()
-        
-        fallbackCancellable = NeuralAISolver.isUsingFallbackSubject
-            .receive(on: DispatchQueue.main)
-            .assign(to: \.isAIFallbackActive, on: self)
-        
         resetGame()
     }
     
@@ -1710,7 +1474,7 @@ final class GameModel: ObservableObject {
         let item = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
             UserDefaults.standard.set(self.playerNames, forKey: "CW_Saved_PlayerNames")
-            if let encoded = try? JSONEncoder().encode(self.playerTypes) {
+            if let encoded = try? JSONDecoder().encode(self.playerTypes) {
                 UserDefaults.standard.set(encoded, forKey: "CW_Saved_PlayerTypes")
             }
             let hexes = self.colors.map { $0.toHex() }
@@ -1787,7 +1551,6 @@ final class GameModel: ObservableObject {
         isProcessingCascade = false
         winnerIndex = nil
         P2PNetworkManager.shared.stopP2P()
-        NeuralAISolver.shared.reloadModels()
     }
     
     func updatePlayerType(at index: Int, to newType: PlayerControlType) {
@@ -1982,7 +1745,7 @@ final class GameModel: ObservableObject {
     }
 }
 
-// MARK: - 10. 棋盘视图
+// MARK: - 9. 棋盘视图
 
 struct BoardView: View {
     @ObservedObject var game: GameModel
@@ -2044,7 +1807,7 @@ struct BoardView: View {
     }
 }
 
-// MARK: - 11. 单元格视图
+// MARK: - 10. 单元格视图
 
 struct CellView: View, Equatable {
     let cell: Cell
@@ -2083,7 +1846,7 @@ struct CellView: View, Equatable {
     }
 }
 
-// MARK: - 12. 棋子外观视图
+// MARK: - 11. 棋子外观视图
 
 struct PieceView: View {
     let color: Color
@@ -2128,7 +1891,7 @@ struct PieceView: View {
     }
 }
 
-// MARK: - 13. 棋子点数排列视图
+// MARK: - 12. 棋子点数排列视图
 
 struct DotPattern: View {
     let count: Int
@@ -2190,7 +1953,7 @@ struct DotPattern: View {
     }
 }
 
-// MARK: - 14. Emoji 选择器 Sheet
+// MARK: - 13. Emoji 选择器 Sheet
 
 struct EmojiPickerSheet: View {
     @ObservedObject var game: GameModel
@@ -2300,7 +2063,7 @@ extension Array {
     }
 }
 
-// MARK: - 15. 单机/本地设置 View
+// MARK: - 14. 单机/本地设置 View
 
 struct LocalGameSetupView: View {
     @ObservedObject var game: GameModel
@@ -2414,7 +2177,7 @@ struct LocalGameSetupView: View {
     }
 }
 
-// MARK: - 16. 近场搜寻内嵌式菜单 View
+// MARK: - 15. 近场搜寻内嵌式菜单 View
 
 struct LocalDeviceBrowserInlineView: View {
     @ObservedObject var p2pManager = P2PNetworkManager.shared
@@ -2509,7 +2272,7 @@ struct LocalDeviceBrowserInlineView: View {
     }
 }
 
-// MARK: - 17. 4 人房间大厅 View
+// MARK: - 16. 4 人房间大厅 View
 
 struct RoomLobbyView: View {
     @ObservedObject var game: GameModel
@@ -2662,7 +2425,7 @@ struct RoomLobbyView: View {
     }
 }
 
-// MARK: - 18. 联机设置 View
+// MARK: - 17. 联机设置 View
 
 enum ActiveOnlineMode {
     case none
@@ -2784,7 +2547,7 @@ struct OnlineGameSetupView: View {
     }
 }
 
-// MARK: - 19. 主菜单
+// MARK: - 18. 主菜单
 
 struct StartMenuView: View {
     @ObservedObject var game: GameModel
@@ -2852,13 +2615,10 @@ struct StartMenuView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
         }
-        .onAppear {
-            NeuralAISolver.shared.reloadModels()
-        }
     }
 }
 
-// MARK: - 20. 随机先手轮盘抽签 Overlay
+// MARK: - 19. 随机先手轮盘抽签 Overlay
 
 struct RandomPlayerWheelOverlay: View {
     @ObservedObject var game: GameModel
@@ -2946,7 +2706,7 @@ struct RandomPlayerWheelOverlay: View {
     }
 }
 
-// MARK: - 21. 主对局视图
+// MARK: - 20. 主对局视图
 
 struct GamePlayView: View {
     @ObservedObject var game: GameModel
@@ -2989,21 +2749,6 @@ struct GamePlayView: View {
                         Text("\(game.playerNames[safe: game.currentPlayer] ?? "玩家") 回合")
                             .font(.system(size: 16, weight: .bold, design: .rounded))
                             .foregroundColor(.white)
-                        
-                        if game.playerTypes[game.currentPlayer].isNeuralAI {
-                            HStack(spacing: 3) {
-                                Image(systemName: game.isAIFallbackActive ? "exclamationmark.triangle.fill" : "cpu.fill")
-                                Text(game.isAIFallbackActive ? "算法降级" : "NPU加速")
-                            }
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(game.isAIFallbackActive ? .yellow : .green)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(
-                                Capsule()
-                                    .fill(game.isAIFallbackActive ? Color.yellow.opacity(0.2) : Color.green.opacity(0.2))
-                            )
-                        }
                     }
                     .padding(.horizontal, 18)
                     .padding(.vertical, 10)
@@ -3103,7 +2848,7 @@ struct GamePlayView: View {
     }
 }
 
-// MARK: - 22. 控制面板 Sheet
+// MARK: - 21. 控制面板 Sheet
 
 struct PlayerTakeoverSheet: View {
     @ObservedObject var game: GameModel
@@ -3157,7 +2902,7 @@ struct PlayerTakeoverSheet: View {
     }
 }
 
-// MARK: - 23. 根视图 ContentView
+// MARK: - 22. 根视图 ContentView
 
 struct ContentView: View {
     @StateObject private var game = GameModel()
