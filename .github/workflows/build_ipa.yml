@@ -24,7 +24,7 @@ jobs:
             exit 1
           fi
           mkdir -p build
-          xcodebuild archive \
+          xcodebuild clean archive \
             -scheme "$SCHEME_NAME" \
             -archivePath build/App.xcarchive \
             -destination 'generic/platform=iOS' \
@@ -33,8 +33,7 @@ jobs:
             TARGETED_DEVICE_FAMILY="1,2" \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            COREML_CODEGEN_LANGUAGE=Swift
+            CODE_SIGNING_ALLOWED=NO
 
       - name: Package Unsigned IPA
         run: |
@@ -110,18 +109,6 @@ jobs:
 
           cd build
           zip -r -y ColorWarAI.ipa Payload
-                    xcodebuild archive \
-            clean archive \
-            -scheme "$SCHEME_NAME" \
-            -archivePath build/App.xcarchive \
-            -destination 'generic/platform=iOS' \
-            -sdk iphoneos \
-            -configuration Release \
-            TARGETED_DEVICE_FAMILY="1,2" \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
-
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
