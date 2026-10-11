@@ -412,9 +412,9 @@ struct MoveOrderingTable: Sendable {
 // MARK: - 6. 动态风险偏好控制策略
 
 enum TacticalRiskMode {
-    case dominant   // 优势顺风：稳健控盘
-    case balanced   // 平衡对局
-    case desperate  // 劣势逆风：引爆混沌翻盘
+    case dominant
+    case balanced
+    case desperate
 }
 
 // MARK: - 7. 算法 AI 求解引擎
@@ -1337,7 +1337,7 @@ struct AISolver: Sendable {
     }
 }
 
-// MARK: - 8. GameModel ViewModel (修正自定义背景图读取与擦除)
+// MARK: - 8. GameModel ViewModel
 
 @MainActor
 final class GameModel: ObservableObject {
@@ -1832,7 +1832,7 @@ final class GameModel: ObservableObject {
     }
 }
 
-// MARK: - 9. 棋盘视图
+// MARK: - 9. 棋盘视图 (iPad/iPhone 自适应全屏重构)
 
 struct BoardView: View {
     @ObservedObject var game: GameModel
@@ -1840,9 +1840,12 @@ struct BoardView: View {
     
     var body: some View {
         GeometryReader { proxy in
-            let minDim = min(proxy.size.width, proxy.size.height)
-            let side = (minDim - 12 - gap * CGFloat(game.boardSize - 1)) / CGFloat(game.boardSize)
-            let actualBoardDimension = side * CGFloat(game.boardSize) + gap * CGFloat(game.boardSize - 1) + 12
+            let availableWidth = proxy.size.width - 24
+            let availableHeight = proxy.size.height - 24
+            let minDim = max(100, min(availableWidth, availableHeight))
+            
+            let side = (minDim - gap * CGFloat(game.boardSize - 1)) / CGFloat(game.boardSize)
+            let actualBoardDimension = side * CGFloat(game.boardSize) + gap * CGFloat(game.boardSize - 1)
             
             ZStack(alignment: .topLeading) {
                 VStack(spacing: gap) {
@@ -1888,10 +1891,9 @@ struct BoardView: View {
                 }
             }
             .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
-            .frame(width: actualBoardDimension, height: actualBoardDimension)
-            .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
+            .frame(width: actualBoardDimension + 12, height: actualBoardDimension + 12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         }
-        .aspectRatio(1, contentMode: .fit)
         .onDisappear {
             game.exitToMenu()
         }
@@ -2155,7 +2157,7 @@ extension Array {
     }
 }
 
-// MARK: - 14. 单机/本地设置 View (支持自适应全展示与玻璃交互背景)
+// MARK: - 14. 单机/本地设置 View (为所有卡片加上 .interactive 属性)
 
 struct LocalGameSetupView: View {
     @ObservedObject var game: GameModel
@@ -2249,9 +2251,8 @@ struct LocalGameSetupView: View {
                 .tint(Color.darkNavyBlue)
             }
             .padding(12)
-            .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
-            // 使用 ViewThatFits 保证：屏幕高度充足时默认全部展示；窗口过小时自动启用滚动
             ViewThatFits(in: .vertical) {
                 playerRowsContent
                 
@@ -2381,7 +2382,7 @@ struct LocalDeviceBrowserInlineView: View {
     }
 }
 
-// MARK: - 16. 4 人房间大厅 View (带自适应展示与玻璃交互背景)
+// MARK: - 16. 4 人房间大厅 View
 
 struct RoomLobbyView: View {
     @ObservedObject var game: GameModel
@@ -2469,7 +2470,7 @@ struct RoomLobbyView: View {
                 }
             }
             .padding(10)
-            .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
             if p2pManager.isHost {
                 VStack(spacing: 8) {
@@ -2497,7 +2498,7 @@ struct RoomLobbyView: View {
                     .tint(Color.darkNavyBlue)
                 }
                 .padding(10)
-                .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             } else {
                 HStack {
                     Text("房主设定尺寸: \(game.boardSize) × \(game.boardSize)")
@@ -2508,7 +2509,7 @@ struct RoomLobbyView: View {
                 .bold()
                 .foregroundColor(.cyan)
                 .padding(10)
-                .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             }
             
             ViewThatFits(in: .vertical) {
@@ -2547,7 +2548,7 @@ struct RoomLobbyView: View {
     }
 }
 
-// MARK: - 17. 联机设置 View
+// MARK: - 17. 联机设置 View (带有 .interactive 卡片)
 
 enum ActiveOnlineMode {
     case none
@@ -2578,7 +2579,7 @@ struct OnlineGameSetupView: View {
                     .frame(maxWidth: 180)
             }
             .padding(10)
-            .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
             if activeMode == .localHost || activeMode == .localJoined {
                 RoomLobbyView(
@@ -2658,7 +2659,7 @@ struct OnlineGameSetupView: View {
                     }
                 }
                 .padding()
-                .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             }
         }
         .alert("连接失败", isPresented: $showAlertError) {
@@ -2669,7 +2670,7 @@ struct OnlineGameSetupView: View {
     }
 }
 
-// MARK: - 18. 主菜单 (绝对居中防滑，修复 PhotosPicker 相册选图响应)
+// MARK: - 18. 主菜单 View (透传全局渐变/背景，消除黑色遮罩)
 
 struct StartMenuView: View {
     @ObservedObject var game: GameModel
@@ -2682,6 +2683,8 @@ struct StartMenuView: View {
     var body: some View {
         NavigationStack {
             ZStack {
+                Color.clear
+                
                 VStack(spacing: 0) {
                     Spacer()
                     
@@ -2716,6 +2719,7 @@ struct StartMenuView: View {
                 }
                 .padding(.horizontal, 20)
             }
+            .background(Color.clear)
             .toolbar {
                 ToolbarItem(placement: .principal) {
                     Picker("Game Mode", selection: $selectedTab) {
@@ -2765,6 +2769,7 @@ struct StartMenuView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
         }
+        .background(Color.clear)
     }
 }
 
@@ -2857,7 +2862,7 @@ struct RandomPlayerWheelOverlay: View {
     }
 }
 
-// MARK: - 20. 主对局视图
+// MARK: - 20. 主对局视图 (全屏约束重组)
 
 struct GamePlayView: View {
     @ObservedObject var game: GameModel
@@ -2917,15 +2922,16 @@ struct GamePlayView: View {
                     }
                     .buttonStyle(.plain)
                 }
-                .padding(.horizontal, 12)
-                .padding(.top, 8)
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .zIndex(20)
                 
-                Spacer(minLength: 10)
+                Spacer(minLength: 12)
                 
                 BoardView(game: game)
-                    .padding(.horizontal, 12)
+                    .padding(.horizontal, 16)
                 
-                Spacer(minLength: 10)
+                Spacer(minLength: 12)
             }
             .safeAreaPadding(.all)
             
@@ -3056,7 +3062,7 @@ struct PlayerTakeoverSheet: View {
     }
 }
 
-// MARK: - 22. 根视图 ContentView (背景完整保底绘制)
+// MARK: - 22. 根视图 ContentView (精准渲染暗蓝/黑深色渐变与相册背景)
 
 struct ContentView: View {
     @StateObject private var game = GameModel()
@@ -3065,11 +3071,9 @@ struct ContentView: View {
     
     var body: some View {
         ZStack {
-            // 背景保底暗黑色，防止极速切换时闪烁
-            Color(red: 0.05, green: 0.06, blue: 0.09)
+            Color(red: 0.03, green: 0.05, blue: 0.10)
                 .ignoresSafeArea()
             
-            // 背景渲染分流：优先展示自定义图，无自定义图时精准渲染深蓝渐变
             if let customImg = game.customBackgroundImage {
                 Image(uiImage: customImg)
                     .resizable()
@@ -3080,13 +3084,13 @@ struct ContentView: View {
                 RadialGradient(
                     colors: [
                         isGameStarted
-                        ? (game.colors[safe: game.currentPlayer] ?? .blue).opacity(0.25)
-                        : Color(red: 0.04, green: 0.12, blue: 0.32).opacity(0.85),
-                        Color.clear
+                        ? (game.colors[safe: game.currentPlayer] ?? .blue).opacity(0.35)
+                        : Color(red: 0.08, green: 0.28, blue: 0.65).opacity(0.85),
+                        Color(red: 0.03, green: 0.05, blue: 0.10)
                     ],
                     center: .center,
-                    startRadius: 40,
-                    endRadius: 450
+                    startRadius: 50,
+                    endRadius: 600
                 )
                 .ignoresSafeArea()
                 .animation(.easeInOut(duration: 0.8), value: isGameStarted ? game.currentPlayer : -1)
