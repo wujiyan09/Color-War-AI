@@ -3,6 +3,7 @@ import Combine
 import UIKit
 import QuartzCore
 import MultipeerConnectivity
+import PhotosUI
 
 // MARK: - 1. 原生 Haptic 触觉反馈引擎
 
@@ -33,10 +34,15 @@ enum PlayerControlType: String, CaseIterable, Identifiable, Codable {
     case disabled = "未加入"
     
     var id: String { rawValue }
+    var isAI: Bool { self == .mathNightmare || self == .enhancedNightmare }
+}
+
+enum BackgroundMode: String, CaseIterable, Identifiable, Codable {
+    case defaultGradient = "默认深邃渐变"
+    case simulatedDesktop = "桌面透视磨砂"
+    case customPhoto = "自定义相册壁纸"
     
-    var isAI: Bool {
-        self == .mathNightmare || self == .enhancedNightmare
-    }
+    var id: String { rawValue }
 }
 
 struct PlayerPreset {
@@ -337,7 +343,7 @@ extension Color {
     }
 }
 
-// MARK: - 5. Zobrist 散列、置换表与杀手/历史启发数据结构
+// MARK: - 5. Zobrist 散列与置换表数据结构
 
 struct TranspositionTable: Sendable {
     enum EntryType: Sendable { case exact, lowerBound, upperBound }
@@ -406,15 +412,11 @@ struct MoveOrderingTable: Sendable {
     }
 }
 
-// MARK: - 6. 动态风险偏好控制策略
-
 enum TacticalRiskMode {
-    case dominant   // 优势顺风：稳健控盘
-    case balanced   // 平衡对局
-    case desperate  // 劣势逆风：引爆混沌翻盘
+    case dominant, balanced, desperate
 }
 
-// MARK: - 7. 算法 AI 求解引擎
+// MARK: - 6. 算法 AI 求解引擎
 
 struct AISolver: Sendable {
     struct SimCell: Sendable {
@@ -967,11 +969,11 @@ struct AISolver: Sendable {
     }
     
     private func maxNMultiPlayerSearch(boardState: Board,
-                                       hasEnteredState: [Bool],
-                                       eliminatedState: [Bool],
-                                       depth: Int,
-                                       turnPlayer: Int,
-                                       beamWidth: Int) -> [Int: Int] {
+                                      hasEnteredState: [Bool],
+                                      eliminatedState: [Bool],
+                                      depth: Int,
+                                      turnPlayer: Int,
+                                      beamWidth: Int) -> [Int: Int] {
         if Task.isCancelled || depth <= 0 || isGameOverSimulated(eliminated: eliminatedState) {
             return evaluateMultiPlayerVector(boardState, eliminated: eliminatedState)
         }
@@ -1334,7 +1336,7 @@ struct AISolver: Sendable {
     }
 }
 
-// MARK: - 8. GameModel ViewModel
+// MARK: - 7. GameModel ViewModel
 
 @MainActor
 final class GameModel: ObservableObject {
@@ -1379,8 +1381,32 @@ final class GameModel: ObservableObject {
     @Published var isProcessingCascade: Bool = false
     @Published var winnerIndex: Int? = nil
     @Published var showControlSheet: Bool = false
+    @Published var showVisualSettingsSheet: Bool = false
     @Published var flyingOrbs: [FlyingOrb] = []
     @Published var emphasizedCells: Set<Int> = []
+    
+    // 视觉与外观偏好设置
+    @Published var backgroundMode: BackgroundMode = .defaultGradient {
+        didSet { UserDefaults.standard.set(backgroundMode.rawValue, forKey: "CW_Saved_BGMode") }
+    }
+    @Published var bgOpacity: Double = 0.85 {
+        didSet { UserDefaults.standard.set(bgOpacity, forKey: "CW_Saved_BGOpacity") }
+    }
+    @Published var enableHDR: Bool = true {
+        didSet { UserDefaults.standard.set(enableHDR, forKey: "CW_Saved_EnableHDR") }
+    }
+    @Published var hdrHeadroom: Double = 1.5 {
+        didSet { UserDefaults.standard.set(hdrHeadroom, forKey: "CW_Saved_HDRHeadroom") }
+    }
+    @Published var customImageData: Data? = nil {
+        didSet {
+            if let data = customImageData {
+                UserDefaults.standard.set(data, forKey: "CW_Saved_CustomBGImage")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "CW_Saved_CustomBGImage")
+            }
+        }
+    }
     
     @Published private(set) var activePlayerIndices: [Int] = []
     @Published private(set) var playableCells: Set<Int> = []
@@ -1426,6 +1452,21 @@ final class GameModel: ObservableObject {
         let savedSize = UserDefaults.standard.integer(forKey: "CW_Saved_BoardSize")
         self.boardSize = (savedSize >= 5 && savedSize <= 12) ? savedSize : 8
         self.isRandomFirstPlayer = UserDefaults.standard.object(forKey: "CW_Saved_IsRandomFirst") as? Bool ?? true
+        
+        if let bgRaw = UserDefaults.standard.string(forKey: "CW_Saved_BGMode"),
+           let mode = BackgroundMode(rawValue: bgRaw) {
+            self.backgroundMode = mode
+        }
+        if let savedOpacity = UserDefaults.standard.object(forKey: "CW_Saved_BGOpacity") as? Double {
+            self.bgOpacity = savedOpacity
+        }
+        if let savedHDR = UserDefaults.standard.object(forKey: "CW_Saved_EnableHDR") as? Bool {
+            self.enableHDR = savedHDR
+        }
+        if let savedHeadroom = UserDefaults.standard.object(forKey: "CW_Saved_HDRHeadroom") as? Double {
+            self.hdrHeadroom = savedHeadroom
+        }
+        self.customImageData = UserDefaults.standard.data(forKey: "CW_Saved_CustomBGImage")
         
         if let data = UserDefaults.standard.data(forKey: "CW_Saved_PlayerTypes"),
            let decoded = try? JSONDecoder().decode([PlayerControlType].self, from: data),
@@ -1810,7 +1851,131 @@ final class GameModel: ObservableObject {
     }
 }
 
-// MARK: - 9. 棋盘视图
+// MARK: - 8. 动态环境背景组件 (支持桌面透视 & 自定义图片 & 透明度)
+
+struct CustomDynamicBackgroundView: View {
+    @ObservedObject var game: GameModel
+    let isGameStarted: Bool
+    @State private var pickerItem: PhotosPickerItem? = nil
+    
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            
+            switch game.backgroundMode {
+            case .defaultGradient:
+                RadialGradient(
+                    colors: [
+                        isGameStarted
+                        ? (game.colors[safe: game.currentPlayer] ?? .blue).opacity(0.35 * game.bgOpacity)
+                        : Color(red: 0.04, green: 0.12, blue: 0.32).opacity(game.bgOpacity),
+                        Color.black
+                    ],
+                    center: .center,
+                    startRadius: 40,
+                    endRadius: 500
+                )
+                .ignoresSafeArea()
+                .animation(.easeInOut(duration: 0.8), value: isGameStarted ? game.currentPlayer : -1)
+                
+            case .simulatedDesktop:
+                ZStack {
+                    LinearGradient(colors: [.indigo.opacity(0.8), .purple.opacity(0.6), .black], startPoint: .topLeading, endPoint: .bottomTrailing)
+                        .blur(radius: 60)
+                    Rectangle()
+                        .fill(.ultraThinMaterial)
+                }
+                .opacity(game.bgOpacity)
+                .ignoresSafeArea()
+                
+            case .customPhoto:
+                if let data = game.customImageData, let uiImage = UIImage(data: data) {
+                    Image(uiImage: uiImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .opacity(game.bgOpacity)
+                        .blur(radius: 8)
+                        .ignoresSafeArea()
+                } else {
+                    Color.darkNavyBlue.opacity(game.bgOpacity).ignoresSafeArea()
+                }
+            }
+        }
+    }
+}
+
+// MARK: - 9. 画面与 HDR 主控制面板
+
+struct VisualSettingsSheet: View {
+    @ObservedObject var game: GameModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedPhotoItem: PhotosPickerItem? = nil
+    
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section(header: Text("背景模式与透明度")) {
+                    Picker("壁纸背景", selection: $game.backgroundMode) {
+                        ForEach(BackgroundMode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    
+                    if game.backgroundMode == .customPhoto {
+                        PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
+                            HStack {
+                                Image(systemName: "photo.on.rectangle")
+                                Text(game.customImageData == nil ? "从相册挑选壁纸图片" : "更换背景图片")
+                            }
+                        }
+                        .onChange(of: selectedPhotoItem) { newItem in
+                            Task {
+                                if let data = try? await newItem?.loadTransferable(type: Data.self) {
+                                    game.customImageData = data
+                                }
+                            }
+                        }
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("背景不透明度")
+                            Spacer()
+                            Text("\(Int(game.bgOpacity * 100))%")
+                                .foregroundColor(.secondary)
+                        }
+                        Slider(value: $game.bgOpacity, in: 0.1...1.0, step: 0.05)
+                    }
+                }
+                
+                Section(header: Text("HDR 高动态范围发光 (支持设备)")) {
+                    Toggle("开启 HDR 棋子发光", isOn: $game.enableHDR)
+                    
+                    if game.enableHDR {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("HDR 发光亮度 (Headroom)")
+                                Spacer()
+                                Text(String(format: "%.1fx", game.hdrHeadroom))
+                                    .foregroundColor(.secondary)
+                            }
+                            Slider(value: $game.hdrHeadroom, in: 1.0...3.0, step: 0.1)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("个性化与显示设置")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                Button("确定") { dismiss() }
+            }
+        }
+        .presentationBackground(.thinMaterial)
+    }
+}
+
+// MARK: - 10. 棋盘视图
 
 struct BoardView: View {
     @ObservedObject var game: GameModel
@@ -1829,6 +1994,7 @@ struct BoardView: View {
                                 let cell = (r < game.board.count && c < game.board[r].count) ? game.board[r][c] : Cell(owner: nil, count: 0)
                                 
                                 CellView(
+                                    game: game,
                                     cell: cell,
                                     color: cell.owner.flatMap { game.colors[safe: $0] },
                                     emoji: cell.owner.flatMap { game.emojis[safe: $0] ?? nil },
@@ -1850,6 +2016,7 @@ struct BoardView: View {
                 
                 ForEach(game.flyingOrbs) { orb in
                     PieceView(
+                        game: game,
                         color: game.colors[safe: orb.player] ?? .gray,
                         emoji: game.emojis[safe: orb.player] ?? nil,
                         count: 1,
@@ -1872,9 +2039,10 @@ struct BoardView: View {
     }
 }
 
-// MARK: - 10. 单元格视图
+// MARK: - 11. 单元格视图
 
 struct CellView: View, Equatable {
+    @ObservedObject var game: GameModel
     let cell: Cell
     let color: Color?
     let emoji: String?
@@ -1896,6 +2064,7 @@ struct CellView: View, Equatable {
                 
                 if cell.count > 0 {
                     PieceView(
+                        game: game,
                         color: color ?? .clear,
                         emoji: emoji,
                         count: cell.count,
@@ -1911,9 +2080,10 @@ struct CellView: View, Equatable {
     }
 }
 
-// MARK: - 11. 棋子外观视图
+// MARK: - 12. 棋子外观视图 (含 HDR 高发光增益支持)
 
 struct PieceView: View {
+    @ObservedObject var game: GameModel
     let color: Color
     let emoji: String?
     let count: Int
@@ -1944,7 +2114,12 @@ struct PieceView: View {
                 )
             }
             
-            DotPattern(count: min(4, max(0, count)), diameter: size * 0.16, isEmoji: isEmojiPiece)
+            DotPattern(
+                game: game,
+                count: min(4, max(0, count)),
+                diameter: size * 0.16,
+                isEmoji: isEmojiPiece
+            )
         }
         .frame(width: size, height: size)
         .overlay(
@@ -1956,19 +2131,28 @@ struct PieceView: View {
     }
 }
 
-// MARK: - 12. 棋子点数排列视图
+// MARK: - 13. 棋子点数排列视图 (HDR 真实曝光高亮)
 
 struct DotPattern: View {
+    @ObservedObject var game: GameModel
     let count: Int
     let diameter: CGFloat
     let isEmoji: Bool
+    
+    var dotColor: Color {
+        if game.enableHDR {
+            return Color.white.exposureAdjust(game.hdrHeadroom)
+        } else {
+            return .white
+        }
+    }
     
     var body: some View {
         ZStack {
             ForEach(0..<count, id: \.self) { index in
                 if isEmoji {
                     Circle()
-                        .fill(.white)
+                        .fill(dotColor)
                         .overlay(
                             Circle()
                                 .stroke(Color.black.opacity(0.65), lineWidth: max(0.8, diameter * 0.14))
@@ -1979,7 +2163,8 @@ struct DotPattern: View {
                         .transition(.scale.combined(with: .opacity))
                 } else {
                     Circle()
-                        .fill(.white)
+                        .fill(dotColor)
+                        .shadow(color: game.enableHDR ? Color.white.opacity(0.8) : Color.clear, radius: max(2, diameter * 0.2))
                         .frame(width: diameter, height: diameter)
                         .offset(offset(index))
                         .transition(.scale.combined(with: .opacity))
@@ -1995,11 +2180,9 @@ struct DotPattern: View {
         switch count {
         case 0, 1:
             return .zero
-            
         case 2:
             let x = (index == 0) ? -step * 0.7 : step * 0.7
             return CGSize(width: x, height: 0)
-            
         case 3:
             let downOffset = step * 0.15
             if index == 0 {
@@ -2009,7 +2192,6 @@ struct DotPattern: View {
             } else {
                 return CGSize(width: step * 0.75, height: step * 0.433 + downOffset)
             }
-            
         default:
             let x = (index % 2 == 0) ? -step * 0.65 : step * 0.65
             let y = (index < 2) ? -step * 0.65 : step * 0.65
@@ -2018,7 +2200,7 @@ struct DotPattern: View {
     }
 }
 
-// MARK: - 13. Emoji 选择器 Sheet
+// MARK: - 14. Emoji 选择器 Sheet
 
 struct EmojiPickerSheet: View {
     @ObservedObject var game: GameModel
@@ -2128,7 +2310,7 @@ extension Array {
     }
 }
 
-// MARK: - 14. 单机/本地设置 View
+// MARK: - 15. 单机/本地设置 View
 
 struct LocalGameSetupView: View {
     @ObservedObject var game: GameModel
@@ -2242,7 +2424,7 @@ struct LocalGameSetupView: View {
     }
 }
 
-// MARK: - 15. 近场搜寻内嵌式菜单 View
+// MARK: - 16. 近场搜寻内嵌式菜单 View
 
 struct LocalDeviceBrowserInlineView: View {
     @ObservedObject var p2pManager = P2PNetworkManager.shared
@@ -2337,7 +2519,7 @@ struct LocalDeviceBrowserInlineView: View {
     }
 }
 
-// MARK: - 16. 4 人房间大厅 View
+// MARK: - 17. 4 人房间大厅 View
 
 struct RoomLobbyView: View {
     @ObservedObject var game: GameModel
@@ -2490,13 +2672,10 @@ struct RoomLobbyView: View {
     }
 }
 
-// MARK: - 17. 联机设置 View
+// MARK: - 18. 联机设置 View
 
 enum ActiveOnlineMode {
-    case none
-    case localHost
-    case localSearching
-    case localJoined
+    case none, localHost, localSearching, localJoined
 }
 
 struct OnlineGameSetupView: View {
@@ -2612,7 +2791,7 @@ struct OnlineGameSetupView: View {
     }
 }
 
-// MARK: - 18. 主菜单
+// MARK: - 19. 主菜单 (带主界面死区自动避让与视觉配置入口)
 
 struct StartMenuView: View {
     @ObservedObject var game: GameModel
@@ -2623,16 +2802,6 @@ struct StartMenuView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.04, green: 0.12, blue: 0.32),
-                        Color(red: 0.03, green: 0.05, blue: 0.12)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .ignoresSafeArea()
-                
                 VStack(spacing: 0) {
                     Spacer()
                     
@@ -2666,6 +2835,7 @@ struct StartMenuView: View {
                     Spacer()
                 }
                 .padding(.horizontal)
+                .safeAreaPadding(.top, 8)
             }
             .toolbar {
                 ToolbarItem(placement: .principal) {
@@ -2676,6 +2846,18 @@ struct StartMenuView: View {
                     .pickerStyle(.segmented)
                     .frame(width: 210)
                 }
+                
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(action: { game.showVisualSettingsSheet = true }) {
+                        Image(systemName: "paintbrush.fill")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(width: 36, height: 36)
+                            .contentShape(Circle())
+                            .glassEffect(.regular.interactive(), in: .circle)
+                    }
+                    .buttonStyle(.plain)
+                }
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
@@ -2683,7 +2865,7 @@ struct StartMenuView: View {
     }
 }
 
-// MARK: - 19. 随机先手轮盘抽签 Overlay
+// MARK: - 20. 随机先手轮盘抽签 Overlay
 
 struct RandomPlayerWheelOverlay: View {
     @ObservedObject var game: GameModel
@@ -2771,7 +2953,7 @@ struct RandomPlayerWheelOverlay: View {
     }
 }
 
-// MARK: - 20. 主对局视图
+// MARK: - 21. 主对局视图 (全设备 Safe Area 避让自动计算)
 
 struct GamePlayView: View {
     @ObservedObject var game: GameModel
@@ -2821,15 +3003,27 @@ struct GamePlayView: View {
                     
                     Spacer()
                     
-                    Button(action: { game.showControlSheet = true }) {
-                        Image(systemName: "gearshape.fill")
-                            .font(.system(size: 17, weight: .semibold))
-                            .foregroundColor(.white)
-                            .frame(width: 36, height: 36)
-                            .contentShape(Circle())
-                            .glassEffect(.regular.interactive(), in: .circle)
+                    HStack(spacing: 8) {
+                        Button(action: { game.showVisualSettingsSheet = true }) {
+                            Image(systemName: "paintbrush.fill")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundColor(.white)
+                                .frame(width: 36, height: 36)
+                                .contentShape(Circle())
+                                .glassEffect(.regular.interactive(), in: .circle)
+                        }
+                        .buttonStyle(.plain)
+                        
+                        Button(action: { game.showControlSheet = true }) {
+                            Image(systemName: "gearshape.fill")
+                                .font(.system(size: 17, weight: .semibold))
+                                .foregroundColor(.white)
+                                .frame(width: 36, height: 36)
+                                .contentShape(Circle())
+                                .glassEffect(.regular.interactive(), in: .circle)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
                 .padding(.horizontal, 8)
                 
@@ -2840,6 +3034,7 @@ struct GamePlayView: View {
                 Spacer()
             }
             .padding()
+            .safeAreaPadding(.top, 10)
             
             if let wIdx = game.winnerIndex {
                 Color.black.opacity(0.8).ignoresSafeArea()
@@ -2913,7 +3108,7 @@ struct GamePlayView: View {
     }
 }
 
-// MARK: - 21. 控制面板 Sheet
+// MARK: - 22. 控制面板 Sheet
 
 struct PlayerTakeoverSheet: View {
     @ObservedObject var game: GameModel
@@ -2967,7 +3162,7 @@ struct PlayerTakeoverSheet: View {
     }
 }
 
-// MARK: - 22. 根视图 ContentView
+// MARK: - 23. 根视图 ContentView
 
 struct ContentView: View {
     @StateObject private var game = GameModel()
@@ -2976,22 +3171,7 @@ struct ContentView: View {
     
     var body: some View {
         ZStack {
-            Color(red: 0.05, green: 0.06, blue: 0.09)
-                .ignoresSafeArea()
-            
-            RadialGradient(
-                colors: [
-                    isGameStarted
-                    ? (game.colors[safe: game.currentPlayer] ?? .blue).opacity(0.25)
-                    : Color(red: 0.04, green: 0.12, blue: 0.32).opacity(0.85),
-                    Color.clear
-                ],
-                center: .center,
-                startRadius: 40,
-                endRadius: 450
-            )
-            .ignoresSafeArea()
-            .animation(.easeInOut(duration: 0.8), value: isGameStarted ? game.currentPlayer : -1)
+            CustomDynamicBackgroundView(game: game, isGameStarted: isGameStarted)
             
             if isGameStarted {
                 GamePlayView(
@@ -3020,6 +3200,8 @@ struct ContentView: View {
                 )
             }
         }
+        .sheet(isPresented: $game.showVisualSettingsSheet) {
+            VisualSettingsSheet(game: game)
+        }
     }
 }
-
