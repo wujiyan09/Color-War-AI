@@ -359,7 +359,8 @@ extension P2PNetworkManager: MCSessionDelegate, MCNearbyServiceAdvertiserDelegat
             self.connectedPeers = session.connectedPeers.map { $0.displayName }
             self.isConnected = !session.connectedPeers.isEmpty
             
-            if state == .disconnected {
+            // 修复：MCSessionState 在 iOS SDK 中为 .notConnected
+            if state == .notConnected {
                 self.disconnectSubject.send(peerID.displayName)
             } else if state == .connected {
                 self.isConnecting = false
@@ -1790,7 +1791,6 @@ final class GameModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: item)
     }
     
-    // 修复 1：安全的 Optional 双重解包
     func tryUpdatePlayerEmoji(at index: Int, newEmoji: String?) -> Bool {
         guard index >= 0 && index < PlayerPreset.maxPlayers, index < emojis.count else { return false }
         if let rawEmoji = newEmoji, !rawEmoji.isEmpty {
@@ -2317,7 +2317,6 @@ struct BoardView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             .onAppear { onBoardDimensionCalculated(actualBoardDimension) }
-            // 修复 2：支持 iOS 17 双参数 onChange 语法
             .onChange(of: actualBoardDimension) { _, newDim in
                 onBoardDimensionCalculated(newDim)
             }
@@ -3222,7 +3221,6 @@ struct StartMenuView: View {
                 }
             }
             .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhotosItem, matching: .images)
-            // 修复 2：iOS 17 双参数 onChange
             .onChange(of: selectedPhotosItem) { _, newItem in
                 guard let newItem = newItem else { return }
                 Task {
@@ -3234,7 +3232,6 @@ struct StartMenuView: View {
                     }
                 }
             }
-            // 修复 2：iOS 17 双参数 onChange
             .onChange(of: selectedTab) { _, newTab in
                 if newTab == 0 && !P2PNetworkManager.shared.isConnected {
                     P2PNetworkManager.shared.stopP2P()
