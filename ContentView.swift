@@ -677,7 +677,6 @@ struct AISolver: Sendable {
         let totalOrbsOnBoard = board.cells.reduce(0) { $0 + $1.count }
         let isMyFirstTurn = (currentPlayer < hasEntered.count) ? !hasEntered[currentPlayer] : true
         
-        // 关键优化：开局全空或首轮试探阶段，直接秒选靠中心位置，避免陷入无限搜索
         if totalOrbsOnBoard == 0 || (isMyFirstTurn && totalOrbsOnBoard <= boardSize) {
             let center = Double(boardSize - 1) / 2.0
             return validMoves.min(by: { m1, m2 in
@@ -1472,6 +1471,9 @@ final class GameModel: ObservableObject {
     
     @Published var customBackgroundImage: UIImage? = nil
     
+    // ✅ 隐藏3控制标识：用于通知 UI 侧（特别是 P2P 客户端）跳转切屏
+    @Published var shouldNavigateToGame: Bool = false
+    
     @Published private(set) var isGameInPlay: Bool = false
     @Published private(set) var activePlayerIndices: [Int] = []
     @Published private(set) var playableCells: Set<Int> = []
@@ -1485,6 +1487,14 @@ final class GameModel: ObservableObject {
     private var disconnectCancellable: AnyCancellable? = nil
     private var aiTask: Task<Void, Never>? = nil
     private var saveWorkItem: DispatchWorkItem? = nil
+    
+    func beginGame() {
+        isGameInPlay = true
+    }
+    
+    func endGame() {
+        isGameInPlay = false
+    }
     
     private func refreshActivePlayers() {
         self.activePlayerIndices = playerTypes.enumerated().compactMap { $1 != .disabled ? $0 : nil }
@@ -1664,8 +1674,11 @@ final class GameModel: ObservableObject {
                     if let aiLvl = packet.aiLevelRaw, let level = AIDifficultyLevel(rawValue: aiLvl) { self.aiDifficultyLevel = level }
                     
                 case .startGame:
+                    // ✅ 隐患 3 修复：客户端收到 .startGame 时，重置+开启对局并主动唤醒界面导航
                     if let firstP = packet.firstPlayerIndex {
                         self.resetGame(chosenFirstPlayer: firstP)
+                        self.beginGame()
+                        self.shouldNavigateToGame = true
                     }
                     
                 case .stateSnapshot:
@@ -1809,6 +1822,7 @@ final class GameModel: ObservableObject {
         syncRoomConfigToPeers()
     }
     
+    // ✅ 隐患 1 修复：resetGame 只负责数据重置，不强制更改 isGameInPlay，且内部调用 checkAndRunAITurn 时受 isGameInPlay 守卫保护
     func resetGame(chosenFirstPlayer: Int? = nil) {
         currentGameSessionID = UUID()
         lastReceivedSeqID = 0
@@ -1822,7 +1836,6 @@ final class GameModel: ObservableObject {
         eliminated = Array(repeating: false, count: PlayerPreset.maxPlayers)
         winnerIndex = nil
         isProcessingCascade = false
-        isGameInPlay = true
         recalculateOrbCounts()
         
         let active = activePlayerIndices
@@ -1846,6 +1859,13 @@ final class GameModel: ObservableObject {
         checkAndRunAITurn()
     }
     
+    // ✅ 隐患 2 修复：为“重新开始本局”提供明确的方法，保证重置后重新标记 beginGame，再驱动 AI
+    func restartCurrentGame() {
+        resetGame()
+        beginGame()
+        checkAndRunAITurn()
+    }
+    
     func exitToMenu() {
         currentGameSessionID = UUID()
         aiTask?.cancel()
@@ -1854,7 +1874,8 @@ final class GameModel: ObservableObject {
         flyingOrbs.removeAll()
         emphasizedCells.removeAll()
         isProcessingCascade = false
-        isGameInPlay = false
+        endGame()
+        shouldNavigateToGame = false
         winnerIndex = nil
         activeOnlineMode = .none
         P2PNetworkManager.shared.stopP2P()
@@ -1898,7 +1919,7 @@ final class GameModel: ObservableObject {
             packet.playerIndex = player
             P2PNetworkManager.shared.sendPacket(packet)
         } else {
-            guard playerTypes[player] == .human else { return }
+            guard playerTypes[player] == .human || playerTypes[player].isAI else { return }
         }
         
         enqueueNetworkMove(row: row, column: column, player: player)
@@ -1923,12 +1944,11 @@ final class GameModel: ObservableObject {
     
     private func resolveMove(row: Int, column: Int, player: Int) async {
         isProcessingCascade = true
-        defer {
-            recalculateOrbCounts()
-            isProcessingCascade = false
-        }
         
-        guard player >= 0 && player < hasEntered.count else { return }
+        guard player >= 0 && player < hasEntered.count else {
+            isProcessingCascade = false
+            return
+        }
         
         let boardBackup = self.board
         let hasEnteredBackup = self.hasEntered
@@ -2034,9 +2054,12 @@ final class GameModel: ObservableObject {
             
             emphasizedCells = []
             updateEliminationStatus()
+            recalculateOrbCounts()
+            
+            isProcessingCascade = false
             
             if checkGameOver() {
-                isGameInPlay = false
+                endGame()
             } else {
                 advanceToNextTurn()
             }
@@ -2045,6 +2068,8 @@ final class GameModel: ObservableObject {
             self.hasEntered = hasEnteredBackup
             emphasizedCells = []
             flyingOrbs = []
+            recalculateOrbCounts()
+            isProcessingCascade = false
         }
     }
     
@@ -2101,11 +2126,14 @@ final class GameModel: ObservableObject {
     private func checkAndRunAITurn() {
         aiTask?.cancel()
         
+        // ✅ 隐患 1 核心修复：只有真的在对局中（isGameInPlay == true）时，才允许启动 AI 唤起
+        guard isGameInPlay else { return }
+        
         if P2PNetworkManager.shared.isConnected && !P2PNetworkManager.shared.isHost {
             return
         }
         
-        guard isGameInPlay, winnerIndex == nil else { return }
+        guard winnerIndex == nil else { return }
         guard currentPlayer < playerTypes.count else { return }
         let currentType = playerTypes[currentPlayer]
         guard currentType.isAI else { return }
@@ -2120,6 +2148,7 @@ final class GameModel: ObservableObject {
             let isCurrentTurnValid = await MainActor.run {
                 return self.currentGameSessionID == sessionID &&
                        self.currentPlayer == targetPlayer &&
+                       self.isGameInPlay &&
                        !self.isProcessingCascade
             }
             guard isCurrentTurnValid else { return }
@@ -2138,7 +2167,7 @@ final class GameModel: ObservableObject {
             if let bestMove = await solver.calculateBestMove() {
                 if !Task.isCancelled {
                     await MainActor.run {
-                        if self.currentGameSessionID == sessionID && self.currentPlayer == targetPlayer {
+                        if self.currentGameSessionID == sessionID && self.currentPlayer == targetPlayer && self.isGameInPlay {
                             self.play(row: bestMove.0, column: bestMove.1)
                         }
                     }
@@ -3523,7 +3552,8 @@ struct PlayerTakeoverSheet: View {
             List {
                 Section {
                     Button(action: {
-                        game.resetGame()
+                        // ✅ 隐患 2 修复：使用 restartCurrentGame 显式保证 isGameInPlay = true 并唤起 AI
+                        game.restartCurrentGame()
                         dismiss()
                     }) {
                         HStack {
@@ -3623,12 +3653,21 @@ struct ContentView: View {
                     activeIndices: game.activePlayerIndices,
                     onFinished: { chosenWinner in
                         game.resetGame(chosenFirstPlayer: chosenWinner)
+                        game.beginGame()
                         isSpinningRandomWheel = false
                         withAnimation(.spring()) {
                             isGameStarted = true
                         }
                     }
                 )
+            }
+        }
+        // ✅ 隐患 3 修复：监听到 P2P 客户端收到 startGame 信号时，联动切换 UI 状态至 GamePlayView
+        .onChange(of: game.shouldNavigateToGame) { _, shouldNav in
+            if shouldNav {
+                withAnimation(.spring()) {
+                    isGameStarted = true
+                }
             }
         }
     }
