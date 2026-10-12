@@ -127,7 +127,6 @@ struct CompactCellSnapshot: Codable {
     let owner: Int8
     let count: UInt8
     
-    // 问题 11 修复：类型转换增加溢出安全保护
     init(r: Int, c: Int, owner: Int?, count: Int) {
         self.r = UInt8(min(255, max(0, r)))
         self.c = UInt8(min(255, max(0, c)))
@@ -193,7 +192,6 @@ struct P2PPacket: Codable {
     var hasEnteredSnapshot: [Bool]? = nil
     var eliminatedSnapshot: [Bool]? = nil
     
-    // 问题 12 修复：提供便捷构造器，消除全参繁琐写法
     init(sequenceID: UInt64, action: P2PAction, senderID: String) {
         self.sequenceID = sequenceID
         self.action = action
@@ -217,7 +215,6 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
         didSet {
             guard !myNickname.isEmpty else { return }
             UserDefaults.standard.set(myNickname, forKey: "CW_Saved_MyNickname")
-            // 问题 3 修复：联机中/正在连接时禁止销毁与重建 PeerID，防止网络中断
             if !isConnected && !isConnecting {
                 rebuildPeerID()
             }
@@ -245,7 +242,6 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
         rebuildPeerID()
     }
     
-    // 问题 13 修复：加上 @MainActor 隔离，解决并发状态下的 SequenceCounter 竞争
     @MainActor
     func getNextSequenceID() -> UInt64 {
         sequenceCounter += 1
@@ -1509,7 +1505,6 @@ final class GameModel: ObservableObject {
         self.activePlayerIndices = playerTypes.enumerated().compactMap { $1 != .disabled ? $0 : nil }
     }
     
-    // 问题 2 & 6 修复：锁定对局角色防改，联机准确校验 .p2pNetwork
     func validSelectableTypes(forPlayerIndex idx: Int, isInLobby: Bool = false) -> [PlayerControlType] {
         let isP2PConnected = P2PNetworkManager.shared.isConnected
         let isSeat0 = (idx == 0)
@@ -1518,12 +1513,10 @@ final class GameModel: ObservableObject {
         return PlayerControlType.allCases.filter { type in
             if (isSeat0 || isMySeat) && type == .disabled { return false }
             
-            // 对局进行期间禁止任何角色类型的改动（防篡改）
             if isGameInPlay {
                 return type == playerTypes[idx]
             }
             
-            // 联机/单机合法选项判断
             if type == .p2pNetwork {
                 return isP2PConnected || isInLobby
             }
@@ -1573,7 +1566,6 @@ final class GameModel: ObservableObject {
         }
     }
     
-    // 问题 7 修复：移除 max(0, ...)，生产环中依赖成功/失败的回调修正，Debug 模式断言提示
     private func adjustOrbCount(for player: Int?, delta: Int) {
         guard let p = player else { return }
         let current = cachedOrbCounts[p, default: 0]
@@ -1720,7 +1712,6 @@ final class GameModel: ObservableObject {
                 }
             }
         
-        // 问题 5 & 9 修复：房主掉线重置在线模式，主动清理状态
         disconnectCancellable?.cancel()
         disconnectCancellable = P2PNetworkManager.shared.disconnectSubject
             .receive(on: DispatchQueue.main)
@@ -1799,12 +1790,13 @@ final class GameModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: item)
     }
     
+    // 修复 1：安全的 Optional 双重解包
     func tryUpdatePlayerEmoji(at index: Int, newEmoji: String?) -> Bool {
         guard index >= 0 && index < PlayerPreset.maxPlayers, index < emojis.count else { return false }
         if let rawEmoji = newEmoji, !rawEmoji.isEmpty {
             let normalized = rawEmoji.precomposedStringWithCanonicalMapping
             for i in 0..<PlayerPreset.maxPlayers where i != index {
-                if let existing = emojis[safe: i], existing.precomposedStringWithCanonicalMapping == normalized {
+                if let existing = emojis[safe: i], let existingStr = existing, existingStr.precomposedStringWithCanonicalMapping == normalized {
                     return false
                 }
             }
@@ -1880,7 +1872,7 @@ final class GameModel: ObservableObject {
         isProcessingCascade = false
         isGameInPlay = false
         winnerIndex = nil
-        activeOnlineMode = .none // 问题 5 修复：同时把主菜单在线连接模式回归默认
+        activeOnlineMode = .none
         P2PNetworkManager.shared.stopP2P()
     }
     
@@ -2057,14 +2049,12 @@ final class GameModel: ObservableObject {
             emphasizedCells = []
             updateEliminationStatus()
             
-            // 问题 4 修复：先推进回合与判定，确保网络 Task 不会超前抢占竞态
             if checkGameOver() {
                 isGameInPlay = false
             } else {
                 advanceToNextTurn()
             }
             
-            // 问题 1 修复：在解锁前，成功路径强制执行一次全量计数值同步，彻底防止漂移
             recalculateOrbCounts()
             isProcessingCascade = false
         } catch {
@@ -2327,7 +2317,10 @@ struct BoardView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             .onAppear { onBoardDimensionCalculated(actualBoardDimension) }
-            .onChange(of: actualBoardDimension) { newDim in onBoardDimensionCalculated(newDim) }
+            // 修复 2：支持 iOS 17 双参数 onChange 语法
+            .onChange(of: actualBoardDimension) { _, newDim in
+                onBoardDimensionCalculated(newDim)
+            }
         }
         .clipped()
     }
@@ -3229,7 +3222,8 @@ struct StartMenuView: View {
                 }
             }
             .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhotosItem, matching: .images)
-            .onChange(of: selectedPhotosItem) { newItem in
+            // 修复 2：iOS 17 双参数 onChange
+            .onChange(of: selectedPhotosItem) { _, newItem in
                 guard let newItem = newItem else { return }
                 Task {
                     if let data = try? await newItem.loadTransferable(type: Data.self),
@@ -3240,7 +3234,8 @@ struct StartMenuView: View {
                     }
                 }
             }
-            .onChange(of: selectedTab) { newTab in
+            // 修复 2：iOS 17 双参数 onChange
+            .onChange(of: selectedTab) { _, newTab in
                 if newTab == 0 && !P2PNetworkManager.shared.isConnected {
                     P2PNetworkManager.shared.stopP2P()
                 }
