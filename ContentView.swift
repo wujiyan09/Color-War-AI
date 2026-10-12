@@ -359,7 +359,6 @@ extension P2PNetworkManager: MCSessionDelegate, MCNearbyServiceAdvertiserDelegat
             self.connectedPeers = session.connectedPeers.map { $0.displayName }
             self.isConnected = !session.connectedPeers.isEmpty
             
-            // 修复：MCSessionState 在 iOS SDK 中为 .notConnected
             if state == .notConnected {
                 self.disconnectSubject.send(peerID.displayName)
             } else if state == .connected {
@@ -676,31 +675,16 @@ struct AISolver: Sendable {
         guard !validMoves.isEmpty else { return nil }
         
         let totalOrbsOnBoard = board.cells.reduce(0) { $0 + $1.count }
-        let isMyFirstTurn = !hasEntered[currentPlayer]
+        let isMyFirstTurn = (currentPlayer < hasEntered.count) ? !hasEntered[currentPlayer] : true
         
-        if totalOrbsOnBoard < boardSize || isMyFirstTurn {
-            let safeMoves = validMoves.filter { move in
-                let (r, c) = move
-                let idx = r * boardSize + c
-                if idx < neighborsMap.count {
-                    for nIdx in neighborsMap[idx] {
-                        let nCell = board.cells[nIdx]
-                        if let nOwner = nCell.owner, nOwner != currentPlayer, nCell.count >= 2 {
-                            return false
-                        }
-                    }
-                }
-                return true
-            }
-            
-            if !safeMoves.isEmpty {
-                let center = Double(boardSize - 1) / 2.0
-                validMoves = safeMoves.sorted { m1, m2 in
-                    let dist1 = abs(Double(m1.0) - center) + abs(Double(m1.1) - center)
-                    let dist2 = abs(Double(m2.0) - center) + abs(Double(m2.1) - center)
-                    return dist1 < dist2
-                }
-            }
+        // 关键优化：开局全空或首轮试探阶段，直接秒选靠中心位置，避免陷入无限搜索
+        if totalOrbsOnBoard == 0 || (isMyFirstTurn && totalOrbsOnBoard <= boardSize) {
+            let center = Double(boardSize - 1) / 2.0
+            return validMoves.min(by: { m1, m2 in
+                let dist1 = abs(Double(m1.0) - center) + abs(Double(m1.1) - center)
+                let dist2 = abs(Double(m2.0) - center) + abs(Double(m2.1) - center)
+                return dist1 < dist2
+            })
         }
         
         if playerType == .enhancedNightmare {
@@ -1939,10 +1923,12 @@ final class GameModel: ObservableObject {
     
     private func resolveMove(row: Int, column: Int, player: Int) async {
         isProcessingCascade = true
-        guard player >= 0 && player < hasEntered.count else {
+        defer {
+            recalculateOrbCounts()
             isProcessingCascade = false
-            return
         }
+        
+        guard player >= 0 && player < hasEntered.count else { return }
         
         let boardBackup = self.board
         let hasEnteredBackup = self.hasEntered
@@ -2054,16 +2040,11 @@ final class GameModel: ObservableObject {
             } else {
                 advanceToNextTurn()
             }
-            
-            recalculateOrbCounts()
-            isProcessingCascade = false
         } catch {
             self.board = boardBackup
             self.hasEntered = hasEnteredBackup
-            isProcessingCascade = false
             emphasizedCells = []
             flyingOrbs = []
-            recalculateOrbCounts()
         }
     }
     
@@ -2124,20 +2105,29 @@ final class GameModel: ObservableObject {
             return
         }
         
+        guard isGameInPlay, winnerIndex == nil else { return }
         guard currentPlayer < playerTypes.count else { return }
         let currentType = playerTypes[currentPlayer]
-        guard currentType.isAI && winnerIndex == nil else { return }
+        guard currentType.isAI else { return }
         
         let sessionID = self.currentGameSessionID
+        let targetPlayer = self.currentPlayer
         
-        aiTask = Task(priority: .utility) {
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            if Task.isCancelled || self.currentGameSessionID != sessionID { return }
+        aiTask = Task(priority: .userInitiated) {
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            if Task.isCancelled { return }
+            
+            let isCurrentTurnValid = await MainActor.run {
+                return self.currentGameSessionID == sessionID &&
+                       self.currentPlayer == targetPlayer &&
+                       !self.isProcessingCascade
+            }
+            guard isCurrentTurnValid else { return }
             
             let solver = AISolver(
                 boardSize: boardSize,
                 activePlayers: activePlayerIndices,
-                currentPlayer: currentPlayer,
+                currentPlayer: targetPlayer,
                 playerType: currentType,
                 aiLevel: aiDifficultyLevel,
                 board: board,
@@ -2146,8 +2136,12 @@ final class GameModel: ObservableObject {
             )
             
             if let bestMove = await solver.calculateBestMove() {
-                if !Task.isCancelled && self.currentGameSessionID == sessionID {
-                    play(row: bestMove.0, column: bestMove.1)
+                if !Task.isCancelled {
+                    await MainActor.run {
+                        if self.currentGameSessionID == sessionID && self.currentPlayer == targetPlayer {
+                            self.play(row: bestMove.0, column: bestMove.1)
+                        }
+                    }
                 }
             }
         }
