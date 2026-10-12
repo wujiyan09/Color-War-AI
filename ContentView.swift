@@ -5,7 +5,7 @@ import QuartzCore
 import MultipeerConnectivity
 import PhotosUI
 
-// MARK: - 1. 原生 Haptic 触觉反馈引擎
+// MARK: - 1. 触觉反馈引擎
 
 final class Haptics {
     static let shared = Haptics()
@@ -116,9 +116,28 @@ struct PlayerPreset {
     static let cardCornerRadius: CGFloat = 20.0
 }
 
-struct Cell: Equatable, Sendable {
+struct Cell: Equatable, Codable, Sendable {
     var owner: Int?
     var count: Int
+}
+
+struct CompactCellSnapshot: Codable {
+    let r: UInt8
+    let c: UInt8
+    let owner: Int8
+    let count: UInt8
+    
+    // 问题 11 修复：类型转换增加溢出安全保护
+    init(r: Int, c: Int, owner: Int?, count: Int) {
+        self.r = UInt8(min(255, max(0, r)))
+        self.c = UInt8(min(255, max(0, c)))
+        if let o = owner, o >= 0 {
+            self.owner = Int8(min(127, o))
+        } else {
+            self.owner = -1
+        }
+        self.count = UInt8(min(255, max(0, count)))
+    }
 }
 
 struct FlyingOrb: Identifiable, Sendable {
@@ -140,30 +159,46 @@ struct IdentifiableInt: Identifiable {
     let id: Int
 }
 
-// MARK: - 3. 纯 P2P 对战编解码与网络引擎 (延迟生命周期)
+// MARK: - 3. P2P 网络管理器
 
 enum P2PAction: String, Codable {
     case hostConfig
     case playerMove
     case syncRequest
+    case startGame
+    case stateSnapshot
+    case playerLeft
     case ping
     case ack
 }
 
 struct P2PPacket: Codable {
-    var protocolVersion: Int = 1
+    var protocolVersion: Int = 2
+    let sequenceID: UInt64
     let action: P2PAction
     let senderID: String
-    let row: Int?
-    let col: Int?
-    let boardSize: Int?
-    let isRandomFirstPlayer: Bool?
-    let playerIndex: Int?
-    let playerNames: [String]?
-    let playerTypes: [PlayerControlType]?
-    let colorsHex: [String]?
-    let emojis: [String]?
-    let aiLevelRaw: Int?
+    var row: Int? = nil
+    var col: Int? = nil
+    var boardSize: Int? = nil
+    var isRandomFirstPlayer: Bool? = nil
+    var playerIndex: Int? = nil
+    var firstPlayerIndex: Int? = nil
+    var playerNames: [String]? = nil
+    var playerTypes: [PlayerControlType]? = nil
+    var colorsHex: [String]? = nil
+    var emojis: [String]? = nil
+    var aiLevelRaw: Int? = nil
+    var compactBoardSnapshot: [CompactCellSnapshot]? = nil
+    var currentTurnIndex: Int? = nil
+    var hasEnteredSnapshot: [Bool]? = nil
+    var eliminatedSnapshot: [Bool]? = nil
+    
+    // 问题 12 修复：提供便捷构造器，消除全参繁琐写法
+    init(sequenceID: UInt64, action: P2PAction, senderID: String) {
+        self.sequenceID = sequenceID
+        self.action = action
+        self.senderID = senderID
+    }
 }
 
 final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
@@ -176,8 +211,19 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
     private var mcSession: MCSession?
     
     let packetSubject = PassthroughSubject<P2PPacket, Never>()
+    let disconnectSubject = PassthroughSubject<String, Never>()
     
-    @Published var myNickname: String = "玩家\(Int.random(in: 100...999))"
+    @Published var myNickname: String {
+        didSet {
+            guard !myNickname.isEmpty else { return }
+            UserDefaults.standard.set(myNickname, forKey: "CW_Saved_MyNickname")
+            // 问题 3 修复：联机中/正在连接时禁止销毁与重建 PeerID，防止网络中断
+            if !isConnected && !isConnecting {
+                rebuildPeerID()
+            }
+        }
+    }
+    
     @Published var hostDeviceName: String = ""
     @Published var discoveredDevices: [DiscoveredDevice] = []
     @Published var connectedPeers: [String] = []
@@ -186,15 +232,24 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
     @Published var isConnecting: Bool = false
     @Published var isSearchingTimeout: Bool = false
     
+    private var sequenceCounter: UInt64 = 0
     private var searchTimer: Timer?
     private var heartbeatTimer: Timer?
     private var lastAckTime: Date = Date()
     
     override init() {
+        let savedName = UserDefaults.standard.string(forKey: "CW_Saved_MyNickname")
+        let nameToUse = (savedName == nil || savedName!.isEmpty) ? "玩家\(Int.random(in: 100...999))" : savedName!
+        self.myNickname = nameToUse
         super.init()
-        let savedName = UserDefaults.standard.string(forKey: "CW_Saved_MyNickname") ?? "玩家\(Int.random(in: 100...999))"
-        self.myNickname = savedName
         rebuildPeerID()
+    }
+    
+    // 问题 13 修复：加上 @MainActor 隔离，解决并发状态下的 SequenceCounter 竞争
+    @MainActor
+    func getNextSequenceID() -> UInt64 {
+        sequenceCounter += 1
+        return sequenceCounter
     }
     
     private func rebuildPeerID() {
@@ -204,6 +259,7 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
     }
     
     private func setupMCSession() {
+        mcSession?.disconnect()
         mcSession = MCSession(peer: myPeerID, securityIdentity: nil, encryptionPreference: .none)
         mcSession?.delegate = self
     }
@@ -212,7 +268,7 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
     func startLocalHosting() {
         isHost = true
         hostDeviceName = myPeerID.displayName
-        mcSession?.disconnect()
+        sequenceCounter = 0
         setupMCSession()
         
         serviceAdvertiser = MCNearbyServiceAdvertiser(peer: myPeerID, discoveryInfo: nil, serviceType: serviceType)
@@ -224,10 +280,10 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
     @MainActor
     func startLocalBrowsing() {
         isHost = false
+        sequenceCounter = 0
         discoveredDevices.removeAll()
         isSearchingTimeout = false
         isConnecting = false
-        mcSession?.disconnect()
         setupMCSession()
         
         serviceBrowser = MCNearbyServiceBrowser(peer: myPeerID, serviceType: serviceType)
@@ -279,22 +335,24 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
         heartbeatTimer?.invalidate()
         lastAckTime = Date()
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            guard let self = self, self.isConnected else { return }
-            if Date().timeIntervalSince(self.lastAckTime) > 10.0 {
-                Task { @MainActor in
+            guard let self = self else { return }
+            Task { @MainActor in
+                guard self.isConnected else { return }
+                if Date().timeIntervalSince(self.lastAckTime) > 10.0 {
                     self.stopP2P()
+                } else {
+                    let packet = P2PPacket(sequenceID: self.getNextSequenceID(), action: .ping, senderID: self.myNickname)
+                    self.sendPacket(packet)
                 }
-            } else {
-                self.sendPacket(P2PPacket(action: .ping, senderID: self.myNickname, row: nil, col: nil, boardSize: nil, isRandomFirstPlayer: nil, playerIndex: nil, playerNames: nil, playerTypes: nil, colorsHex: nil, emojis: nil, aiLevelRaw: nil))
             }
         }
     }
     
+    @MainActor
     func sendPacket(_ packet: P2PPacket) {
+        guard let session = mcSession, !session.connectedPeers.isEmpty else { return }
         guard let data = try? JSONEncoder().encode(packet) else { return }
-        if let session = mcSession, !session.connectedPeers.isEmpty {
-            try? session.send(data, toPeers: session.connectedPeers, with: .reliable)
-        }
+        try? session.send(data, toPeers: session.connectedPeers, with: .reliable)
     }
 }
 
@@ -304,7 +362,10 @@ extension P2PNetworkManager: MCSessionDelegate, MCNearbyServiceAdvertiserDelegat
             guard let self = self else { return }
             self.connectedPeers = session.connectedPeers.map { $0.displayName }
             self.isConnected = !session.connectedPeers.isEmpty
-            if state == .connected {
+            
+            if state == .disconnected {
+                self.disconnectSubject.send(peerID.displayName)
+            } else if state == .connected {
                 self.isConnecting = false
                 self.startHeartbeat()
             }
@@ -313,13 +374,13 @@ extension P2PNetworkManager: MCSessionDelegate, MCNearbyServiceAdvertiserDelegat
     
     nonisolated func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
         if let packet = try? JSONDecoder().decode(P2PPacket.self, from: data) {
-            guard packet.protocolVersion == 1 else { return }
+            guard packet.protocolVersion == 2 else { return }
             
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
                 self.lastAckTime = Date()
                 if packet.action == .ping {
-                    let ack = P2PPacket(action: .ack, senderID: self.myNickname, row: nil, col: nil, boardSize: nil, isRandomFirstPlayer: nil, playerIndex: nil, playerNames: nil, playerTypes: nil, colorsHex: nil, emojis: nil, aiLevelRaw: nil)
+                    let ack = P2PPacket(sequenceID: self.getNextSequenceID(), action: .ack, senderID: self.myNickname)
                     self.sendPacket(ack)
                 }
                 self.packetSubject.send(packet)
@@ -364,21 +425,23 @@ extension Color {
         let uic = UIColor(self)
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
         uic.getRed(&r, green: &g, blue: &b, alpha: &a)
-        return String(format: "#%02X%02X%02X", Int(r * 255), Int(g * 255), Int(b * 255))
+        return String(format: "#%02X%02X%02X%02X", Int(r * 255), Int(g * 255), Int(b * 255), Int(a * 255))
     }
     
     init(hex: String) {
-        let hex = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        let hexStr = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
         var int: UInt64 = 0
-        Scanner(string: hex).scanHexInt64(&int)
-        let r, g, b: UInt64
-        switch hex.count {
+        Scanner(string: hexStr).scanHexInt64(&int)
+        let r, g, b, a: UInt64
+        switch hexStr.count {
         case 6:
-            (r, g, b) = ((int >> 16) & 0xFF, (int >> 8) & 0xFF, int & 0xFF)
+            (r, g, b, a) = ((int >> 16) & 0xFF, (int >> 8) & 0xFF, int & 0xFF, 255)
+        case 8:
+            (r, g, b, a) = ((int >> 24) & 0xFF, (int >> 16) & 0xFF, (int >> 8) & 0xFF, int & 0xFF)
         default:
-            (r, g, b) = (255, 0, 0)
+            (r, g, b, a) = (255, 0, 0, 255)
         }
-        self.init(.sRGB, red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255, opacity: 1)
+        self.init(.sRGB, red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255, opacity: Double(a) / 255)
     }
     
     func isSimilar(to other: Color) -> Bool {
@@ -395,7 +458,7 @@ extension Color {
     }
 }
 
-// MARK: - 5. Zobrist 散列、置换表与杀手/历史启发数据结构
+// MARK: - 5. Zobrist 与启发式算力结构
 
 struct TranspositionTable: Sendable {
     enum EntryType: Sendable { case exact, lowerBound, upperBound }
@@ -415,18 +478,24 @@ struct TranspositionTable: Sendable {
         table[hash] = Entry(depth: depth, score: score, type: type, bestMove: move)
     }
     
-    func lookup(hash: UInt64, depth: Int, alpha: inout Int, beta: inout Int) -> (Int, (Int, Int)?)? {
+    func lookup(hash: UInt64, depth: Int, alpha: Int, beta: Int) -> (score: Int, move: (Int, Int)?, hitCutoff: Bool, newAlpha: Int, newBeta: Int)? {
         guard let entry = table[hash], entry.depth >= depth else { return nil }
+        var a = alpha
+        var b = beta
+        
         switch entry.type {
         case .exact:
-            return (entry.score, entry.bestMove)
+            return (entry.score, entry.bestMove, true, a, b)
         case .lowerBound:
-            alpha = max(alpha, entry.score)
+            a = max(a, entry.score)
         case .upperBound:
-            beta = min(beta, entry.score)
+            b = min(b, entry.score)
         }
-        if alpha >= beta { return (entry.score, entry.bestMove) }
-        return nil
+        
+        if a >= b {
+            return (entry.score, entry.bestMove, true, a, b)
+        }
+        return (entry.score, entry.bestMove, false, a, b)
     }
 }
 
@@ -464,15 +533,13 @@ struct MoveOrderingTable: Sendable {
     }
 }
 
-// MARK: - 6. 动态风险偏好控制策略
-
 enum TacticalRiskMode {
     case dominant
     case balanced
     case desperate
 }
 
-// MARK: - 7. 算法 AI 求解引擎
+// MARK: - 6. AI 算法引擎
 
 struct AISolver: Sendable {
     struct SimCell: Sendable {
@@ -567,7 +634,6 @@ struct AISolver: Sendable {
     let hasEntered: [Bool]
     let eliminated: [Bool]
     private let neighborsMap: [[Int]]
-    private let nextPlayerLookup: [Int: Int]
     
     init(boardSize: Int,
          activePlayers: [Int],
@@ -594,44 +660,16 @@ struct AISolver: Sendable {
         self.hasEntered = hasEntered
         self.eliminated = eliminated
         self.neighborsMap = Self.neighborLookupTable[boardSize] ?? []
-        
-        var lookup = [Int: Int]()
-        let n = activePlayers.count
-        for mask in 0..<(1 << PlayerPreset.maxPlayers) {
-            for currP in 0..<PlayerPreset.maxPlayers {
-                if n == 0 {
-                    lookup[(currP << 8) | mask] = currP
-                    continue
-                }
-                var startIdx = 0
-                if let idx = activePlayers.firstIndex(of: currP) {
-                    startIdx = (idx + 1) % n
-                } else {
-                    startIdx = activePlayers.firstIndex(where: { $0 > currP }) ?? 0
-                }
-                var i = startIdx
-                var count = 0
-                while ((mask & (1 << activePlayers[i])) != 0) && count < n {
-                    i = (i + 1) % n
-                    count += 1
-                }
-                let key = (currP << 8) | mask
-                lookup[key] = activePlayers[i]
-            }
-        }
-        self.nextPlayerLookup = lookup
     }
     
     @inline(__always)
     private func getNextPlayerFast(current: Int, eliminated: [Bool]) -> Int {
-        var mask = 0
-        for p in activePlayers {
-            if isPlayerEliminated(p, in: eliminated) {
-                mask |= (1 << p)
-            }
+        let alive = activePlayers.filter { !isPlayerEliminated($0, in: eliminated) }
+        guard !alive.isEmpty else { return current }
+        if let idx = alive.firstIndex(of: current) {
+            return alive[(idx + 1) % alive.count]
         }
-        let key = (current << 8) | mask
-        return nextPlayerLookup[key] ?? current
+        return alive.first(where: { $0 > current }) ?? alive[0]
     }
     
     func calculateBestMove() async -> (Int, Int)? {
@@ -849,12 +887,17 @@ struct AISolver: Sendable {
         var bVal = beta
         
         let hash = boardState.zobristHash
-        if let (cachedScore, _) = tt.lookup(hash: hash, depth: depth, alpha: &a, beta: &bVal) {
-            return cachedScore
+        if let res = tt.lookup(hash: hash, depth: depth, alpha: a, beta: bVal) {
+            a = res.newAlpha
+            bVal = res.newBeta
+            if res.hitCutoff { return res.score }
         }
         
+        let myOrbCount = boardState.cells.filter { $0.owner == turnPlayer }.reduce(0) { $0 + $1.count }
+        let isZugzwangRisk = myOrbCount <= 3
+        
         let R = 2
-        if allowNullMove && nmpCooldown == 0 && depth > R + 1 && !isGameOverSimulated(eliminated: eliminatedState) {
+        if allowNullMove && !isZugzwangRisk && nmpCooldown == 0 && depth > R + 1 && !isGameOverSimulated(eliminated: eliminatedState) {
             let isTacticalField = boardState.cells.contains { $0.count == 3 }
             if !isTacticalField {
                 let nextP = getNextPlayerFast(current: turnPlayer, eliminated: eliminatedState)
@@ -868,7 +911,7 @@ struct AISolver: Sendable {
                     turnPlayer: nextP,
                     tt: &tt,
                     ordering: &ordering,
-                    allowNullMove: true,
+                    allowNullMove: false,
                     nmpCooldown: 3,
                     lastWaveCount: 0
                 )
@@ -1390,7 +1433,7 @@ struct AISolver: Sendable {
     }
 }
 
-// MARK: - 8. GameModel ViewModel
+// MARK: - 7. GameModel ViewModel
 
 @MainActor
 final class GameModel: ObservableObject {
@@ -1413,9 +1456,8 @@ final class GameModel: ObservableObject {
         }
     }
     
-    @Published var board: [[Cell]] = [] {
-        didSet { updateCachedPlayableCells() }
-    }
+    @Published var board: [[Cell]] = []
+    
     @Published var playerNames: [String] {
         didSet { debounceSave() }
     }
@@ -1444,13 +1486,22 @@ final class GameModel: ObservableObject {
     @Published var showControlSheet: Bool = false
     @Published var flyingOrbs: [FlyingOrb] = []
     @Published var emphasizedCells: Set<Int> = []
+    @Published var showDisconnectedAlert: Bool = false
+    @Published var activeOnlineMode: ActiveOnlineMode = .none
     
     @Published var customBackgroundImage: UIImage? = nil
     
+    @Published private(set) var isGameInPlay: Bool = false
     @Published private(set) var activePlayerIndices: [Int] = []
     @Published private(set) var playableCells: Set<Int> = []
+    @Published private(set) var cachedOrbCounts: [Int: Int] = [:]
+    
+    private var lastReceivedSeqID: UInt64 = 0
+    private var currentGameSessionID: UUID = UUID()
+    private var actionQueue: [(Int, Int, Int)] = []
     
     private var p2pCancellable: AnyCancellable? = nil
+    private var disconnectCancellable: AnyCancellable? = nil
     private var aiTask: Task<Void, Never>? = nil
     private var saveWorkItem: DispatchWorkItem? = nil
     
@@ -1458,10 +1509,31 @@ final class GameModel: ObservableObject {
         self.activePlayerIndices = playerTypes.enumerated().compactMap { $1 != .disabled ? $0 : nil }
     }
     
+    // 问题 2 & 6 修复：锁定对局角色防改，联机准确校验 .p2pNetwork
+    func validSelectableTypes(forPlayerIndex idx: Int, isInLobby: Bool = false) -> [PlayerControlType] {
+        let isP2PConnected = P2PNetworkManager.shared.isConnected
+        let isSeat0 = (idx == 0)
+        let isMySeat = (isP2PConnected && idx == myPlayerIndex)
+        
+        return PlayerControlType.allCases.filter { type in
+            if (isSeat0 || isMySeat) && type == .disabled { return false }
+            
+            // 对局进行期间禁止任何角色类型的改动（防篡改）
+            if isGameInPlay {
+                return type == playerTypes[idx]
+            }
+            
+            // 联机/单机合法选项判断
+            if type == .p2pNetwork {
+                return isP2PConnected || isInLobby
+            }
+            
+            return true
+        }
+    }
+    
     private func updateCachedPlayableCells() {
-        guard boardSize > 0,
-              board.count == boardSize,
-              board.first?.count == boardSize else {
+        guard boardSize > 0, board.count == boardSize, board.first?.count == boardSize else {
             self.playableCells = []
             return
         }
@@ -1485,6 +1557,35 @@ final class GameModel: ObservableObject {
             }
         }
         self.playableCells = indices
+    }
+    
+    private func recalculateOrbCounts() {
+        var counts = [Int: Int]()
+        for row in board {
+            for cell in row {
+                if let o = cell.owner {
+                    counts[o, default: 0] += cell.count
+                }
+            }
+        }
+        if self.cachedOrbCounts != counts {
+            self.cachedOrbCounts = counts
+        }
+    }
+    
+    // 问题 7 修复：移除 max(0, ...)，生产环中依赖成功/失败的回调修正，Debug 模式断言提示
+    private func adjustOrbCount(for player: Int?, delta: Int) {
+        guard let p = player else { return }
+        let current = cachedOrbCounts[p, default: 0]
+        let newValue = current + delta
+        
+        #if DEBUG
+        if newValue < 0 {
+            print("⚠️ [OrbCount Warning] 玩家 \(p) 计数值修正前出现负数: \(newValue)")
+        }
+        #endif
+        
+        cachedOrbCounts[p] = max(0, newValue)
     }
     
     init() {
@@ -1559,15 +1660,24 @@ final class GameModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] packet in
                 guard let self = self else { return }
-                if packet.action == .playerMove, let r = packet.row, let c = packet.col, let pIdx = packet.playerIndex {
-                    if pIdx == self.currentPlayer && self.playerTypes[safe: pIdx] == .p2pNetwork {
-                        self.play(row: r, column: c)
+                
+                if packet.action != .ping && packet.action != .ack {
+                    guard packet.sequenceID > self.lastReceivedSeqID else { return }
+                    self.lastReceivedSeqID = packet.sequenceID
+                }
+                
+                switch packet.action {
+                case .playerMove:
+                    if let r = packet.row, let c = packet.col, let pIdx = packet.playerIndex {
+                        self.enqueueNetworkMove(row: r, column: c, player: pIdx)
                     }
-                } else if packet.action == .syncRequest {
+                    
+                case .syncRequest:
                     if P2PNetworkManager.shared.isHost {
-                        self.syncRoomConfigToPeers()
+                        self.broadcastFullStateSnapshot()
                     }
-                } else if packet.action == .hostConfig {
+                    
+                case .hostConfig:
                     if let names = packet.playerNames { self.playerNames = names }
                     if let types = packet.playerTypes { self.playerTypes = types }
                     if let hexes = packet.colorsHex { self.colors = hexes.map { Color(hex: $0) } }
@@ -1575,25 +1685,99 @@ final class GameModel: ObservableObject {
                     if let sz = packet.boardSize { self.boardSize = sz }
                     if let rnd = packet.isRandomFirstPlayer { self.isRandomFirstPlayer = rnd }
                     if let aiLvl = packet.aiLevelRaw, let level = AIDifficultyLevel(rawValue: aiLvl) { self.aiDifficultyLevel = level }
+                    
+                case .startGame:
+                    if let firstP = packet.firstPlayerIndex {
+                        self.resetGame(chosenFirstPlayer: firstP)
+                    }
+                    
+                case .stateSnapshot:
+                    if let names = packet.playerNames { self.playerNames = names }
+                    if let types = packet.playerTypes { self.playerTypes = types }
+                    
+                    if let compactSnap = packet.compactBoardSnapshot, let turnP = packet.currentTurnIndex {
+                        var grid = [[Cell]](repeating: [Cell](repeating: Cell(owner: nil, count: 0), count: self.boardSize), count: self.boardSize)
+                        for item in compactSnap {
+                            let r = Int(item.r)
+                            let c = Int(item.c)
+                            if r < self.boardSize && c < self.boardSize {
+                                grid[r][c] = Cell(owner: item.owner < 0 ? nil : Int(item.owner), count: Int(item.count))
+                            }
+                        }
+                        self.board = grid
+                        if let entered = packet.hasEnteredSnapshot { self.hasEntered = entered }
+                        if let elim = packet.eliminatedSnapshot { self.eliminated = elim }
+                        self.recalculateOrbCounts()
+                        self.currentPlayer = turnP
+                        
+                        if P2PNetworkManager.shared.isHost {
+                            self.checkAndRunAITurn()
+                        }
+                    }
+                    
+                default:
+                    break
+                }
+            }
+        
+        // 问题 5 & 9 修复：房主掉线重置在线模式，主动清理状态
+        disconnectCancellable?.cancel()
+        disconnectCancellable = P2PNetworkManager.shared.disconnectSubject
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] disconnectedPeerName in
+                guard let self = self else { return }
+                if P2PNetworkManager.shared.isHost {
+                    for i in 0..<PlayerPreset.maxPlayers {
+                        if self.playerNames[safe: i] == disconnectedPeerName && self.playerTypes[safe: i] == .p2pNetwork {
+                            self.updatePlayerType(at: i, to: .mathNightmare, forceInternal: true)
+                            self.broadcastFullStateSnapshot()
+                            if self.currentPlayer == i && !self.isProcessingCascade {
+                                self.checkAndRunAITurn()
+                            }
+                        }
+                    }
+                } else {
+                    if disconnectedPeerName == P2PNetworkManager.shared.hostDeviceName {
+                        self.showDisconnectedAlert = true
+                        self.exitToMenu()
+                    }
                 }
             }
     }
     
     func syncRoomConfigToPeers() {
         guard P2PNetworkManager.shared.isHost && P2PNetworkManager.shared.isConnected else { return }
-        let packet = P2PPacket(
-            action: .hostConfig,
-            senderID: P2PNetworkManager.shared.myNickname,
-            row: nil, col: nil,
-            boardSize: boardSize,
-            isRandomFirstPlayer: isRandomFirstPlayer,
-            playerIndex: nil,
-            playerNames: playerNames,
-            playerTypes: playerTypes,
-            colorsHex: colors.map { $0.toHex() },
-            emojis: emojis.map { $0 ?? "" },
-            aiLevelRaw: aiDifficultyLevel.rawValue
-        )
+        var packet = P2PPacket(sequenceID: P2PNetworkManager.shared.getNextSequenceID(), action: .hostConfig, senderID: P2PNetworkManager.shared.myNickname)
+        packet.boardSize = boardSize
+        packet.isRandomFirstPlayer = isRandomFirstPlayer
+        packet.playerNames = playerNames
+        packet.playerTypes = playerTypes
+        packet.colorsHex = colors.map { $0.toHex() }
+        packet.emojis = emojis.map { $0 ?? "" }
+        packet.aiLevelRaw = aiDifficultyLevel.rawValue
+        P2PNetworkManager.shared.sendPacket(packet)
+    }
+    
+    private func broadcastFullStateSnapshot() {
+        guard P2PNetworkManager.shared.isHost && P2PNetworkManager.shared.isConnected else { return }
+        
+        var compactList = [CompactCellSnapshot]()
+        for r in 0..<boardSize {
+            for c in 0..<boardSize {
+                let cell = board[r][c]
+                if cell.count > 0 {
+                    compactList.append(CompactCellSnapshot(r: r, c: c, owner: cell.owner, count: cell.count))
+                }
+            }
+        }
+        
+        var packet = P2PPacket(sequenceID: P2PNetworkManager.shared.getNextSequenceID(), action: .stateSnapshot, senderID: P2PNetworkManager.shared.myNickname)
+        packet.playerNames = playerNames
+        packet.playerTypes = playerTypes
+        packet.compactBoardSnapshot = compactList
+        packet.currentTurnIndex = currentPlayer
+        packet.hasEnteredSnapshot = hasEntered
+        packet.eliminatedSnapshot = eliminated
         P2PNetworkManager.shared.sendPacket(packet)
     }
     
@@ -1617,14 +1801,17 @@ final class GameModel: ObservableObject {
     
     func tryUpdatePlayerEmoji(at index: Int, newEmoji: String?) -> Bool {
         guard index >= 0 && index < PlayerPreset.maxPlayers, index < emojis.count else { return false }
-        if let emoji = newEmoji, !emoji.isEmpty {
+        if let rawEmoji = newEmoji, !rawEmoji.isEmpty {
+            let normalized = rawEmoji.precomposedStringWithCanonicalMapping
             for i in 0..<PlayerPreset.maxPlayers where i != index {
-                if emojis[safe: i] == emoji {
+                if let existing = emojis[safe: i], existing.precomposedStringWithCanonicalMapping == normalized {
                     return false
                 }
             }
+            emojis[index] = normalized
+        } else {
+            emojis[index] = nil
         }
-        emojis[index] = newEmoji
         syncRoomConfigToPeers()
         return true
     }
@@ -1647,8 +1834,11 @@ final class GameModel: ObservableObject {
     }
     
     func resetGame(chosenFirstPlayer: Int? = nil) {
+        currentGameSessionID = UUID()
+        lastReceivedSeqID = 0
         aiTask?.cancel()
         aiTask = nil
+        actionQueue.removeAll()
         flyingOrbs.removeAll()
         emphasizedCells.removeAll()
         board = [[Cell]](repeating: [Cell](repeating: Cell(owner: nil, count: 0), count: boardSize), count: boardSize)
@@ -1656,6 +1846,8 @@ final class GameModel: ObservableObject {
         eliminated = Array(repeating: false, count: PlayerPreset.maxPlayers)
         winnerIndex = nil
         isProcessingCascade = false
+        isGameInPlay = true
+        recalculateOrbCounts()
         
         let active = activePlayerIndices
         guard !active.isEmpty else { return }
@@ -1668,22 +1860,37 @@ final class GameModel: ObservableObject {
             currentPlayer = active[0]
         }
         
+        if P2PNetworkManager.shared.isHost && P2PNetworkManager.shared.isConnected {
+            var startPacket = P2PPacket(sequenceID: P2PNetworkManager.shared.getNextSequenceID(), action: .startGame, senderID: P2PNetworkManager.shared.myNickname)
+            startPacket.firstPlayerIndex = currentPlayer
+            P2PNetworkManager.shared.sendPacket(startPacket)
+        }
+        
         updateCachedPlayableCells()
         checkAndRunAITurn()
     }
     
     func exitToMenu() {
+        currentGameSessionID = UUID()
         aiTask?.cancel()
         aiTask = nil
+        actionQueue.removeAll()
         flyingOrbs.removeAll()
         emphasizedCells.removeAll()
         isProcessingCascade = false
+        isGameInPlay = false
         winnerIndex = nil
+        activeOnlineMode = .none // 问题 5 修复：同时把主菜单在线连接模式回归默认
         P2PNetworkManager.shared.stopP2P()
     }
     
-    func updatePlayerType(at index: Int, to newType: PlayerControlType) {
+    func updatePlayerType(at index: Int, to newType: PlayerControlType, forceInternal: Bool = false) {
         guard index >= 0 && index < PlayerPreset.maxPlayers else { return }
+        
+        if !forceInternal {
+            let valids = validSelectableTypes(forPlayerIndex: index, isInLobby: true)
+            guard valids.contains(newType) else { return }
+        }
         
         if index == currentPlayer {
             aiTask?.cancel()
@@ -1702,20 +1909,39 @@ final class GameModel: ObservableObject {
         let flatIdx = row * boardSize + column
         guard !isProcessingCascade, winnerIndex == nil, playableCells.contains(flatIdx) else { return }
         
-        Haptics.shared.lightImpact()
-        
         let player = currentPlayer
+        let isP2P = P2PNetworkManager.shared.isConnected
         
-        if P2PNetworkManager.shared.isConnected {
-            let packet = P2PPacket(action: .playerMove, senderID: P2PNetworkManager.shared.myNickname, row: row, col: column, boardSize: boardSize, isRandomFirstPlayer: nil, playerIndex: player, playerNames: nil, playerTypes: nil, colorsHex: nil, emojis: nil, aiLevelRaw: nil)
+        if isP2P {
+            let isMyTurnToControl = (playerTypes[player] == .human && myPlayerIndex == player) || (P2PNetworkManager.shared.isHost && playerTypes[player].isAI)
+            guard isMyTurnToControl else { return }
+            
+            var packet = P2PPacket(sequenceID: P2PNetworkManager.shared.getNextSequenceID(), action: .playerMove, senderID: P2PNetworkManager.shared.myNickname)
+            packet.row = row
+            packet.col = column
+            packet.playerIndex = player
             P2PNetworkManager.shared.sendPacket(packet)
+        } else {
+            guard playerTypes[player] == .human else { return }
         }
         
-        aiTask?.cancel()
-        aiTask = nil
+        enqueueNetworkMove(row: row, column: column, player: player)
+    }
+    
+    private func enqueueNetworkMove(row: Int, column: Int, player: Int) {
+        actionQueue.append((row, column, player))
+        processActionQueue()
+    }
+    
+    private func processActionQueue() {
+        guard !isProcessingCascade && winnerIndex == nil else { return }
         
         Task { @MainActor in
-            await resolveMove(row: row, column: column, player: player)
+            while !actionQueue.isEmpty && !isProcessingCascade && winnerIndex == nil {
+                let (r, c, p) = actionQueue.removeFirst()
+                Haptics.shared.lightImpact()
+                await resolveMove(row: r, column: c, player: p)
+            }
         }
     }
     
@@ -1726,17 +1952,29 @@ final class GameModel: ObservableObject {
             return
         }
         
+        let boardBackup = self.board
+        let hasEnteredBackup = self.hasEntered
         let isFirst = !hasEntered[player]
         hasEntered[player] = true
         
         do {
+            let addCount = isFirst ? 3 : 1
             withAnimation(.spring(response: 0.22, dampingFraction: 0.62)) {
                 if row < board.count && column < board[row].count {
+                    let oldOwner = board[row][column].owner
+                    if oldOwner != player {
+                        adjustOrbCount(for: oldOwner, delta: -board[row][column].count)
+                        adjustOrbCount(for: player, delta: board[row][column].count + addCount)
+                    } else {
+                        adjustOrbCount(for: player, delta: addCount)
+                    }
+                    
                     board[row][column].owner = player
-                    board[row][column].count += isFirst ? 3 : 1
+                    board[row][column].count += addCount
                     emphasizedCells = [row * boardSize + column]
                 }
             }
+            
             try await Task.sleep(nanoseconds: 210_000_000)
             
             var wave: [(Int, Int)] = (row < board.count && column < board[row].count && board[row][column].count >= 4) ? [(row, column)] : []
@@ -1766,7 +2004,9 @@ final class GameModel: ObservableObject {
                     for (r, c) in exploding {
                         if r < board.count && c < board[r].count {
                             board[r][c].count -= 4
-                            board[r][c].owner = board[r][c].count == 0 ? nil : player
+                            let newOwner = board[r][c].count == 0 ? nil : player
+                            board[r][c].owner = newOwner
+                            adjustOrbCount(for: player, delta: -4)
                         }
                     }
                     flyingOrbs = transfers
@@ -1784,6 +2024,16 @@ final class GameModel: ObservableObject {
                 withAnimation(.spring(response: 0.18, dampingFraction: 0.68)) {
                     for orb in flyingOrbs {
                         if orb.toRow < board.count && orb.toColumn < board[orb.toRow].count {
+                            let oldOwner = board[orb.toRow][orb.toColumn].owner
+                            let oldCount = board[orb.toRow][orb.toColumn].count
+                            
+                            if oldOwner != player {
+                                adjustOrbCount(for: oldOwner, delta: -oldCount)
+                                adjustOrbCount(for: player, delta: oldCount + 1)
+                            } else {
+                                adjustOrbCount(for: player, delta: 1)
+                            }
+                            
                             board[orb.toRow][orb.toColumn].owner = player
                             board[orb.toRow][orb.toColumn].count += 1
                             changed.insert(orb.toRow * boardSize + orb.toColumn)
@@ -1805,16 +2055,25 @@ final class GameModel: ObservableObject {
             }
             
             emphasizedCells = []
-            isProcessingCascade = false
-            
             updateEliminationStatus()
-            if checkGameOver() { return }
             
-            advanceToNextTurn()
+            // 问题 4 修复：先推进回合与判定，确保网络 Task 不会超前抢占竞态
+            if checkGameOver() {
+                isGameInPlay = false
+            } else {
+                advanceToNextTurn()
+            }
+            
+            // 问题 1 修复：在解锁前，成功路径强制执行一次全量计数值同步，彻底防止漂移
+            recalculateOrbCounts()
+            isProcessingCascade = false
         } catch {
+            self.board = boardBackup
+            self.hasEntered = hasEnteredBackup
             isProcessingCascade = false
             emphasizedCells = []
             flyingOrbs = []
+            recalculateOrbCounts()
         }
     }
     
@@ -1870,13 +2129,20 @@ final class GameModel: ObservableObject {
     
     private func checkAndRunAITurn() {
         aiTask?.cancel()
+        
+        if P2PNetworkManager.shared.isConnected && !P2PNetworkManager.shared.isHost {
+            return
+        }
+        
         guard currentPlayer < playerTypes.count else { return }
         let currentType = playerTypes[currentPlayer]
         guard currentType.isAI && winnerIndex == nil else { return }
         
+        let sessionID = self.currentGameSessionID
+        
         aiTask = Task(priority: .utility) {
             try? await Task.sleep(nanoseconds: 250_000_000)
-            if Task.isCancelled { return }
+            if Task.isCancelled || self.currentGameSessionID != sessionID { return }
             
             let solver = AISolver(
                 boardSize: boardSize,
@@ -1890,31 +2156,22 @@ final class GameModel: ObservableObject {
             )
             
             if let bestMove = await solver.calculateBestMove() {
-                if !Task.isCancelled {
+                if !Task.isCancelled && self.currentGameSessionID == sessionID {
                     play(row: bestMove.0, column: bestMove.1)
                 }
             }
         }
     }
     
-    // 计算某玩家占领全盘棋子的比例
     func playerOrbPercentage(for playerIndex: Int) -> Double {
-        var totalOrbs = 0
-        var playerOrbs = 0
-        for row in board {
-            for cell in row {
-                totalOrbs += cell.count
-                if cell.owner == playerIndex {
-                    playerOrbs += cell.count
-                }
-            }
-        }
+        let playerOrbs = cachedOrbCounts[playerIndex, default: 0]
+        let totalOrbs = cachedOrbCounts.values.reduce(0, +)
         guard totalOrbs > 0 else { return 0.0 }
         return Double(playerOrbs) / Double(totalOrbs)
     }
 }
 
-// MARK: - 9. 两侧玩家进度玻璃棋子 View (包含 interactive 属性与轮到高亮)
+// MARK: - 8. 玩家进度 View
 
 struct PlayerProgressOrbView: View {
     @ObservedObject var game: GameModel
@@ -1937,11 +2194,9 @@ struct PlayerProgressOrbView: View {
         
         VStack(spacing: 4) {
             ZStack {
-                // 内部填充底色
                 Circle()
                     .fill(color.opacity(isEliminated ? 0.05 : 0.2))
                 
-                // 内部环形比例进度条 (圆形满的程度代表占比)
                 Circle()
                     .trim(from: 0, to: isEliminated ? 0 : CGFloat(percent))
                     .stroke(
@@ -1951,7 +2206,6 @@ struct PlayerProgressOrbView: View {
                     .rotationEffect(.degrees(-90))
                     .padding(3)
                 
-                // 棋子中心标志 (Emoji 或 颜色圆点)
                 if let em = emoji, !em.isEmpty {
                     Text(em)
                         .font(.system(size: size * 0.42))
@@ -1963,7 +2217,6 @@ struct PlayerProgressOrbView: View {
                 }
             }
             .frame(width: size, height: size)
-            // 挂载玻璃材质与原生按压 interactive 交互属性
             .glassEffect(.regular.interactive(), in: .circle)
             .scaleEffect(isCurrentTurn ? 1.15 : 1.0)
             .shadow(color: isCurrentTurn ? color.opacity(0.8) : .clear, radius: 10, x: 0, y: 0)
@@ -1980,11 +2233,14 @@ struct PlayerProgressOrbView: View {
     }
 }
 
-// MARK: - 10. 棋盘视图 (两侧对齐显示参战玩家棋子)
+// MARK: - 9. 棋盘 View
 
 struct BoardView: View {
     @ObservedObject var game: GameModel
+    let onBoardDimensionCalculated: (CGFloat) -> Void
+    
     private let gap: CGFloat = 3
+    private let innerBorderPadding: CGFloat = 6
     
     var leftPlayers: [Int] {
         let active = game.activePlayerIndices
@@ -2000,27 +2256,22 @@ struct BoardView: View {
     
     var body: some View {
         GeometryReader { proxy in
-            let isWide = proxy.size.width > 420
-            let sidePadding: CGFloat = isWide ? 64 : 48
-            let availableWidth = max(10, proxy.size.width - sidePadding * 2)
+            let orbWidth: CGFloat = 52
+            let availableWidth = max(10, proxy.size.width - orbWidth * 2 - 16)
             let availableHeight = max(10, proxy.size.height - 24)
             let minDim = min(availableWidth, availableHeight)
             
             let side = (minDim - gap * CGFloat(game.boardSize - 1)) / CGFloat(game.boardSize)
-            let actualBoardDimension = side * CGFloat(game.boardSize) + gap * CGFloat(game.boardSize - 1)
+            let actualBoardDimension = side * CGFloat(game.boardSize) + gap * CGFloat(game.boardSize - 1) + innerBorderPadding * 2
             
             HStack(spacing: 8) {
-                // 左侧玩家玻璃指示器组合
                 VStack(spacing: 12) {
                     ForEach(leftPlayers, id: \.self) { pIdx in
                         PlayerProgressOrbView(game: game, playerIndex: pIdx)
                     }
                 }
-                .frame(width: sidePadding)
+                .frame(width: orbWidth)
                 
-                Spacer(minLength: 0)
-                
-                // 中央棋盘
                 ZStack(alignment: .topLeading) {
                     VStack(spacing: gap) {
                         ForEach(0..<game.boardSize, id: \.self) { r in
@@ -2039,7 +2290,7 @@ struct BoardView: View {
                                     .frame(width: max(0, side), height: max(0, side))
                                     .contentShape(Rectangle())
                                     .onTapGesture {
-                                        if game.playerTypes[safe: game.currentPlayer] == .human && game.playableCells.contains(index) {
+                                        if game.playableCells.contains(index) {
                                             game.play(row: r, column: c)
                                         }
                                     }
@@ -2047,7 +2298,7 @@ struct BoardView: View {
                             }
                         }
                     }
-                    .padding(6)
+                    .padding(innerBorderPadding)
                     
                     ForEach(game.flyingOrbs) { orb in
                         PieceView(
@@ -2057,36 +2308,32 @@ struct BoardView: View {
                             size: max(8, side * 0.40)
                         )
                         .position(
-                            x: 6 + side / 2 + CGFloat(orb.arrived ? orb.toColumn : orb.fromColumn) * (side + gap),
-                            y: 6 + side / 2 + CGFloat(orb.arrived ? orb.toRow : orb.fromRow) * (side + gap)
+                            x: innerBorderPadding + side / 2 + CGFloat(orb.arrived ? orb.toColumn : orb.fromColumn) * (side + gap),
+                            y: innerBorderPadding + side / 2 + CGFloat(orb.arrived ? orb.toRow : orb.fromRow) * (side + gap)
                         )
                         .zIndex(10)
                         .allowsHitTesting(false)
                     }
                 }
                 .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
-                .frame(width: max(0, actualBoardDimension + 12), height: max(0, actualBoardDimension + 12))
+                .frame(width: actualBoardDimension, height: actualBoardDimension)
                 
-                Spacer(minLength: 0)
-                
-                // 右侧玩家玻璃指示器组合
                 VStack(spacing: 12) {
                     ForEach(rightPlayers, id: \.self) { pIdx in
                         PlayerProgressOrbView(game: game, playerIndex: pIdx)
                     }
                 }
-                .frame(width: sidePadding)
+                .frame(width: orbWidth)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            .onAppear { onBoardDimensionCalculated(actualBoardDimension) }
+            .onChange(of: actualBoardDimension) { newDim in onBoardDimensionCalculated(newDim) }
         }
         .clipped()
-        .onDisappear {
-            game.exitToMenu()
-        }
     }
 }
 
-// MARK: - 11. 单元格视图 (Equatable)
+// MARK: - 10. 单元格 (Equatable)
 
 struct CellView: View, Equatable {
     let cell: Cell
@@ -2125,7 +2372,7 @@ struct CellView: View, Equatable {
     }
 }
 
-// MARK: - 12. 棋子外观视图
+// MARK: - 11. 棋子 View
 
 struct PieceView: View {
     let color: Color
@@ -2170,7 +2417,7 @@ struct PieceView: View {
     }
 }
 
-// MARK: - 13. 棋子点数排列视图
+// MARK: - 12. 棋子点阵 View
 
 struct DotPattern: View {
     let count: Int
@@ -2232,7 +2479,7 @@ struct DotPattern: View {
     }
 }
 
-// MARK: - 14. Emoji 选择器 Sheet
+// MARK: - 13. Emoji 选择器 Sheet
 
 struct EmojiPickerSheet: View {
     @ObservedObject var game: GameModel
@@ -2305,8 +2552,9 @@ struct EmojiPickerSheet: View {
                         
                         Button(action: {
                             let trimmed = customEmojiText.trimmingCharacters(in: .whitespacesAndNewlines)
-                            if !trimmed.isEmpty {
-                                if game.tryUpdatePlayerEmoji(at: playerIndex, newEmoji: String(trimmed.prefix(1))) {
+                            if let firstEmojiChar = trimmed.first {
+                                let fullEmojiStr = String(firstEmojiChar)
+                                if game.tryUpdatePlayerEmoji(at: playerIndex, newEmoji: fullEmojiStr) {
                                     dismiss()
                                 } else {
                                     errorMessage = "该 Emoji 已被占用！"
@@ -2343,7 +2591,7 @@ extension Array {
     }
 }
 
-// MARK: - 15. 单机/本地设置 View
+// MARK: - 14. 单机设置 View
 
 struct LocalGameSetupView: View {
     @ObservedObject var game: GameModel
@@ -2352,10 +2600,6 @@ struct LocalGameSetupView: View {
     
     var isPlayerCountValid: Bool {
         game.activePlayerIndices.count >= 2
-    }
-    
-    var localAvailableTypes: [PlayerControlType] {
-        PlayerControlType.allCases.filter { $0 != .p2pNetwork }
     }
     
     @ViewBuilder
@@ -2396,7 +2640,7 @@ struct LocalGameSetupView: View {
                         get: { game.playerTypes[safe: idx] ?? .disabled },
                         set: { game.updatePlayerType(at: idx, to: $0) }
                     )) {
-                        ForEach(localAvailableTypes) { type in
+                        ForEach(game.validSelectableTypes(forPlayerIndex: idx, isInLobby: false)) { type in
                             Text(type.rawValue).tag(type)
                         }
                     }
@@ -2501,7 +2745,7 @@ struct LocalGameSetupView: View {
     }
 }
 
-// MARK: - 16. 近场搜寻内嵌式菜单 View
+// MARK: - 15. 本地搜寻 Inline View
 
 struct LocalDeviceBrowserInlineView: View {
     @ObservedObject var p2pManager = P2PNetworkManager.shared
@@ -2599,7 +2843,7 @@ struct LocalDeviceBrowserInlineView: View {
     }
 }
 
-// MARK: - 17. 4 人房间大厅 View
+// MARK: - 16. 联机大厅 View
 
 struct RoomLobbyView: View {
     @ObservedObject var game: GameModel
@@ -2651,7 +2895,7 @@ struct RoomLobbyView: View {
                             get: { game.playerTypes[safe: idx] ?? .disabled },
                             set: { game.updatePlayerType(at: idx, to: $0) }
                         )) {
-                            ForEach(PlayerControlType.allCases) { type in
+                            ForEach(game.validSelectableTypes(forPlayerIndex: idx, isInLobby: true)) { type in
                                 Text(type.rawValue).tag(type)
                             }
                         }
@@ -2765,7 +3009,7 @@ struct RoomLobbyView: View {
     }
 }
 
-// MARK: - 18. 联机设置 View
+// MARK: - 17. 联机 Setup View
 
 enum ActiveOnlineMode {
     case none
@@ -2779,7 +3023,6 @@ struct OnlineGameSetupView: View {
     @ObservedObject var p2pManager = P2PNetworkManager.shared
     let onStartGame: () -> Void
     
-    @State private var activeMode: ActiveOnlineMode = .none
     @State private var showAlertError: Bool = false
     @State private var p2pConnectionSubscription: AnyCancellable? = nil
     
@@ -2793,16 +3036,17 @@ struct OnlineGameSetupView: View {
                 
                 TextField("输入昵称", text: $p2pManager.myNickname)
                     .textFieldStyle(.roundedBorder)
+                    .disabled(p2pManager.isConnected || p2pManager.isConnecting)
                     .frame(maxWidth: 180)
             }
             .padding(10)
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
-            if activeMode == .localHost || activeMode == .localJoined {
+            if game.activeOnlineMode == .localHost || game.activeOnlineMode == .localJoined {
                 RoomLobbyView(
                     game: game,
                     onExitLobby: {
-                        activeMode = .none
+                        game.activeOnlineMode = .none
                         p2pConnectionSubscription?.cancel()
                         p2pConnectionSubscription = nil
                     },
@@ -2822,7 +3066,7 @@ struct OnlineGameSetupView: View {
                             p2pManager.startLocalHosting()
                             game.playerNames[0] = p2pManager.myNickname
                             game.myPlayerIndex = 0
-                            activeMode = .localHost
+                            game.activeOnlineMode = .localHost
                         }) {
                             Text("创建房间")
                                 .bold()
@@ -2836,7 +3080,7 @@ struct OnlineGameSetupView: View {
                         
                         Button(action: {
                             p2pManager.startLocalBrowsing()
-                            activeMode = .localSearching
+                            game.activeOnlineMode = .localSearching
                         }) {
                             Text("搜索加入")
                                 .bold()
@@ -2849,7 +3093,7 @@ struct OnlineGameSetupView: View {
                         .buttonStyle(.plain)
                     }
                     
-                    if activeMode == .localSearching {
+                    if game.activeOnlineMode == .localSearching {
                         LocalDeviceBrowserInlineView(
                             onSelectDevice: { device in
                                 p2pManager.connectToDevice(device)
@@ -2861,15 +3105,16 @@ struct OnlineGameSetupView: View {
                                     .sink { _ in
                                         game.playerNames[1] = p2pManager.myNickname
                                         game.myPlayerIndex = 1
-                                        activeMode = .localJoined
-                                        p2pManager.sendPacket(P2PPacket(action: .syncRequest, senderID: p2pManager.myNickname, row: nil, col: nil, boardSize: nil, isRandomFirstPlayer: nil, playerIndex: nil, playerNames: nil, playerTypes: nil, colorsHex: nil, emojis: nil, aiLevelRaw: nil))
+                                        game.activeOnlineMode = .localJoined
+                                        let syncPacket = P2PPacket(sequenceID: p2pManager.getNextSequenceID(), action: .syncRequest, senderID: p2pManager.myNickname)
+                                        p2pManager.sendPacket(syncPacket)
                                     }
                             },
                             onCancel: {
                                 p2pManager.stopP2P()
                                 p2pConnectionSubscription?.cancel()
                                 p2pConnectionSubscription = nil
-                                activeMode = .none
+                                game.activeOnlineMode = .none
                             }
                         )
                         .transition(.opacity.combined(with: .move(edge: .top)))
@@ -2879,12 +3124,6 @@ struct OnlineGameSetupView: View {
                 .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             }
         }
-        .onDisappear {
-            p2pManager.stopP2P()
-            p2pConnectionSubscription?.cancel()
-            p2pConnectionSubscription = nil
-            activeMode = .none
-        }
         .alert("连接失败", isPresented: $showAlertError) {
             Button("确定", role: .cancel) { }
         } message: {
@@ -2893,7 +3132,7 @@ struct OnlineGameSetupView: View {
     }
 }
 
-// MARK: - 19. 主菜单 View (修复右上方 Toolbar 按钮玻璃重叠)
+// MARK: - 18. 主菜单 View
 
 struct StartMenuView: View {
     @ObservedObject var game: GameModel
@@ -2983,7 +3222,6 @@ struct StartMenuView: View {
                             }
                         }
                     } label: {
-                        // 移除所有的额外的 background / glassEffect，避免玻璃套玻璃
                         Image(systemName: "photo.badge.plus")
                             .foregroundColor(.white)
                             .font(.system(size: 16, weight: .medium))
@@ -3002,20 +3240,25 @@ struct StartMenuView: View {
                     }
                 }
             }
+            .onChange(of: selectedTab) { newTab in
+                if newTab == 0 && !P2PNetworkManager.shared.isConnected {
+                    P2PNetworkManager.shared.stopP2P()
+                }
+            }
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
         }
     }
 }
 
-// MARK: - 20. 随机先手轮盘抽签 Overlay
+// MARK: - 19. 轮盘 Overlay
 
 struct RandomPlayerWheelOverlay: View {
     @ObservedObject var game: GameModel
     let activeIndices: [Int]
     let onFinished: (Int) -> Void
     
-    @State private var highlightedIndex: Int = 0
+    @State private var highlightedPos: Int = 0
     
     var body: some View {
         ZStack {
@@ -3029,8 +3272,10 @@ struct RandomPlayerWheelOverlay: View {
                     .foregroundColor(.white)
                 
                 HStack(spacing: 12) {
-                    ForEach(activeIndices, id: \.self) { pIdx in
-                        let isHighlighted = (activeIndices.indices.contains(highlightedIndex) && activeIndices[highlightedIndex] == pIdx)
+                    ForEach(activeIndices.indices, id: \.self) { pos in
+                        let pIdx = activeIndices[pos]
+                        let isHighlighted = (pos == highlightedPos)
+                        
                         VStack(spacing: 6) {
                             ZStack {
                                 Circle()
@@ -3059,50 +3304,55 @@ struct RandomPlayerWheelOverlay: View {
             .padding(.horizontal, 20)
         }
         .onAppear {
-            startFastWheelSpin()
+            startSmoothWheelDeceleration()
         }
     }
     
-    private func startFastWheelSpin() {
+    private func startSmoothWheelDeceleration() {
         let count = activeIndices.count
-        guard count > 0, let targetWinner = activeIndices.randomElement() else {
+        guard count > 0, let targetWinner = activeIndices.randomElement(),
+              let targetPos = activeIndices.firstIndex(of: targetWinner) else {
             onFinished(0)
             return
         }
         
-        let totalSteps = 16
+        let rounds = 3
+        let totalSteps = rounds * count + targetPos
         
         Task {
             var currentStep = 0
-            var delayMs: UInt64 = 25_000_000
+            var delayMs: UInt64 = 30_000_000
             
             while currentStep < totalSteps {
                 try? await Task.sleep(nanoseconds: delayMs)
-                highlightedIndex = (highlightedIndex + 1) % count
                 currentStep += 1
-                Haptics.shared.lightImpact()
+                highlightedPos = currentStep % count
                 
-                if totalSteps - currentStep < 6 {
-                    delayMs += 20_000_000
+                if currentStep % 2 == 0 {
+                    Haptics.shared.lightImpact()
+                }
+                
+                let progress = Double(currentStep) / Double(totalSteps)
+                if progress > 0.6 {
+                    let nextDelay = Double(delayMs) * 1.25
+                    delayMs = UInt64(min(nextDelay, 250_000_000))
                 }
             }
             
-            if let winnerPos = activeIndices.firstIndex(of: targetWinner) {
-                highlightedIndex = winnerPos
-            }
-            
-            try? await Task.sleep(nanoseconds: 150_000_000)
+            try? await Task.sleep(nanoseconds: 200_000_000)
             onFinished(targetWinner)
         }
     }
 }
 
-// MARK: - 21. 主对局视图 (返回与设置按钮置于棋盘正上方)
+// MARK: - 20. 游戏对局 View
 
 struct GamePlayView: View {
     @ObservedObject var game: GameModel
     @Binding var isGameStarted: Bool
     @Binding var isSpinningRandomWheel: Bool
+    
+    @State private var calculatedBoardWidth: CGFloat = 320
     
     var body: some View {
         ZStack {
@@ -3127,7 +3377,6 @@ struct GamePlayView: View {
             }
             
             VStack(spacing: 8) {
-                // 将返回键、回合指示、设置按钮紧凑置于棋盘的正上方
                 HStack {
                     Button(action: {
                         game.exitToMenu()
@@ -3178,13 +3427,15 @@ struct GamePlayView: View {
                     }
                     .buttonStyle(.plain)
                 }
-                .padding(.horizontal, 24)
+                .frame(width: calculatedBoardWidth)
                 .padding(.top, 10)
                 
                 Spacer(minLength: 4)
                 
-                BoardView(game: game)
-                    .padding(.horizontal, 8)
+                BoardView(game: game) { actualWidth in
+                    self.calculatedBoardWidth = actualWidth
+                }
+                .padding(.horizontal, 8)
                 
                 Spacer(minLength: 8)
             }
@@ -3259,6 +3510,13 @@ struct GamePlayView: View {
         .sheet(isPresented: $game.showControlSheet) {
             PlayerTakeoverSheet(game: game)
         }
+        .alert("连接断开", isPresented: $game.showDisconnectedAlert) {
+            Button("确定", role: .cancel) {
+                withAnimation(.spring()) { isGameStarted = false }
+            }
+        } message: {
+            Text("房主已断开连接，对局已自动结束。")
+        }
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true
         }
@@ -3268,7 +3526,7 @@ struct GamePlayView: View {
     }
 }
 
-// MARK: - 22. 控制面板 Sheet
+// MARK: - 21. 控制面板 Sheet
 
 struct PlayerTakeoverSheet: View {
     @ObservedObject var game: GameModel
@@ -3329,7 +3587,7 @@ struct PlayerTakeoverSheet: View {
                                 get: { game.playerTypes[safe: idx] ?? .disabled },
                                 set: { game.updatePlayerType(at: idx, to: $0) }
                             )) {
-                                ForEach(PlayerControlType.allCases.filter { $0 != .disabled }) { type in
+                                ForEach(game.validSelectableTypes(forPlayerIndex: idx, isInLobby: false)) { type in
                                     Text(type.rawValue).tag(type)
                                 }
                             }
@@ -3348,7 +3606,7 @@ struct PlayerTakeoverSheet: View {
     }
 }
 
-// MARK: - 23. 根视图 ContentView
+// MARK: - 22. 根视图 ContentView
 
 struct ContentView: View {
     @StateObject private var game = GameModel()
