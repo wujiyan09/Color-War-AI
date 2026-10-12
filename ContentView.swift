@@ -674,16 +674,11 @@ struct AISolver: Sendable {
         var validMoves = getPlayableCells(for: currentPlayer, on: board)
         guard !validMoves.isEmpty else { return nil }
         
-        let totalOrbsOnBoard = board.cells.reduce(0) { $0 + $1.count }
         let isMyFirstTurn = (currentPlayer < hasEntered.count) ? !hasEntered[currentPlayer] : true
         
-        if totalOrbsOnBoard == 0 || (isMyFirstTurn && totalOrbsOnBoard <= boardSize) {
-            let center = Double(boardSize - 1) / 2.0
-            return validMoves.min(by: { m1, m2 in
-                let dist1 = abs(Double(m1.0) - center) + abs(Double(m1.1) - center)
-                let dist2 = abs(Double(m2.0) - center) + abs(Double(m2.1) - center)
-                return dist1 < dist2
-            })
+        // 开局防守护城河策略（重构 3 层过滤，解决邻域挤压与第一手送人头问题）
+        if isMyFirstTurn {
+            return selectOptimalOpeningMove(validMoves: validMoves)
         }
         
         if playerType == .enhancedNightmare {
@@ -693,6 +688,98 @@ struct AISolver: Sendable {
         }
         
         return calculateAspirationNightmareMove(validMoves: validMoves)
+    }
+    
+    /// 开局第一步智能选点：采用 3 层防守护城河策略（8 邻域完全无子优先，中心控制加权，距离分散）
+    private func selectOptimalOpeningMove(validMoves: [(Int, Int)]) -> (Int, Int)? {
+        // 提取棋盘上当前已有棋子的位置
+        var occupiedIndices = Set<Int>()
+        for idx in 0..<board.cells.count {
+            if board.cells[idx].owner != nil {
+                occupiedIndices.insert(idx)
+            }
+        }
+        
+        // 若盘面全空，优先选靠近中心且偏角的位置
+        if occupiedIndices.isEmpty {
+            let center = Double(boardSize - 1) / 2.0
+            return validMoves.min(by: { m1, m2 in
+                let dist1 = abs(Double(m1.0) - center) + abs(Double(m1.1) - center)
+                let dist2 = abs(Double(m2.0) - center) + abs(Double(m2.1) - center)
+                return dist1 < dist2
+            })
+        }
+        
+        // 层级 1：筛选周围 8 邻域（包括上下左右和 4 个斜角）完全没有任何棋子的“绝对安全”空格
+        let safe8Moves = validMoves.filter { move in
+            let r = move.0
+            let c = move.1
+            for dr in -1...1 {
+                for dc in -1...1 {
+                    if dr == 0 && dc == 0 { continue }
+                    let nr = r + dr
+                    let nc = c + dc
+                    if nr >= 0 && nr < boardSize && nc >= 0 && nc < boardSize {
+                        let nIdx = nr * boardSize + nc
+                        if occupiedIndices.contains(nIdx) {
+                            return false
+                        }
+                    }
+                }
+            }
+            return true
+        }
+        
+        // 层级 2：如果 8 邻域安全格为空（如大局后期），退而求其次选择 4 邻域（正方向）安全的格子
+        let safe4Moves: [(Int, Int)]
+        if !safe8Moves.isEmpty {
+            safe4Moves = safe8Moves
+        } else {
+            safe4Moves = validMoves.filter { move in
+                let idx = move.0 * boardSize + move.1
+                let neighbors = idx < neighborsMap.count ? neighborsMap[idx] : []
+                return !neighbors.contains { occupiedIndices.contains($0) }
+            }
+        }
+        
+        // 若找不到完全没有邻居的空位，降级到所有合法候选格
+        let candidates = safe4Moves.isEmpty ? validMoves : safe4Moves
+        
+        // 层级 3：在候选格中计算综合评估分（中心控制辐射度 + 距离离散散列分）
+        let center = Double(boardSize - 1) / 2.0
+        
+        return candidates.max(by: { m1, m2 in
+            let score1 = evaluateOpeningCandidateScore(move: m1, occupiedIndices: occupiedIndices, center: center)
+            let score2 = evaluateOpeningCandidateScore(move: m2, occupiedIndices: occupiedIndices, center: center)
+            return score1 < score2
+        })
+    }
+    
+    private func evaluateOpeningCandidateScore(move: (Int, Int), occupiedIndices: Set<Int>, center: Double) -> Double {
+        let (r, c) = move
+        let idx = r * boardSize + c
+        
+        // 1. 辐射控制力：正向邻居越多（中心格有4个，角落只有2个），爆炸辐射力越强，得分越高
+        let neighborsCount = idx < neighborsMap.count ? neighborsMap[idx].count : 2
+        var score = Double(neighborsCount) * 100.0
+        
+        // 2. 距离其他已有棋子的最小切比雪夫距离（拉开阵地，防止拥挤）
+        var minDistance = Double(boardSize * 2)
+        for occIdx in occupiedIndices {
+            let or = occIdx / boardSize
+            let oc = occIdx % boardSize
+            let chebyshevDist = max(abs(r - or), abs(c - oc))
+            if Double(chebyshevDist) < minDistance {
+                minDistance = Double(chebyshevDist)
+            }
+        }
+        score += minDistance * 150.0
+        
+        // 3. 适当中心吸引力
+        let distToCenter = abs(Double(r) - center) + abs(Double(c) - center)
+        score -= distToCenter * 20.0
+        
+        return score
     }
     
     private func findCriticalThreatMove(validMoves: [(Int, Int)]) -> (Int, Int)? {
@@ -1471,7 +1558,6 @@ final class GameModel: ObservableObject {
     
     @Published var customBackgroundImage: UIImage? = nil
     
-    // ✅ 隐藏3控制标识：用于通知 UI 侧（特别是 P2P 客户端）跳转切屏
     @Published var shouldNavigateToGame: Bool = false
     
     @Published private(set) var isGameInPlay: Bool = false
@@ -1488,8 +1574,10 @@ final class GameModel: ObservableObject {
     private var aiTask: Task<Void, Never>? = nil
     private var saveWorkItem: DispatchWorkItem? = nil
     
+    // ✅ 修复全人机模式第一步不动：置状态的同时显式唤醒第一步 AI 算力链
     func beginGame() {
         isGameInPlay = true
+        checkAndRunAITurn()
     }
     
     func endGame() {
@@ -1674,7 +1762,6 @@ final class GameModel: ObservableObject {
                     if let aiLvl = packet.aiLevelRaw, let level = AIDifficultyLevel(rawValue: aiLvl) { self.aiDifficultyLevel = level }
                     
                 case .startGame:
-                    // ✅ 隐患 3 修复：客户端收到 .startGame 时，重置+开启对局并主动唤醒界面导航
                     if let firstP = packet.firstPlayerIndex {
                         self.resetGame(chosenFirstPlayer: firstP)
                         self.beginGame()
@@ -1822,7 +1909,6 @@ final class GameModel: ObservableObject {
         syncRoomConfigToPeers()
     }
     
-    // ✅ 隐患 1 修复：resetGame 只负责数据重置，不强制更改 isGameInPlay，且内部调用 checkAndRunAITurn 时受 isGameInPlay 守卫保护
     func resetGame(chosenFirstPlayer: Int? = nil) {
         currentGameSessionID = UUID()
         lastReceivedSeqID = 0
@@ -1859,11 +1945,9 @@ final class GameModel: ObservableObject {
         checkAndRunAITurn()
     }
     
-    // ✅ 隐患 2 修复：为“重新开始本局”提供明确的方法，保证重置后重新标记 beginGame，再驱动 AI
     func restartCurrentGame() {
         resetGame()
         beginGame()
-        checkAndRunAITurn()
     }
     
     func exitToMenu() {
@@ -2126,7 +2210,6 @@ final class GameModel: ObservableObject {
     private func checkAndRunAITurn() {
         aiTask?.cancel()
         
-        // ✅ 隐患 1 核心修复：只有真的在对局中（isGameInPlay == true）时，才允许启动 AI 唤起
         guard isGameInPlay else { return }
         
         if P2PNetworkManager.shared.isConnected && !P2PNetworkManager.shared.isHost {
@@ -3552,7 +3635,6 @@ struct PlayerTakeoverSheet: View {
             List {
                 Section {
                     Button(action: {
-                        // ✅ 隐患 2 修复：使用 restartCurrentGame 显式保证 isGameInPlay = true 并唤起 AI
                         game.restartCurrentGame()
                         dismiss()
                     }) {
@@ -3662,7 +3744,6 @@ struct ContentView: View {
                 )
             }
         }
-        // ✅ 隐患 3 修复：监听到 P2P 客户端收到 startGame 信号时，联动切换 UI 状态至 GamePlayView
         .onChange(of: game.shouldNavigateToGame) { _, shouldNav in
             if shouldNav {
                 withAnimation(.spring()) {
