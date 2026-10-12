@@ -40,6 +40,55 @@ enum PlayerControlType: String, CaseIterable, Identifiable, Codable {
     }
 }
 
+enum AIDifficultyLevel: Int, CaseIterable, Identifiable, Codable {
+    case fast = 1
+    case balanced = 2
+    case deep = 3
+    case extreme = 4
+    
+    var id: Int { rawValue }
+    
+    var title: String {
+        switch self {
+        case .fast: return "1档 · 快手 (极速)"
+        case .balanced: return "2档 · 平衡 (推荐)"
+        case .deep: return "3档 · 深谋 (算力)"
+        case .extreme: return "4档 · 极限 (烧脑)"
+        }
+    }
+    
+    var description: String {
+        switch self {
+        case .fast: return "深度 2-3 层 | 基础评估"
+        case .balanced: return "深度 3-5 层 | Alpha-Beta 剪枝"
+        case .deep: return "深度 4-6 层 | 置换表+静止搜索"
+        case .extreme: return "深度 6-8 层 | 全局链图+极限推理"
+        }
+    }
+    
+    func maxSearchDepth(for boardSize: Int) -> Int {
+        switch self {
+        case .fast:
+            return boardSize <= 6 ? 3 : 2
+        case .balanced:
+            return boardSize <= 6 ? 5 : (boardSize <= 8 ? 4 : 3)
+        case .deep:
+            return boardSize <= 6 ? 6 : (boardSize <= 8 ? 5 : 4)
+        case .extreme:
+            return boardSize <= 6 ? 8 : (boardSize <= 8 ? 6 : 5)
+        }
+    }
+    
+    var beamWidth: Int {
+        switch self {
+        case .fast: return 2
+        case .balanced: return 3
+        case .deep: return 5
+        case .extreme: return 8
+        }
+    }
+}
+
 struct PlayerPreset {
     static let maxPlayers = 8
     
@@ -114,6 +163,7 @@ struct P2PPacket: Codable {
     let playerTypes: [PlayerControlType]?
     let colorsHex: [String]?
     let emojis: [String]?
+    let aiLevelRaw: Int?
 }
 
 final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
@@ -235,7 +285,7 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
                     self.stopP2P()
                 }
             } else {
-                self.sendPacket(P2PPacket(action: .ping, senderID: self.myNickname, row: nil, col: nil, boardSize: nil, isRandomFirstPlayer: nil, playerIndex: nil, playerNames: nil, playerTypes: nil, colorsHex: nil, emojis: nil))
+                self.sendPacket(P2PPacket(action: .ping, senderID: self.myNickname, row: nil, col: nil, boardSize: nil, isRandomFirstPlayer: nil, playerIndex: nil, playerNames: nil, playerTypes: nil, colorsHex: nil, emojis: nil, aiLevelRaw: nil))
             }
         }
     }
@@ -269,7 +319,7 @@ extension P2PNetworkManager: MCSessionDelegate, MCNearbyServiceAdvertiserDelegat
                 guard let self = self else { return }
                 self.lastAckTime = Date()
                 if packet.action == .ping {
-                    let ack = P2PPacket(action: .ack, senderID: self.myNickname, row: nil, col: nil, boardSize: nil, isRandomFirstPlayer: nil, playerIndex: nil, playerNames: nil, playerTypes: nil, colorsHex: nil, emojis: nil)
+                    let ack = P2PPacket(action: .ack, senderID: self.myNickname, row: nil, col: nil, boardSize: nil, isRandomFirstPlayer: nil, playerIndex: nil, playerNames: nil, playerTypes: nil, colorsHex: nil, emojis: nil, aiLevelRaw: nil)
                     self.sendPacket(ack)
                 }
                 self.packetSubject.send(packet)
@@ -422,7 +472,7 @@ enum TacticalRiskMode {
     case desperate
 }
 
-// MARK: - 7. 算法 AI 求解引擎
+// MARK: - 7. 算法 AI 求解引擎 (关联 AIDifficultyLevel 动态思考档位)
 
 struct AISolver: Sendable {
     struct SimCell: Sendable {
@@ -512,6 +562,7 @@ struct AISolver: Sendable {
     let activePlayers: [Int]
     let currentPlayer: Int
     let playerType: PlayerControlType
+    let aiLevel: AIDifficultyLevel
     let board: Board
     let hasEntered: [Bool]
     let eliminated: [Bool]
@@ -522,6 +573,7 @@ struct AISolver: Sendable {
          activePlayers: [Int],
          currentPlayer: Int,
          playerType: PlayerControlType,
+         aiLevel: AIDifficultyLevel,
          board: [[Cell]],
          hasEntered: [Bool],
          eliminated: [Bool]) {
@@ -529,6 +581,7 @@ struct AISolver: Sendable {
         self.activePlayers = activePlayers
         self.currentPlayer = currentPlayer
         self.playerType = playerType
+        self.aiLevel = aiLevel
         
         var flat = [SimCell]()
         flat.reserveCapacity(boardSize * boardSize)
@@ -708,7 +761,7 @@ struct AISolver: Sendable {
                     eliminatedState: e,
                     depth: depth - 1,
                     turnPlayer: nextP,
-                    beamWidth: 3
+                    beamWidth: aiLevel.beamWidth
                 )
                 score = vec[currentPlayer, default: -999_999]
             }
@@ -732,13 +785,7 @@ struct AISolver: Sendable {
     }
     
     private func calculateAspirationNightmareMove(validMoves: [(Int, Int)]) -> (Int, Int)? {
-        let maxDepth: Int
-        switch boardSize {
-        case ...6: maxDepth = 6
-        case 7...8: maxDepth = 4
-        case 9...10: maxDepth = 3
-        default: maxDepth = 2
-        }
+        let maxDepth = aiLevel.maxSearchDepth(for: boardSize)
         
         let aliveCount = activePlayers.filter { !isPlayerEliminated($0, in: eliminated) }.count
         let isTwoPlayer = (aliveCount == 2)
@@ -832,7 +879,8 @@ struct AISolver: Sendable {
         }
         
         if depth <= 1 || isGameOverSimulated(eliminated: eliminatedState) {
-            let val = quiescenceSearch(boardState: boardState, hasEnteredState: hasEnteredState, eliminatedState: eliminatedState, alpha: a, beta: bVal, turnPlayer: turnPlayer, qsDepth: 3, tt: &tt)
+            let qsDepth = (aiLevel == .extreme) ? 4 : ((aiLevel == .deep) ? 3 : 2)
+            let val = quiescenceSearch(boardState: boardState, hasEnteredState: hasEnteredState, eliminatedState: eliminatedState, alpha: a, beta: bVal, turnPlayer: turnPlayer, qsDepth: qsDepth, tt: &tt)
             tt.store(hash: hash, depth: depth, score: val, type: .exact, move: nil)
             return val
         }
@@ -1358,6 +1406,13 @@ final class GameModel: ObservableObject {
             syncRoomConfigToPeers()
         }
     }
+    @Published var aiDifficultyLevel: AIDifficultyLevel {
+        didSet {
+            UserDefaults.standard.set(aiDifficultyLevel.rawValue, forKey: "CW_Saved_AIDifficultyLevel")
+            syncRoomConfigToPeers()
+        }
+    }
+    
     @Published var board: [[Cell]] = [] {
         didSet { updateCachedPlayableCells() }
     }
@@ -1436,6 +1491,9 @@ final class GameModel: ObservableObject {
         let savedSize = UserDefaults.standard.integer(forKey: "CW_Saved_BoardSize")
         self.boardSize = (savedSize >= 5 && savedSize <= 12) ? savedSize : 8
         self.isRandomFirstPlayer = UserDefaults.standard.object(forKey: "CW_Saved_IsRandomFirst") as? Bool ?? true
+        
+        let savedAILevel = UserDefaults.standard.integer(forKey: "CW_Saved_AIDifficultyLevel")
+        self.aiDifficultyLevel = AIDifficultyLevel(rawValue: savedAILevel) ?? .balanced
         
         if let data = UserDefaults.standard.data(forKey: "CW_Saved_PlayerTypes"),
            let decoded = try? JSONDecoder().decode([PlayerControlType].self, from: data),
@@ -1516,6 +1574,7 @@ final class GameModel: ObservableObject {
                     if let ems = packet.emojis { self.emojis = ems.map { $0.isEmpty ? nil : $0 } }
                     if let sz = packet.boardSize { self.boardSize = sz }
                     if let rnd = packet.isRandomFirstPlayer { self.isRandomFirstPlayer = rnd }
+                    if let aiLvl = packet.aiLevelRaw, let level = AIDifficultyLevel(rawValue: aiLvl) { self.aiDifficultyLevel = level }
                 }
             }
     }
@@ -1532,7 +1591,8 @@ final class GameModel: ObservableObject {
             playerNames: playerNames,
             playerTypes: playerTypes,
             colorsHex: colors.map { $0.toHex() },
-            emojis: emojis.map { $0 ?? "" }
+            emojis: emojis.map { $0 ?? "" },
+            aiLevelRaw: aiDifficultyLevel.rawValue
         )
         P2PNetworkManager.shared.sendPacket(packet)
     }
@@ -1647,7 +1707,7 @@ final class GameModel: ObservableObject {
         let player = currentPlayer
         
         if P2PNetworkManager.shared.isConnected {
-            let packet = P2PPacket(action: .playerMove, senderID: P2PNetworkManager.shared.myNickname, row: row, col: column, boardSize: boardSize, isRandomFirstPlayer: nil, playerIndex: player, playerNames: nil, playerTypes: nil, colorsHex: nil, emojis: nil)
+            let packet = P2PPacket(action: .playerMove, senderID: P2PNetworkManager.shared.myNickname, row: row, col: column, boardSize: boardSize, isRandomFirstPlayer: nil, playerIndex: player, playerNames: nil, playerTypes: nil, colorsHex: nil, emojis: nil, aiLevelRaw: nil)
             P2PNetworkManager.shared.sendPacket(packet)
         }
         
@@ -1823,6 +1883,7 @@ final class GameModel: ObservableObject {
                 activePlayers: activePlayerIndices,
                 currentPlayer: currentPlayer,
                 playerType: currentType,
+                aiLevel: aiDifficultyLevel,
                 board: board,
                 hasEntered: hasEntered,
                 eliminated: eliminated
@@ -2163,7 +2224,7 @@ extension Array {
     }
 }
 
-// MARK: - 14. 单机/本地设置 View (使用 LazyVStack 降低渲染负担)
+// MARK: - 14. 单机/本地设置 View (使用 LazyVStack 降低渲染负担 + AI 深度档位设置)
 
 struct LocalGameSetupView: View {
     @ObservedObject var game: GameModel
@@ -2259,13 +2320,45 @@ struct LocalGameSetupView: View {
             .padding(12)
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
+            // AI 思考深度/综合算力调整面板
+            VStack(spacing: 8) {
+                HStack {
+                    Text("🧠 AI 思考算力/深度:")
+                        .font(.subheadline)
+                        .bold()
+                        .foregroundColor(.white)
+                    Spacer()
+                    Text(game.aiDifficultyLevel.title)
+                        .font(.caption)
+                        .bold()
+                        .foregroundColor(.cyan)
+                }
+                
+                Slider(
+                    value: Binding<Double>(
+                        get: { Double(game.aiDifficultyLevel.rawValue) },
+                        set: { game.aiDifficultyLevel = AIDifficultyLevel(rawValue: Int($0)) ?? .balanced }
+                    ),
+                    in: 1...4,
+                    step: 1
+                )
+                .tint(Color.darkNavyBlue)
+                
+                Text(game.aiDifficultyLevel.description)
+                    .font(.caption2)
+                    .foregroundColor(.gray)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(12)
+            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+            
             ViewThatFits(in: .vertical) {
                 playerRowsContent
                 
                 ScrollView(.vertical, showsIndicators: true) {
                     playerRowsContent
                 }
-                .frame(maxHeight: 240)
+                .frame(maxHeight: 200)
             }
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
@@ -2651,7 +2744,7 @@ struct OnlineGameSetupView: View {
                                         game.playerNames[1] = p2pManager.myNickname
                                         game.myPlayerIndex = 1
                                         activeMode = .localJoined
-                                        p2pManager.sendPacket(P2PPacket(action: .syncRequest, senderID: p2pManager.myNickname, row: nil, col: nil, boardSize: nil, isRandomFirstPlayer: nil, playerIndex: nil, playerNames: nil, playerTypes: nil, colorsHex: nil, emojis: nil))
+                                        p2pManager.sendPacket(P2PPacket(action: .syncRequest, senderID: p2pManager.myNickname, row: nil, col: nil, boardSize: nil, isRandomFirstPlayer: nil, playerIndex: nil, playerNames: nil, playerTypes: nil, colorsHex: nil, emojis: nil, aiLevelRaw: nil))
                                     }
                             },
                             onCancel: {
@@ -2682,7 +2775,7 @@ struct OnlineGameSetupView: View {
     }
 }
 
-// MARK: - 18. 主菜单 View (彻底透传渲染底层渐变/图层，清空黑屏宿主)
+// MARK: - 18. 主菜单 View (背景深入 NavigationStack 内部，彻底消除黑色遮挡)
 
 struct StartMenuView: View {
     @ObservedObject var game: GameModel
@@ -2694,39 +2787,60 @@ struct StartMenuView: View {
     
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                Spacer()
-                
-                VStack(spacing: 16) {
-                    Text("COLOR WAR")
-                        .font(.system(size: 36, weight: .black, design: .rounded))
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [.white, .white.opacity(0.7)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                    
-                    if selectedTab == 0 {
-                        LocalGameSetupView(game: game) {
-                            isSpinningRandomWheel = true
-                        }
-                        .transition(.opacity.combined(with: .scale(scale: 0.98)))
-                    } else {
-                        OnlineGameSetupView(game: game) {
-                            isSpinningRandomWheel = true
-                        }
-                        .transition(.opacity.combined(with: .scale(scale: 0.98)))
-                    }
+            ZStack {
+                // 1. 将渐变与自定义相册背景作为 NavigationStack 内部的底层
+                if let customImg = game.customBackgroundImage {
+                    Image(uiImage: customImg)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+                        .ignoresSafeArea()
+                        .overlay(Color.black.opacity(0.35))
+                } else {
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.08, green: 0.28, blue: 0.65).opacity(0.85),
+                            Color(red: 0.03, green: 0.05, blue: 0.10)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .ignoresSafeArea()
                 }
-                .frame(maxWidth: 440)
                 
-                Spacer()
+                // 2. 主表单内容
+                VStack(spacing: 0) {
+                    Spacer()
+                    
+                    VStack(spacing: 16) {
+                        Text("COLOR WAR")
+                            .font(.system(size: 36, weight: .black, design: .rounded))
+                            .foregroundStyle(
+                                LinearGradient(
+                                    colors: [.white, .white.opacity(0.7)],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
+                        
+                        if selectedTab == 0 {
+                            LocalGameSetupView(game: game) {
+                                isSpinningRandomWheel = true
+                            }
+                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                        } else {
+                            OnlineGameSetupView(game: game) {
+                                isSpinningRandomWheel = true
+                            }
+                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                        }
+                    }
+                    .frame(maxWidth: 440)
+                    
+                    Spacer()
+                }
+                .padding(.horizontal, 20)
             }
-            .padding(.horizontal, 20)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color.clear)
             .toolbar {
                 ToolbarItem(placement: .principal) {
                     Picker("Game Mode", selection: $selectedTab) {
@@ -2757,7 +2871,7 @@ struct StartMenuView: View {
                             .foregroundColor(.white)
                             .font(.system(size: 16, weight: .medium))
                             .padding(8)
-                            .glassEffect(.regular.interactive(), in: .circle)
+                            .background(Color.white.opacity(0.15), in: Circle())
                     }
                 }
             }
@@ -2776,9 +2890,6 @@ struct StartMenuView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
         }
-        .scrollContentBackground(.hidden)
-        .background(Color.clear)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -2871,7 +2982,7 @@ struct RandomPlayerWheelOverlay: View {
     }
 }
 
-// MARK: - 20. 主对局视图 (高优先级布局，强行锚定 Safe Area)
+// MARK: - 20. 主对局视图 (高优先级布局 + 防止熄屏机制)
 
 struct GamePlayView: View {
     @ObservedObject var game: GameModel
@@ -2880,6 +2991,27 @@ struct GamePlayView: View {
     
     var body: some View {
         ZStack {
+            // 对局进行时的动态背景色
+            if let customImg = game.customBackgroundImage {
+                Image(uiImage: customImg)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+                    .ignoresSafeArea()
+                    .overlay(Color.black.opacity(0.35))
+            } else {
+                LinearGradient(
+                    colors: [
+                        (game.colors[safe: game.currentPlayer] ?? .blue).opacity(0.35),
+                        Color(red: 0.03, green: 0.05, blue: 0.10)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea()
+                .animation(.easeInOut(duration: 0.8), value: game.currentPlayer)
+            }
+            
             VStack(spacing: 0) {
                 HStack {
                     Button(action: {
@@ -3014,10 +3146,18 @@ struct GamePlayView: View {
         .sheet(isPresented: $game.showControlSheet) {
             PlayerTakeoverSheet(game: game)
         }
+        .onAppear {
+            // 对局开始：锁定屏幕不熄屏
+            UIApplication.shared.isIdleTimerDisabled = true
+        }
+        .onDisappear {
+            // 对局结束/退出：恢复系统默认熄屏规则
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
     }
 }
 
-// MARK: - 21. 控制面板 Sheet
+// MARK: - 21. 控制面板 Sheet (含 AI 思考深度调节)
 
 struct PlayerTakeoverSheet: View {
     @ObservedObject var game: GameModel
@@ -3039,6 +3179,32 @@ struct PlayerTakeoverSheet: View {
                         }
                         .foregroundColor(.white.opacity(0.9))
                     }
+                }
+                
+                Section(header: Text("AI 思考算力/档位调整")) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(game.aiDifficultyLevel.title)
+                                .font(.subheadline)
+                                .bold()
+                            Spacer()
+                        }
+                        
+                        Slider(
+                            value: Binding<Double>(
+                                get: { Double(game.aiDifficultyLevel.rawValue) },
+                                set: { game.aiDifficultyLevel = AIDifficultyLevel(rawValue: Int($0)) ?? .balanced }
+                            ),
+                            in: 1...4,
+                            step: 1
+                        )
+                        .tint(Color.darkNavyBlue)
+                        
+                        Text(game.aiDifficultyLevel.description)
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                    }
+                    .padding(.vertical, 4)
                 }
                 
                 Section(header: Text("实时接管控制（AI / P2P 代打）")) {
@@ -3071,7 +3237,7 @@ struct PlayerTakeoverSheet: View {
     }
 }
 
-// MARK: - 22. 根视图 ContentView (采用开销极低且表现力极佳的 LinearGradient)
+// MARK: - 22. 根视图 ContentView
 
 struct ContentView: View {
     @StateObject private var game = GameModel()
@@ -3082,28 +3248,6 @@ struct ContentView: View {
         ZStack {
             Color(red: 0.03, green: 0.05, blue: 0.10)
                 .ignoresSafeArea()
-            
-            if let customImg = game.customBackgroundImage {
-                Image(uiImage: customImg)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
-                    .ignoresSafeArea()
-                    .overlay(Color.black.opacity(0.35))
-            } else {
-                LinearGradient(
-                    colors: [
-                        isGameStarted
-                        ? (game.colors[safe: game.currentPlayer] ?? .blue).opacity(0.35)
-                        : Color(red: 0.08, green: 0.28, blue: 0.65).opacity(0.85),
-                        Color(red: 0.03, green: 0.05, blue: 0.10)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .ignoresSafeArea()
-                .animation(.easeInOut(duration: 0.8), value: isGameStarted ? game.currentPlayer : -1)
-            }
             
             if isGameStarted {
                 GamePlayView(
