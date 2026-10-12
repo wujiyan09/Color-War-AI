@@ -472,7 +472,7 @@ enum TacticalRiskMode {
     case desperate
 }
 
-// MARK: - 7. 算法 AI 求解引擎 (关联 AIDifficultyLevel 动态思考档位)
+// MARK: - 7. 算法 AI 求解引擎
 
 struct AISolver: Sendable {
     struct SimCell: Sendable {
@@ -1822,7 +1822,7 @@ final class GameModel: ObservableObject {
         var appears = [Bool](repeating: false, count: PlayerPreset.maxPlayers)
         for row in board {
             for cell in row {
-                if let o = cell.owner, o >= 0 && o < PlayerPreset.maxPlayers { appears[o] = true }
+                if let o = cell.owner, o >= 0, o < PlayerPreset.maxPlayers { appears[o] = true }
             }
         }
         for p in activePlayerIndices {
@@ -1896,68 +1896,187 @@ final class GameModel: ObservableObject {
             }
         }
     }
+    
+    // 计算某玩家占领全盘棋子的比例
+    func playerOrbPercentage(for playerIndex: Int) -> Double {
+        var totalOrbs = 0
+        var playerOrbs = 0
+        for row in board {
+            for cell in row {
+                totalOrbs += cell.count
+                if cell.owner == playerIndex {
+                    playerOrbs += cell.count
+                }
+            }
+        }
+        guard totalOrbs > 0 else { return 0.0 }
+        return Double(playerOrbs) / Double(totalOrbs)
+    }
 }
 
-// MARK: - 9. 棋盘视图 (高优先级隔离，防止挤推顶部控制栏)
+// MARK: - 9. 两侧玩家进度玻璃棋子 View (包含 interactive 属性与轮到高亮)
+
+struct PlayerProgressOrbView: View {
+    @ObservedObject var game: GameModel
+    let playerIndex: Int
+    let size: CGFloat = 46
+    
+    var isCurrentTurn: Bool {
+        game.currentPlayer == playerIndex
+    }
+    
+    var isEliminated: Bool {
+        game.eliminated[safe: playerIndex] ?? false
+    }
+    
+    var body: some View {
+        let percent = game.playerOrbPercentage(for: playerIndex)
+        let color = game.colors[safe: playerIndex] ?? .gray
+        let emoji = game.emojis[safe: playerIndex] ?? nil
+        let name = game.playerNames[safe: playerIndex] ?? "玩家"
+        
+        VStack(spacing: 4) {
+            ZStack {
+                // 内部填充底色
+                Circle()
+                    .fill(color.opacity(isEliminated ? 0.05 : 0.2))
+                
+                // 内部环形比例进度条 (圆形满的程度代表占比)
+                Circle()
+                    .trim(from: 0, to: isEliminated ? 0 : CGFloat(percent))
+                    .stroke(
+                        color,
+                        style: StrokeStyle(lineWidth: 3.5, lineCap: .round)
+                    )
+                    .rotationEffect(.degrees(-90))
+                    .padding(3)
+                
+                // 棋子中心标志 (Emoji 或 颜色圆点)
+                if let em = emoji, !em.isEmpty {
+                    Text(em)
+                        .font(.system(size: size * 0.42))
+                        .opacity(isEliminated ? 0.3 : 1.0)
+                } else {
+                    Circle()
+                        .fill(color.opacity(isEliminated ? 0.2 : 0.85))
+                        .frame(width: size * 0.38, height: size * 0.38)
+                }
+            }
+            .frame(width: size, height: size)
+            // 挂载玻璃材质与原生按压 interactive 交互属性
+            .glassEffect(.regular.interactive(), in: .circle)
+            .scaleEffect(isCurrentTurn ? 1.15 : 1.0)
+            .shadow(color: isCurrentTurn ? color.opacity(0.8) : .clear, radius: 10, x: 0, y: 0)
+            .animation(.spring(response: 0.25, dampingFraction: 0.65), value: isCurrentTurn)
+            .animation(.easeInOut(duration: 0.3), value: percent)
+            
+            Text(name)
+                .font(.system(size: 10, weight: isCurrentTurn ? .bold : .medium, design: .rounded))
+                .foregroundColor(isCurrentTurn ? .white : .white.opacity(0.6))
+                .lineLimit(1)
+                .frame(width: size + 8)
+        }
+        .opacity(isEliminated ? 0.35 : 1.0)
+    }
+}
+
+// MARK: - 10. 棋盘视图 (两侧对齐显示参战玩家棋子)
 
 struct BoardView: View {
     @ObservedObject var game: GameModel
     private let gap: CGFloat = 3
     
+    var leftPlayers: [Int] {
+        let active = game.activePlayerIndices
+        let mid = (active.count + 1) / 2
+        return Array(active.prefix(mid))
+    }
+    
+    var rightPlayers: [Int] {
+        let active = game.activePlayerIndices
+        let mid = (active.count + 1) / 2
+        return Array(active.suffix(from: mid))
+    }
+    
     var body: some View {
         GeometryReader { proxy in
-            let availableWidth = max(10, proxy.size.width - 24)
+            let isWide = proxy.size.width > 420
+            let sidePadding: CGFloat = isWide ? 64 : 48
+            let availableWidth = max(10, proxy.size.width - sidePadding * 2)
             let availableHeight = max(10, proxy.size.height - 24)
             let minDim = min(availableWidth, availableHeight)
             
             let side = (minDim - gap * CGFloat(game.boardSize - 1)) / CGFloat(game.boardSize)
             let actualBoardDimension = side * CGFloat(game.boardSize) + gap * CGFloat(game.boardSize - 1)
             
-            ZStack(alignment: .topLeading) {
-                VStack(spacing: gap) {
-                    ForEach(0..<game.boardSize, id: \.self) { r in
-                        HStack(spacing: gap) {
-                            ForEach(0..<game.boardSize, id: \.self) { c in
-                                let index = r * game.boardSize + c
-                                let cell = (r < game.board.count && c < game.board[r].count) ? game.board[r][c] : Cell(owner: nil, count: 0)
-                                
-                                CellView(
-                                    cell: cell,
-                                    color: cell.owner.flatMap { game.colors[safe: $0] },
-                                    emoji: cell.owner.flatMap { game.emojis[safe: $0] ?? nil },
-                                    active: game.emphasizedCells.contains(index)
-                                )
-                                .equatable()
-                                .frame(width: max(0, side), height: max(0, side))
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    if game.playerTypes[safe: game.currentPlayer] == .human && game.playableCells.contains(index) {
-                                        game.play(row: r, column: c)
+            HStack(spacing: 8) {
+                // 左侧玩家玻璃指示器组合
+                VStack(spacing: 12) {
+                    ForEach(leftPlayers, id: \.self) { pIdx in
+                        PlayerProgressOrbView(game: game, playerIndex: pIdx)
+                    }
+                }
+                .frame(width: sidePadding)
+                
+                Spacer(minLength: 0)
+                
+                // 中央棋盘
+                ZStack(alignment: .topLeading) {
+                    VStack(spacing: gap) {
+                        ForEach(0..<game.boardSize, id: \.self) { r in
+                            HStack(spacing: gap) {
+                                ForEach(0..<game.boardSize, id: \.self) { c in
+                                    let index = r * game.boardSize + c
+                                    let cell = (r < game.board.count && c < game.board[r].count) ? game.board[r][c] : Cell(owner: nil, count: 0)
+                                    
+                                    CellView(
+                                        cell: cell,
+                                        color: cell.owner.flatMap { game.colors[safe: $0] },
+                                        emoji: cell.owner.flatMap { game.emojis[safe: $0] ?? nil },
+                                        active: game.emphasizedCells.contains(index)
+                                    )
+                                    .equatable()
+                                    .frame(width: max(0, side), height: max(0, side))
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        if game.playerTypes[safe: game.currentPlayer] == .human && game.playableCells.contains(index) {
+                                            game.play(row: r, column: c)
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+                    .padding(6)
+                    
+                    ForEach(game.flyingOrbs) { orb in
+                        PieceView(
+                            color: game.colors[safe: orb.player] ?? .gray,
+                            emoji: game.emojis[safe: orb.player] ?? nil,
+                            count: 1,
+                            size: max(8, side * 0.40)
+                        )
+                        .position(
+                            x: 6 + side / 2 + CGFloat(orb.arrived ? orb.toColumn : orb.fromColumn) * (side + gap),
+                            y: 6 + side / 2 + CGFloat(orb.arrived ? orb.toRow : orb.fromRow) * (side + gap)
+                        )
+                        .zIndex(10)
+                        .allowsHitTesting(false)
+                    }
                 }
-                .padding(6)
+                .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+                .frame(width: max(0, actualBoardDimension + 12), height: max(0, actualBoardDimension + 12))
                 
-                ForEach(game.flyingOrbs) { orb in
-                    PieceView(
-                        color: game.colors[safe: orb.player] ?? .gray,
-                        emoji: game.emojis[safe: orb.player] ?? nil,
-                        count: 1,
-                        size: max(8, side * 0.40)
-                    )
-                    .position(
-                        x: 6 + side / 2 + CGFloat(orb.arrived ? orb.toColumn : orb.fromColumn) * (side + gap),
-                        y: 6 + side / 2 + CGFloat(orb.arrived ? orb.toRow : orb.fromRow) * (side + gap)
-                    )
-                    .zIndex(10)
-                    .allowsHitTesting(false)
+                Spacer(minLength: 0)
+                
+                // 右侧玩家玻璃指示器组合
+                VStack(spacing: 12) {
+                    ForEach(rightPlayers, id: \.self) { pIdx in
+                        PlayerProgressOrbView(game: game, playerIndex: pIdx)
+                    }
                 }
+                .frame(width: sidePadding)
             }
-            .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
-            .frame(width: max(0, actualBoardDimension + 12), height: max(0, actualBoardDimension + 12))
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         }
         .clipped()
@@ -1967,7 +2086,7 @@ struct BoardView: View {
     }
 }
 
-// MARK: - 10. 单元格视图 (Equatable)
+// MARK: - 11. 单元格视图 (Equatable)
 
 struct CellView: View, Equatable {
     let cell: Cell
@@ -2006,7 +2125,7 @@ struct CellView: View, Equatable {
     }
 }
 
-// MARK: - 11. 棋子外观视图
+// MARK: - 12. 棋子外观视图
 
 struct PieceView: View {
     let color: Color
@@ -2051,7 +2170,7 @@ struct PieceView: View {
     }
 }
 
-// MARK: - 12. 棋子点数排列视图
+// MARK: - 13. 棋子点数排列视图
 
 struct DotPattern: View {
     let count: Int
@@ -2113,7 +2232,7 @@ struct DotPattern: View {
     }
 }
 
-// MARK: - 13. Emoji 选择器 Sheet
+// MARK: - 14. Emoji 选择器 Sheet
 
 struct EmojiPickerSheet: View {
     @ObservedObject var game: GameModel
@@ -2224,7 +2343,7 @@ extension Array {
     }
 }
 
-// MARK: - 14. 单机/本地设置 View (使用 LazyVStack 降低渲染负担 + AI 深度档位设置)
+// MARK: - 15. 单机/本地设置 View
 
 struct LocalGameSetupView: View {
     @ObservedObject var game: GameModel
@@ -2320,7 +2439,6 @@ struct LocalGameSetupView: View {
             .padding(12)
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
-            // AI 思考深度/综合算力调整面板
             VStack(spacing: 8) {
                 HStack {
                     Text("🧠 AI 思考算力/深度:")
@@ -2383,7 +2501,7 @@ struct LocalGameSetupView: View {
     }
 }
 
-// MARK: - 15. 近场搜寻内嵌式菜单 View
+// MARK: - 16. 近场搜寻内嵌式菜单 View
 
 struct LocalDeviceBrowserInlineView: View {
     @ObservedObject var p2pManager = P2PNetworkManager.shared
@@ -2481,7 +2599,7 @@ struct LocalDeviceBrowserInlineView: View {
     }
 }
 
-// MARK: - 16. 4 人房间大厅 View
+// MARK: - 17. 4 人房间大厅 View
 
 struct RoomLobbyView: View {
     @ObservedObject var game: GameModel
@@ -2647,7 +2765,7 @@ struct RoomLobbyView: View {
     }
 }
 
-// MARK: - 17. 联机设置 View (绑定生命周期，离开自动停止广播)
+// MARK: - 18. 联机设置 View
 
 enum ActiveOnlineMode {
     case none
@@ -2775,7 +2893,7 @@ struct OnlineGameSetupView: View {
     }
 }
 
-// MARK: - 18. 主菜单 View (背景深入 NavigationStack 内部，彻底消除黑色遮挡)
+// MARK: - 19. 主菜单 View (修复右上方 Toolbar 按钮玻璃重叠)
 
 struct StartMenuView: View {
     @ObservedObject var game: GameModel
@@ -2788,7 +2906,6 @@ struct StartMenuView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                // 1. 将渐变与自定义相册背景作为 NavigationStack 内部的底层
                 if let customImg = game.customBackgroundImage {
                     Image(uiImage: customImg)
                         .resizable()
@@ -2808,7 +2925,6 @@ struct StartMenuView: View {
                     .ignoresSafeArea()
                 }
                 
-                // 2. 主表单内容
                 VStack(spacing: 0) {
                     Spacer()
                     
@@ -2867,11 +2983,10 @@ struct StartMenuView: View {
                             }
                         }
                     } label: {
+                        // 移除所有的额外的 background / glassEffect，避免玻璃套玻璃
                         Image(systemName: "photo.badge.plus")
                             .foregroundColor(.white)
                             .font(.system(size: 16, weight: .medium))
-                            .padding(8)
-                            .background(Color.white.opacity(0.15), in: Circle())
                     }
                 }
             }
@@ -2893,7 +3008,7 @@ struct StartMenuView: View {
     }
 }
 
-// MARK: - 19. 随机先手轮盘抽签 Overlay
+// MARK: - 20. 随机先手轮盘抽签 Overlay
 
 struct RandomPlayerWheelOverlay: View {
     @ObservedObject var game: GameModel
@@ -2982,7 +3097,7 @@ struct RandomPlayerWheelOverlay: View {
     }
 }
 
-// MARK: - 20. 主对局视图 (高优先级布局 + 防止熄屏机制)
+// MARK: - 21. 主对局视图 (返回与设置按钮置于棋盘正上方)
 
 struct GamePlayView: View {
     @ObservedObject var game: GameModel
@@ -2991,7 +3106,6 @@ struct GamePlayView: View {
     
     var body: some View {
         ZStack {
-            // 对局进行时的动态背景色
             if let customImg = game.customBackgroundImage {
                 Image(uiImage: customImg)
                     .resizable()
@@ -3012,7 +3126,8 @@ struct GamePlayView: View {
                 .animation(.easeInOut(duration: 0.8), value: game.currentPlayer)
             }
             
-            VStack(spacing: 0) {
+            VStack(spacing: 8) {
+                // 将返回键、回合指示、设置按钮紧凑置于棋盘的正上方
                 HStack {
                     Button(action: {
                         game.exitToMenu()
@@ -3021,9 +3136,9 @@ struct GamePlayView: View {
                         }
                     }) {
                         Image(systemName: "chevron.left")
-                            .font(.system(size: 17, weight: .semibold))
+                            .font(.system(size: 16, weight: .semibold))
                             .foregroundColor(.white)
-                            .frame(width: 36, height: 36)
+                            .frame(width: 34, height: 34)
                             .contentShape(Circle())
                             .glassEffect(.regular.interactive(), in: .circle)
                     }
@@ -3036,7 +3151,7 @@ struct GamePlayView: View {
                         ZStack {
                             Circle()
                                 .fill(game.colors[safe: game.currentPlayer] ?? .blue)
-                                .frame(width: 14, height: 14)
+                                .frame(width: 12, height: 12)
                             
                             if let em = game.emojis[safe: game.currentPlayer], let emoji = em, !emoji.isEmpty {
                                 Text(emoji).font(.caption2)
@@ -3044,37 +3159,35 @@ struct GamePlayView: View {
                         }
                         
                         Text("\(game.playerNames[safe: game.currentPlayer] ?? "玩家") 回合")
-                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                            .font(.system(size: 15, weight: .bold, design: .rounded))
                             .foregroundColor(.white)
                     }
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 10)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
                     .glassEffect(.regular, in: Capsule())
                     
                     Spacer()
                     
                     Button(action: { game.showControlSheet = true }) {
                         Image(systemName: "gearshape.fill")
-                            .font(.system(size: 17, weight: .semibold))
+                            .font(.system(size: 16, weight: .semibold))
                             .foregroundColor(.white)
-                            .frame(width: 36, height: 36)
+                            .frame(width: 34, height: 34)
                             .contentShape(Circle())
                             .glassEffect(.regular.interactive(), in: .circle)
                     }
                     .buttonStyle(.plain)
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-                .layoutPriority(1)
+                .padding(.horizontal, 24)
+                .padding(.top, 10)
                 
-                Spacer(minLength: 8)
+                Spacer(minLength: 4)
                 
                 BoardView(game: game)
-                    .padding(.horizontal, 12)
+                    .padding(.horizontal, 8)
                 
                 Spacer(minLength: 8)
             }
-            .safeAreaPadding(.all)
             
             if let wIdx = game.winnerIndex {
                 Color.black.opacity(0.8).ignoresSafeArea()
@@ -3147,17 +3260,15 @@ struct GamePlayView: View {
             PlayerTakeoverSheet(game: game)
         }
         .onAppear {
-            // 对局开始：锁定屏幕不熄屏
             UIApplication.shared.isIdleTimerDisabled = true
         }
         .onDisappear {
-            // 对局结束/退出：恢复系统默认熄屏规则
             UIApplication.shared.isIdleTimerDisabled = false
         }
     }
 }
 
-// MARK: - 21. 控制面板 Sheet (含 AI 思考深度调节)
+// MARK: - 22. 控制面板 Sheet
 
 struct PlayerTakeoverSheet: View {
     @ObservedObject var game: GameModel
@@ -3237,7 +3348,7 @@ struct PlayerTakeoverSheet: View {
     }
 }
 
-// MARK: - 22. 根视图 ContentView
+// MARK: - 23. 根视图 ContentView
 
 struct ContentView: View {
     @StateObject private var game = GameModel()
