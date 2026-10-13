@@ -676,7 +676,6 @@ struct AISolver: Sendable {
         
         let isMyFirstTurn = (currentPlayer < hasEntered.count) ? !hasEntered[currentPlayer] : true
         
-        // 开局防守护城河策略（重构 3 层过滤，解决邻域挤压与第一手送人头问题）
         if isMyFirstTurn {
             return selectOptimalOpeningMove(validMoves: validMoves)
         }
@@ -690,9 +689,7 @@ struct AISolver: Sendable {
         return calculateAspirationNightmareMove(validMoves: validMoves)
     }
     
-    /// 开局第一步智能选点：采用 3 层防守护城河策略（8 邻域完全无子优先，中心控制加权，距离分散）
     private func selectOptimalOpeningMove(validMoves: [(Int, Int)]) -> (Int, Int)? {
-        // 提取棋盘上当前已有棋子的位置
         var occupiedIndices = Set<Int>()
         for idx in 0..<board.cells.count {
             if board.cells[idx].owner != nil {
@@ -700,7 +697,6 @@ struct AISolver: Sendable {
             }
         }
         
-        // 若盘面全空，优先选靠近中心且偏角的位置
         if occupiedIndices.isEmpty {
             let center = Double(boardSize - 1) / 2.0
             return validMoves.min(by: { m1, m2 in
@@ -710,7 +706,6 @@ struct AISolver: Sendable {
             })
         }
         
-        // 层级 1：筛选周围 8 邻域（包括上下左右和 4 个斜角）完全没有任何棋子的“绝对安全”空格
         let safe8Moves = validMoves.filter { move in
             let r = move.0
             let c = move.1
@@ -730,7 +725,6 @@ struct AISolver: Sendable {
             return true
         }
         
-        // 层级 2：如果 8 邻域安全格为空（如大局后期），退而求其次选择 4 邻域（正方向）安全的格子
         let safe4Moves: [(Int, Int)]
         if !safe8Moves.isEmpty {
             safe4Moves = safe8Moves
@@ -742,10 +736,7 @@ struct AISolver: Sendable {
             }
         }
         
-        // 若找不到完全没有邻居的空位，降级到所有合法候选格
         let candidates = safe4Moves.isEmpty ? validMoves : safe4Moves
-        
-        // 层级 3：在候选格中计算综合评估分（中心控制辐射度 + 距离离散散列分）
         let center = Double(boardSize - 1) / 2.0
         
         return candidates.max(by: { m1, m2 in
@@ -759,11 +750,9 @@ struct AISolver: Sendable {
         let (r, c) = move
         let idx = r * boardSize + c
         
-        // 1. 辐射控制力：正向邻居越多（中心格有4个，角落只有2个），爆炸辐射力越强，得分越高
         let neighborsCount = idx < neighborsMap.count ? neighborsMap[idx].count : 2
         var score = Double(neighborsCount) * 100.0
         
-        // 2. 距离其他已有棋子的最小切比雪夫距离（拉开阵地，防止拥挤）
         var minDistance = Double(boardSize * 2)
         for occIdx in occupiedIndices {
             let or = occIdx / boardSize
@@ -775,7 +764,6 @@ struct AISolver: Sendable {
         }
         score += minDistance * 150.0
         
-        // 3. 适当中心吸引力
         let distToCenter = abs(Double(r) - center) + abs(Double(c) - center)
         score -= distToCenter * 20.0
         
@@ -1557,7 +1545,6 @@ final class GameModel: ObservableObject {
     @Published var activeOnlineMode: ActiveOnlineMode = .none
     
     @Published var customBackgroundImage: UIImage? = nil
-    
     @Published var shouldNavigateToGame: Bool = false
     
     @Published private(set) var isGameInPlay: Bool = false
@@ -1574,7 +1561,6 @@ final class GameModel: ObservableObject {
     private var aiTask: Task<Void, Never>? = nil
     private var saveWorkItem: DispatchWorkItem? = nil
     
-    // ✅ 修复全人机模式第一步不动：置状态的同时显式唤醒第一步 AI 算力链
     func beginGame() {
         isGameInPlay = true
         checkAndRunAITurn()
@@ -1588,22 +1574,28 @@ final class GameModel: ObservableObject {
         self.activePlayerIndices = playerTypes.enumerated().compactMap { $1 != .disabled ? $0 : nil }
     }
     
+    /// ✅ 修复：获取玩家可选角色类型（精准解包单机与联机逻辑，支持本地自由切换）
     func validSelectableTypes(forPlayerIndex idx: Int, isInLobby: Bool = false) -> [PlayerControlType] {
         let isP2PConnected = P2PNetworkManager.shared.isConnected
+        
+        // 单机本地模式 (主菜单 setup 界面): 允许选 真人、噩梦AI、噩梦AI(加强)、禁用
+        if !isP2PConnected && !isInLobby && !isGameInPlay {
+            var options: [PlayerControlType] = [.human, .mathNightmare, .enhancedNightmare, .disabled]
+            // 前两位玩家不能选禁用，保证至少有2个玩家
+            if idx < 2 {
+                options.removeAll(where: { $0 == .disabled })
+            }
+            return options
+        }
+        
+        // P2P 联机模式或游戏中面板
         let isSeat0 = (idx == 0)
         let isMySeat = (isP2PConnected && idx == myPlayerIndex)
         
         return PlayerControlType.allCases.filter { type in
             if (isSeat0 || isMySeat) && type == .disabled { return false }
-            
-            if isGameInPlay {
-                return type == playerTypes[idx]
-            }
-            
-            if type == .p2pNetwork {
-                return isP2PConnected || isInLobby
-            }
-            
+            if isGameInPlay { return type == playerTypes[idx] || type.isAI || type == .human }
+            if type == .p2pNetwork { return isP2PConnected || isInLobby }
             return true
         }
     }
@@ -1653,13 +1645,6 @@ final class GameModel: ObservableObject {
         guard let p = player else { return }
         let current = cachedOrbCounts[p, default: 0]
         let newValue = current + delta
-        
-        #if DEBUG
-        if newValue < 0 {
-            print("⚠️ [OrbCount Warning] 玩家 \(p) 计数值修正前出现负数: \(newValue)")
-        }
-        #endif
-        
         cachedOrbCounts[p] = max(0, newValue)
     }
     
@@ -1969,7 +1954,7 @@ final class GameModel: ObservableObject {
         guard index >= 0 && index < PlayerPreset.maxPlayers else { return }
         
         if !forceInternal {
-            let valids = validSelectableTypes(forPlayerIndex: index, isInLobby: true)
+            let valids = validSelectableTypes(forPlayerIndex: index, isInLobby: false)
             guard valids.contains(newType) else { return }
         }
         
@@ -2689,7 +2674,7 @@ extension Array {
     }
 }
 
-// MARK: - 14. 单机设置 View
+// MARK: - 14. 单机设置 View (已修复角色选择)
 
 struct LocalGameSetupView: View {
     @ObservedObject var game: GameModel
@@ -2734,7 +2719,8 @@ struct LocalGameSetupView: View {
                     
                     Spacer(minLength: 4)
                     
-                    Picker("Player Type", selection: Binding(
+                    // ✅ 修复：绑定正确传参，解开 Picker 下拉菜单限制
+                    Picker("控制类型", selection: Binding(
                         get: { game.playerTypes[safe: idx] ?? .disabled },
                         set: { game.updatePlayerType(at: idx, to: $0) }
                     )) {
@@ -2743,7 +2729,7 @@ struct LocalGameSetupView: View {
                         }
                     }
                     .pickerStyle(.menu)
-                    .tint(.white)
+                    .tint(.cyan)
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 2)
@@ -2818,7 +2804,7 @@ struct LocalGameSetupView: View {
                 ScrollView(.vertical, showsIndicators: true) {
                     playerRowsContent
                 }
-                .frame(maxHeight: 200)
+                .frame(maxHeight: 220)
             }
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
