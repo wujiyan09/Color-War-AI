@@ -213,7 +213,6 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
     
     let packetSubject = PassthroughSubject<P2PPacket, Never>()
     let disconnectSubject = PassthroughSubject<String, Never>()
-    // 问题 4 修复：添加协议版本不兼容事件的主题
     let incompatibleVersionSubject = PassthroughSubject<Void, Never>()
     
     @Published var myNickname: String {
@@ -349,7 +348,6 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
     
-    // 问题 5 修复：支持指定包含或排除接收方，避免连发全量广播时的重复浪费
     @MainActor
     func sendPacket(_ packet: P2PPacket, toPeerNamed targetName: String? = nil, excludingPeerNamed excludeName: String? = nil) {
         guard let session = mcSession, !session.connectedPeers.isEmpty else { return }
@@ -386,7 +384,6 @@ extension P2PNetworkManager: MCSessionDelegate, MCNearbyServiceAdvertiserDelegat
     
     nonisolated func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
         if let packet = try? JSONDecoder().decode(P2PPacket.self, from: data) {
-            // 问题 4 修复：版本不兼容时发出广播通知
             guard packet.protocolVersion == 3 else {
                 Task { @MainActor [weak self] in
                     self?.incompatibleVersionSubject.send()
@@ -1785,7 +1782,6 @@ final class GameModel: ObservableObject {
                     }
                     
                     if let s = seat {
-                        // 问题 5 修复：给接入者单独发带 assignedSeat 的快照，全量广播给其他客户端时排除它，防范浪费
                         self.broadcastFullStateSnapshot(targetPeerName: clientName, assignedSeat: s)
                         self.broadcastFullStateSnapshot(excludingPeerName: clientName)
                     }
@@ -1909,7 +1905,6 @@ final class GameModel: ObservableObject {
             }
             .store(in: &cancellables)
         
-        // 问题 4 修复：订阅版本不兼容消息
         P2PNetworkManager.shared.incompatibleVersionSubject
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in
@@ -1941,7 +1936,6 @@ final class GameModel: ObservableObject {
         }
     }
     
-    // 问题 5 修复：重构全量广播方法，允许排除指定的接收方
     private func broadcastFullStateSnapshot(targetPeerName: String? = nil, excludingPeerName: String? = nil, assignedSeat: Int? = nil) {
         guard P2PNetworkManager.shared.isHost && P2PNetworkManager.shared.isConnected else { return }
         
@@ -2301,7 +2295,7 @@ final class GameModel: ObservableObject {
     }
     
     private func checkGameOver() -> Bool {
-        let alive = activePlayerIndices.filter { $0 < eliminated.count && !eliminated[$0] }
+        let alive = activePlayerIndices.filter { $0 < eliminated.count && !$0.isSystemOwner && !eliminated[$0] }
         let allEnteredOrEliminated = activePlayerIndices.allSatisfy { $0 < hasEntered.count && $0 < eliminated.count && (hasEntered[$0] || eliminated[$0]) }
         
         if allEnteredOrEliminated && alive.count <= 1 {
@@ -2394,25 +2388,28 @@ final class GameModel: ObservableObject {
     }
 }
 
-// MARK: - 8. 抽象全屏背景组件
+extension Int {
+    var isSystemOwner: Bool { self < 0 }
+}
+
+// MARK: - 8. 全屏单色背景 View
 
 struct FullscreenBackground: View {
-    let image: UIImage?
-    let gradientColors: [Color]
+    let color: Color
+    let customImage: UIImage?
     
     var body: some View {
         GeometryReader { proxy in
-            Group {
-                if let img = image {
-                    Image(uiImage: img)
-                        .resizable()
-                        .scaledToFill()
-                } else {
-                    LinearGradient(colors: gradientColors, startPoint: .top, endPoint: .bottom)
-                }
+            if let img = customImage {
+                Image(uiImage: img)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .clipped()
+            } else {
+                color
+                    .frame(width: proxy.size.width, height: proxy.size.height)
             }
-            .frame(width: proxy.size.width, height: proxy.size.height)
-            .clipped()
         }
         .ignoresSafeArea(.all)
     }
@@ -3406,13 +3403,7 @@ struct StartMenuView: View {
                 VStack(spacing: 16) {
                     Text("COLOR WAR")
                         .font(.system(size: 36, weight: .black, design: .rounded))
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [.white, .white.opacity(0.7)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
+                        .foregroundColor(.white)
                     
                     if selectedTab == 0 {
                         LocalGameSetupView(game: game) {
@@ -3597,7 +3588,6 @@ struct GamePlayView: View {
             VStack(spacing: 8) {
                 HStack {
                     Button(action: {
-                        // 问题 6 修复：对局未结束且在联机模式下才弹窗确认，对局已结束直接走 returnToLobby()
                         if P2PNetworkManager.shared.isConnected && game.winnerIndex == nil {
                             showExitConfirmDialog = true
                         } else if game.winnerIndex != nil {
@@ -3702,7 +3692,6 @@ struct GamePlayView: View {
                         .foregroundColor(.cyan)
                     
                     VStack(spacing: 12) {
-                        // 问题 2 修复：房主点“再来一局”时先广播广播 .returnToLobby 全员安全回大厅，再由房主大厅启动
                         if !P2PNetworkManager.shared.isConnected || P2PNetworkManager.shared.isHost {
                             Button(action: {
                                 stopCountdown()
@@ -3762,7 +3751,6 @@ struct GamePlayView: View {
         .sheet(isPresented: $game.showControlSheet) {
             PlayerTakeoverSheet(game: game)
         }
-        // 问题 1 修复：改用 confirmationDialog 处理退出确认，避免多个 .alert 冲突覆盖
         .confirmationDialog("确定要退出当前对局吗？", isPresented: $showExitConfirmDialog, titleVisibility: .visible) {
             Button("退回大厅 (转为 AI 代打)") {
                 game.returnToLobby()
@@ -3784,7 +3772,6 @@ struct GamePlayView: View {
         } message: {
             Text("房主已断开连接，对局已自动结束。")
         }
-        // 问题 4 修复：添加协议版本不兼容弹窗
         .alert("版本不兼容", isPresented: $game.showIncompatibleVersionAlert) {
             Button("确定", role: .cancel) { }
         } message: {
@@ -3800,7 +3787,6 @@ struct GamePlayView: View {
     }
     
     private func startAutoReturnTimer() {
-        // 问题 3 修复：添加 winnerIndex 校验 guard，防止非结算状态误触自动退房
         guard game.winnerIndex != nil else { return }
         stopCountdown()
         autoReturnCountdown = 5
@@ -3912,21 +3898,30 @@ struct PlayerTakeoverSheet: View {
     }
 }
 
-// MARK: - 23. 根视图 ContentView (全局统一绘制沉底全屏背景)
+// MARK: - 23. 根视图 ContentView (全屏均匀单色渲染背景)
 
 struct ContentView: View {
     @StateObject private var game = GameModel()
     @State private var isGameStarted = false
     @State private var isSpinningRandomWheel = false
     
+    // 主菜单界面的单一默认底色
+    private let menuBackgroundColor = Color(red: 0.08, green: 0.12, blue: 0.20)
+    
+    // 游戏对局界面的纯色背景：直接根据当前执子玩家的颜色渲染
+    private var currentGameBackgroundColor: Color {
+        game.colors[safe: game.currentPlayer] ?? menuBackgroundColor
+    }
+    
     var body: some View {
         ZStack {
+            // 全屏均匀单色渲染背景（无 Stack 叠加）
             FullscreenBackground(
-                image: game.customBackgroundImage,
-                gradientColors: isGameStarted
-                    ? [(game.colors[safe: game.currentPlayer] ?? .blue).opacity(0.35), Color(red: 0.03, green: 0.05, blue: 0.10)]
-                    : [Color(red: 0.08, green: 0.28, blue: 0.65).opacity(0.85), Color(red: 0.03, green: 0.05, blue: 0.10)]
+                color: isGameStarted ? currentGameBackgroundColor : menuBackgroundColor,
+                customImage: game.customBackgroundImage
             )
+            .animation(.easeInOut(duration: 0.35), value: game.currentPlayer)
+            .animation(.easeInOut(duration: 0.35), value: isGameStarted)
             
             if isGameStarted {
                 GamePlayView(
