@@ -162,23 +162,20 @@ struct IdentifiableInt: Identifiable {
 
 enum P2PAction: String, Codable {
     case hostConfig
-    case clientConfigUpdate
     case playerMove
     case syncRequest
     case startGame
     case stateSnapshot
-    case returnToLobby
     case playerLeft
     case ping
     case ack
 }
 
 struct P2PPacket: Codable {
-    var protocolVersion: Int = 3
+    var protocolVersion: Int = 2
     let sequenceID: UInt64
     let action: P2PAction
     let senderID: String
-    var assignedPlayerIndex: Int? = nil
     var row: Int? = nil
     var col: Int? = nil
     var boardSize: Int? = nil
@@ -213,7 +210,6 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
     
     let packetSubject = PassthroughSubject<P2PPacket, Never>()
     let disconnectSubject = PassthroughSubject<String, Never>()
-    let incompatibleVersionSubject = PassthroughSubject<Void, Never>()
     
     @Published var myNickname: String {
         didSet {
@@ -349,20 +345,10 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
     }
     
     @MainActor
-    func sendPacket(_ packet: P2PPacket, toPeerNamed targetName: String? = nil, excludingPeerNamed excludeName: String? = nil) {
+    func sendPacket(_ packet: P2PPacket) {
         guard let session = mcSession, !session.connectedPeers.isEmpty else { return }
         guard let data = try? JSONEncoder().encode(packet) else { return }
-        
-        var peers = session.connectedPeers
-        if let target = targetName {
-            peers = peers.filter { $0.displayName == target }
-        }
-        if let exclude = excludeName {
-            peers = peers.filter { $0.displayName != exclude }
-        }
-        
-        guard !peers.isEmpty else { return }
-        try? session.send(data, toPeers: peers, with: .reliable)
+        try? session.send(data, toPeers: session.connectedPeers, with: .reliable)
     }
 }
 
@@ -384,12 +370,7 @@ extension P2PNetworkManager: MCSessionDelegate, MCNearbyServiceAdvertiserDelegat
     
     nonisolated func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
         if let packet = try? JSONDecoder().decode(P2PPacket.self, from: data) {
-            guard packet.protocolVersion == 3 else {
-                Task { @MainActor [weak self] in
-                    self?.incompatibleVersionSubject.send()
-                }
-                return
-            }
+            guard packet.protocolVersion == 2 else { return }
             
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
@@ -690,7 +671,7 @@ struct AISolver: Sendable {
     func calculateBestMove() async -> (Int, Int)? {
         if Task.isCancelled { return nil }
         
-        let validMoves = getPlayableCells(for: currentPlayer, on: board)
+        var validMoves = getPlayableCells(for: currentPlayer, on: board)
         guard !validMoves.isEmpty else { return nil }
         
         let isMyFirstTurn = (currentPlayer < hasEntered.count) ? !hasEntered[currentPlayer] : true
@@ -1511,24 +1492,22 @@ struct AISolver: Sendable {
 
 @MainActor
 final class GameModel: ObservableObject {
-    private var isApplyingRemoteConfig = false
-    
     @Published var boardSize: Int {
         didSet {
             UserDefaults.standard.set(boardSize, forKey: "CW_Saved_BoardSize")
-            if !isApplyingRemoteConfig { syncRoomConfigToPeers() }
+            syncRoomConfigToPeers()
         }
     }
     @Published var isRandomFirstPlayer: Bool {
         didSet {
             UserDefaults.standard.set(isRandomFirstPlayer, forKey: "CW_Saved_IsRandomFirst")
-            if !isApplyingRemoteConfig { syncRoomConfigToPeers() }
+            syncRoomConfigToPeers()
         }
     }
     @Published var aiDifficultyLevel: AIDifficultyLevel {
         didSet {
             UserDefaults.standard.set(aiDifficultyLevel.rawValue, forKey: "CW_Saved_AIDifficultyLevel")
-            if !isApplyingRemoteConfig { syncRoomConfigToPeers() }
+            syncRoomConfigToPeers()
         }
     }
     
@@ -1552,10 +1531,7 @@ final class GameModel: ObservableObject {
     @Published var currentPlayer: Int = 0 {
         didSet { updateCachedPlayableCells() }
     }
-    
     @Published var myPlayerIndex: Int = 0
-    @Published private(set) var isSeatAssigned: Bool = false
-    
     @Published var hasEntered: [Bool] = Array(repeating: false, count: PlayerPreset.maxPlayers)
     @Published var eliminated: [Bool] = Array(repeating: false, count: PlayerPreset.maxPlayers) {
         didSet { updateCachedPlayableCells() }
@@ -1566,7 +1542,6 @@ final class GameModel: ObservableObject {
     @Published var flyingOrbs: [FlyingOrb] = []
     @Published var emphasizedCells: Set<Int> = []
     @Published var showDisconnectedAlert: Bool = false
-    @Published var showIncompatibleVersionAlert: Bool = false
     @Published var activeOnlineMode: ActiveOnlineMode = .none
     
     @Published var customBackgroundImage: UIImage? = nil
@@ -1580,15 +1555,11 @@ final class GameModel: ObservableObject {
     private var lastReceivedSeqID: UInt64 = 0
     private var currentGameSessionID: UUID = UUID()
     private var actionQueue: [(Int, Int, Int)] = []
-    private var cancellables = Set<AnyCancellable>()
     
+    private var p2pCancellable: AnyCancellable? = nil
+    private var disconnectCancellable: AnyCancellable? = nil
     private var aiTask: Task<Void, Never>? = nil
     private var saveWorkItem: DispatchWorkItem? = nil
-    
-    deinit {
-        cancellables.removeAll()
-        aiTask?.cancel()
-    }
     
     func beginGame() {
         isGameInPlay = true
@@ -1603,19 +1574,23 @@ final class GameModel: ObservableObject {
         self.activePlayerIndices = playerTypes.enumerated().compactMap { $1 != .disabled ? $0 : nil }
     }
     
+    /// ✅ 修复：获取玩家可选角色类型（精准解包单机与联机逻辑，支持本地自由切换）
     func validSelectableTypes(forPlayerIndex idx: Int, isInLobby: Bool = false) -> [PlayerControlType] {
         let isP2PConnected = P2PNetworkManager.shared.isConnected
         
+        // 单机本地模式 (主菜单 setup 界面): 允许选 真人、噩梦AI、噩梦AI(加强)、禁用
         if !isP2PConnected && !isInLobby && !isGameInPlay {
             var options: [PlayerControlType] = [.human, .mathNightmare, .enhancedNightmare, .disabled]
+            // 前两位玩家不能选禁用，保证至少有2个玩家
             if idx < 2 {
                 options.removeAll(where: { $0 == .disabled })
             }
             return options
         }
         
+        // P2P 联机模式或游戏中面板
         let isSeat0 = (idx == 0)
-        let isMySeat = (isP2PConnected && isSeatAssigned && idx == myPlayerIndex)
+        let isMySeat = (isP2PConnected && idx == myPlayerIndex)
         
         return PlayerControlType.allCases.filter { type in
             if (isSeat0 || isMySeat) && type == .disabled { return false }
@@ -1740,9 +1715,8 @@ final class GameModel: ObservableObject {
     }
     
     private func setupP2PListener() {
-        cancellables.removeAll()
-        
-        P2PNetworkManager.shared.packetSubject
+        p2pCancellable?.cancel()
+        p2pCancellable = P2PNetworkManager.shared.packetSubject
             .receive(on: DispatchQueue.main)
             .sink { [weak self] packet in
                 guard let self = self else { return }
@@ -1759,62 +1733,18 @@ final class GameModel: ObservableObject {
                     }
                     
                 case .syncRequest:
-                    guard P2PNetworkManager.shared.isHost else { break }
-                    let clientName = packet.senderID
-                    var seat: Int? = nil
-                    
-                    if let want = packet.playerIndex, want >= 0, want < PlayerPreset.maxPlayers, self.playerTypes[safe: want] == .p2pNetwork {
-                        self.playerNames[want] = clientName
-                        seat = want
-                    } else if let existing = (0..<PlayerPreset.maxPlayers).first(where: {
-                        self.playerTypes[safe: $0] == .p2pNetwork && self.playerNames[safe: $0] == clientName
-                    }) {
-                        seat = existing
-                    } else {
-                        for i in 1..<PlayerPreset.maxPlayers {
-                            if self.playerTypes[safe: i] != .p2pNetwork {
-                                self.playerNames[i] = clientName
-                                self.playerTypes[i] = .p2pNetwork
-                                seat = i
-                                break
-                            }
-                        }
+                    if P2PNetworkManager.shared.isHost {
+                        self.broadcastFullStateSnapshot()
                     }
-                    
-                    if let s = seat {
-                        self.broadcastFullStateSnapshot(targetPeerName: clientName, assignedSeat: s)
-                        self.broadcastFullStateSnapshot(excludingPeerName: clientName)
-                    }
-                    
-                case .clientConfigUpdate:
-                    guard P2PNetworkManager.shared.isHost else { break }
-                    guard let pIdx = packet.playerIndex,
-                          pIdx >= 0, pIdx < PlayerPreset.maxPlayers else { break }
-                    
-                    self.isApplyingRemoteConfig = true
-                    if let names = packet.playerNames, pIdx < names.count {
-                        self.playerNames[pIdx] = names[pIdx]
-                    }
-                    if let hexes = packet.colorsHex, pIdx < hexes.count {
-                        self.colors[pIdx] = Color(hex: hexes[pIdx])
-                    }
-                    if let ems = packet.emojis, pIdx < ems.count {
-                        self.emojis[pIdx] = ems[pIdx].isEmpty ? nil : ems[pIdx]
-                    }
-                    self.isApplyingRemoteConfig = false
-                    self.syncRoomConfigToPeers()
                     
                 case .hostConfig:
-                    guard !P2PNetworkManager.shared.isHost else { break }
-                    self.isApplyingRemoteConfig = true
                     if let names = packet.playerNames { self.playerNames = names }
                     if let types = packet.playerTypes { self.playerTypes = types }
                     if let hexes = packet.colorsHex { self.colors = hexes.map { Color(hex: $0) } }
                     if let ems = packet.emojis { self.emojis = ems.map { $0.isEmpty ? nil : $0 } }
                     if let sz = packet.boardSize { self.boardSize = sz }
                     if let rnd = packet.isRandomFirstPlayer { self.isRandomFirstPlayer = rnd }
-                    if let aiRaw = packet.aiLevelRaw, let lv = AIDifficultyLevel(rawValue: aiRaw) { self.aiDifficultyLevel = lv }
-                    self.isApplyingRemoteConfig = false
+                    if let aiLvl = packet.aiLevelRaw, let level = AIDifficultyLevel(rawValue: aiLvl) { self.aiDifficultyLevel = level }
                     
                 case .startGame:
                     if let firstP = packet.firstPlayerIndex {
@@ -1823,38 +1753,13 @@ final class GameModel: ObservableObject {
                         self.shouldNavigateToGame = true
                     }
                     
-                case .returnToLobby:
-                    if P2PNetworkManager.shared.isHost {
-                        let clientSender = packet.senderID
-                        if let seatIdx = (0..<PlayerPreset.maxPlayers).first(where: {
-                            self.playerTypes[safe: $0] == .p2pNetwork && self.playerNames[safe: $0] == clientSender
-                        }) {
-                            self.playerTypes[seatIdx] = .mathNightmare
-                            self.playerNames[seatIdx] = "\(clientSender) (已退大厅)"
-                            self.broadcastFullStateSnapshot()
-                            if self.currentPlayer == seatIdx && !self.isProcessingCascade {
-                                self.checkAndRunAITurn()
-                            }
-                        }
-                    } else {
-                        self.returnToLobbyLocal()
-                    }
-                    
                 case .stateSnapshot:
-                    self.isApplyingRemoteConfig = true
                     if let names = packet.playerNames { self.playerNames = names }
                     if let types = packet.playerTypes { self.playerTypes = types }
-                    if let hexes = packet.colorsHex { self.colors = hexes.map { Color(hex: $0) } }
-                    if let ems = packet.emojis { self.emojis = ems.map { $0.isEmpty ? nil : $0 } }
                     
-                    if let assigned = packet.assignedPlayerIndex, !P2PNetworkManager.shared.isHost {
-                        self.myPlayerIndex = assigned
-                        self.isSeatAssigned = true
-                    }
-                    
-                    if let compact = packet.compactBoardSnapshot, let turn = packet.currentTurnIndex {
+                    if let compactSnap = packet.compactBoardSnapshot, let turnP = packet.currentTurnIndex {
                         var grid = [[Cell]](repeating: [Cell](repeating: Cell(owner: nil, count: 0), count: self.boardSize), count: self.boardSize)
-                        for item in compact {
+                        for item in compactSnap {
                             let r = Int(item.r)
                             let c = Int(item.c)
                             if r < self.boardSize && c < self.boardSize {
@@ -1865,78 +1770,56 @@ final class GameModel: ObservableObject {
                         if let entered = packet.hasEnteredSnapshot { self.hasEntered = entered }
                         if let elim = packet.eliminatedSnapshot { self.eliminated = elim }
                         self.recalculateOrbCounts()
-                        self.currentPlayer = turn
+                        self.currentPlayer = turnP
                         
                         if P2PNetworkManager.shared.isHost {
                             self.checkAndRunAITurn()
                         }
                     }
-                    self.isApplyingRemoteConfig = false
                     
                 default:
                     break
                 }
             }
-            .store(in: &cancellables)
         
-        P2PNetworkManager.shared.disconnectSubject
+        disconnectCancellable?.cancel()
+        disconnectCancellable = P2PNetworkManager.shared.disconnectSubject
             .receive(on: DispatchQueue.main)
             .sink { [weak self] disconnectedPeerName in
                 guard let self = self else { return }
                 if P2PNetworkManager.shared.isHost {
                     for i in 0..<PlayerPreset.maxPlayers {
-                        if self.playerTypes[safe: i] == .p2pNetwork && self.playerNames[safe: i] == disconnectedPeerName {
-                            self.playerTypes[i] = .mathNightmare
-                            self.playerNames[i] = "\(disconnectedPeerName) (掉线)"
+                        if self.playerNames[safe: i] == disconnectedPeerName && self.playerTypes[safe: i] == .p2pNetwork {
+                            self.updatePlayerType(at: i, to: .mathNightmare, forceInternal: true)
                             self.broadcastFullStateSnapshot()
                             if self.currentPlayer == i && !self.isProcessingCascade {
                                 self.checkAndRunAITurn()
                             }
-                            break
                         }
                     }
                 } else {
                     if disconnectedPeerName == P2PNetworkManager.shared.hostDeviceName {
-                        self.isSeatAssigned = false
-                        self.myPlayerIndex = 0
                         self.showDisconnectedAlert = true
+                        self.exitToMenu()
                     }
                 }
             }
-            .store(in: &cancellables)
-        
-        P2PNetworkManager.shared.incompatibleVersionSubject
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] in
-                self?.showIncompatibleVersionAlert = true
-            }
-            .store(in: &cancellables)
     }
     
     func syncRoomConfigToPeers() {
-        guard P2PNetworkManager.shared.isConnected else { return }
-        
-        if P2PNetworkManager.shared.isHost {
-            var p = P2PPacket(sequenceID: P2PNetworkManager.shared.getNextSequenceID(), action: .hostConfig, senderID: P2PNetworkManager.shared.myNickname)
-            p.boardSize = boardSize
-            p.isRandomFirstPlayer = isRandomFirstPlayer
-            p.playerNames = playerNames
-            p.playerTypes = playerTypes
-            p.colorsHex = colors.map { $0.toHex() }
-            p.emojis = emojis.map { $0 ?? "" }
-            p.aiLevelRaw = aiDifficultyLevel.rawValue
-            P2PNetworkManager.shared.sendPacket(p)
-        } else if isSeatAssigned && myPlayerIndex >= 0 && myPlayerIndex < PlayerPreset.maxPlayers {
-            var p = P2PPacket(sequenceID: P2PNetworkManager.shared.getNextSequenceID(), action: .clientConfigUpdate, senderID: P2PNetworkManager.shared.myNickname)
-            p.playerIndex = myPlayerIndex
-            p.playerNames = playerNames
-            p.colorsHex = colors.map { $0.toHex() }
-            p.emojis = emojis.map { $0 ?? "" }
-            P2PNetworkManager.shared.sendPacket(p)
-        }
+        guard P2PNetworkManager.shared.isHost && P2PNetworkManager.shared.isConnected else { return }
+        var packet = P2PPacket(sequenceID: P2PNetworkManager.shared.getNextSequenceID(), action: .hostConfig, senderID: P2PNetworkManager.shared.myNickname)
+        packet.boardSize = boardSize
+        packet.isRandomFirstPlayer = isRandomFirstPlayer
+        packet.playerNames = playerNames
+        packet.playerTypes = playerTypes
+        packet.colorsHex = colors.map { $0.toHex() }
+        packet.emojis = emojis.map { $0 ?? "" }
+        packet.aiLevelRaw = aiDifficultyLevel.rawValue
+        P2PNetworkManager.shared.sendPacket(packet)
     }
     
-    private func broadcastFullStateSnapshot(targetPeerName: String? = nil, excludingPeerName: String? = nil, assignedSeat: Int? = nil) {
+    private func broadcastFullStateSnapshot() {
         guard P2PNetworkManager.shared.isHost && P2PNetworkManager.shared.isConnected else { return }
         
         var compactList = [CompactCellSnapshot]()
@@ -1952,14 +1835,11 @@ final class GameModel: ObservableObject {
         var packet = P2PPacket(sequenceID: P2PNetworkManager.shared.getNextSequenceID(), action: .stateSnapshot, senderID: P2PNetworkManager.shared.myNickname)
         packet.playerNames = playerNames
         packet.playerTypes = playerTypes
-        packet.colorsHex = colors.map { $0.toHex() }
-        packet.emojis = emojis.map { $0 ?? "" }
         packet.compactBoardSnapshot = compactList
         packet.currentTurnIndex = currentPlayer
         packet.hasEnteredSnapshot = hasEntered
         packet.eliminatedSnapshot = eliminated
-        packet.assignedPlayerIndex = assignedSeat
-        P2PNetworkManager.shared.sendPacket(packet, toPeerNamed: targetPeerName, excludingPeerNamed: excludingPeerName)
+        P2PNetworkManager.shared.sendPacket(packet)
     }
     
     private func debounceSave() {
@@ -2050,7 +1930,12 @@ final class GameModel: ObservableObject {
         checkAndRunAITurn()
     }
     
-    func returnToLobbyLocal() {
+    func restartCurrentGame() {
+        resetGame()
+        beginGame()
+    }
+    
+    func exitToMenu() {
         currentGameSessionID = UUID()
         aiTask?.cancel()
         aiTask = nil
@@ -2061,26 +1946,6 @@ final class GameModel: ObservableObject {
         endGame()
         shouldNavigateToGame = false
         winnerIndex = nil
-    }
-    
-    func returnToLobby() {
-        if P2PNetworkManager.shared.isConnected {
-            let p = P2PPacket(sequenceID: P2PNetworkManager.shared.getNextSequenceID(), action: .returnToLobby, senderID: P2PNetworkManager.shared.myNickname)
-            P2PNetworkManager.shared.sendPacket(p)
-        }
-        returnToLobbyLocal()
-    }
-    
-    func restartCurrentGame() {
-        guard !P2PNetworkManager.shared.isConnected || P2PNetworkManager.shared.isHost else { return }
-        resetGame()
-        beginGame()
-    }
-    
-    func exitToMenu() {
-        returnToLobby()
-        myPlayerIndex = 0
-        isSeatAssigned = false
         activeOnlineMode = .none
         P2PNetworkManager.shared.stopP2P()
     }
@@ -2114,9 +1979,8 @@ final class GameModel: ObservableObject {
         let isP2P = P2PNetworkManager.shared.isConnected
         
         if isP2P {
-            let isMyLocalSeat = (playerTypes[player] == .human || playerTypes[player] == .p2pNetwork) && isSeatAssigned && myPlayerIndex == player
-            let isHostRunningAI = P2PNetworkManager.shared.isHost && playerTypes[player].isAI
-            guard isMyLocalSeat || isHostRunningAI else { return }
+            let isMyTurnToControl = (playerTypes[player] == .human && myPlayerIndex == player) || (P2PNetworkManager.shared.isHost && playerTypes[player].isAI)
+            guard isMyTurnToControl else { return }
             
             var packet = P2PPacket(sequenceID: P2PNetworkManager.shared.getNextSequenceID(), action: .playerMove, senderID: P2PNetworkManager.shared.myNickname)
             packet.row = row
@@ -2295,7 +2159,7 @@ final class GameModel: ObservableObject {
     }
     
     private func checkGameOver() -> Bool {
-        let alive = activePlayerIndices.filter { $0 < eliminated.count && !$0.isSystemOwner && !eliminated[$0] }
+        let alive = activePlayerIndices.filter { $0 < eliminated.count && !eliminated[$0] }
         let allEnteredOrEliminated = activePlayerIndices.allSatisfy { $0 < hasEntered.count && $0 < eliminated.count && (hasEntered[$0] || eliminated[$0]) }
         
         if allEnteredOrEliminated && alive.count <= 1 {
@@ -2388,34 +2252,7 @@ final class GameModel: ObservableObject {
     }
 }
 
-extension Int {
-    var isSystemOwner: Bool { self < 0 }
-}
-
-// MARK: - 8. 全屏单色背景 View
-
-struct FullscreenBackground: View {
-    let color: Color
-    let customImage: UIImage?
-    
-    var body: some View {
-        GeometryReader { proxy in
-            if let img = customImage {
-                Image(uiImage: img)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: proxy.size.width, height: proxy.size.height)
-                    .clipped()
-            } else {
-                color
-                    .frame(width: proxy.size.width, height: proxy.size.height)
-            }
-        }
-        .ignoresSafeArea(.all)
-    }
-}
-
-// MARK: - 9. 玩家进度 View
+// MARK: - 8. 玩家进度 View
 
 struct PlayerProgressOrbView: View {
     @ObservedObject var game: GameModel
@@ -2477,7 +2314,7 @@ struct PlayerProgressOrbView: View {
     }
 }
 
-// MARK: - 10. 棋盘 View
+// MARK: - 9. 棋盘 View
 
 struct BoardView: View {
     @ObservedObject var game: GameModel
@@ -2579,7 +2416,7 @@ struct BoardView: View {
     }
 }
 
-// MARK: - 11. 单元格 (Equatable)
+// MARK: - 10. 单元格 (Equatable)
 
 struct CellView: View, Equatable {
     let cell: Cell
@@ -2618,7 +2455,7 @@ struct CellView: View, Equatable {
     }
 }
 
-// MARK: - 12. 棋子 View
+// MARK: - 11. 棋子 View
 
 struct PieceView: View {
     let color: Color
@@ -2663,7 +2500,7 @@ struct PieceView: View {
     }
 }
 
-// MARK: - 13. 棋子点阵 View
+// MARK: - 12. 棋子点阵 View
 
 struct DotPattern: View {
     let count: Int
@@ -2725,7 +2562,7 @@ struct DotPattern: View {
     }
 }
 
-// MARK: - 14. Emoji 选择器 Sheet
+// MARK: - 13. Emoji 选择器 Sheet
 
 struct EmojiPickerSheet: View {
     @ObservedObject var game: GameModel
@@ -2837,7 +2674,7 @@ extension Array {
     }
 }
 
-// MARK: - 15. 单机设置 View
+// MARK: - 14. 单机设置 View
 
 struct LocalGameSetupView: View {
     @ObservedObject var game: GameModel
@@ -2991,7 +2828,7 @@ struct LocalGameSetupView: View {
     }
 }
 
-// MARK: - 16. 本地搜寻 Inline View
+// MARK: - 15. 本地搜寻 Inline View
 
 struct LocalDeviceBrowserInlineView: View {
     @ObservedObject var p2pManager = P2PNetworkManager.shared
@@ -3089,7 +2926,7 @@ struct LocalDeviceBrowserInlineView: View {
     }
 }
 
-// MARK: - 17. 联机大厅 View
+// MARK: - 16. 联机大厅 View
 
 struct RoomLobbyView: View {
     @ObservedObject var game: GameModel
@@ -3102,16 +2939,8 @@ struct RoomLobbyView: View {
     @ViewBuilder
     private var roomPlayerRowsContent: some View {
         VStack(spacing: 8) {
-            if !p2pManager.isHost && !game.isSeatAssigned {
-                HStack {
-                    ProgressView().scaleEffect(0.8)
-                    Text("正在由房主分配座位号...").font(.caption).foregroundColor(.cyan)
-                }
-                .padding(8)
-            }
-            
             ForEach(0..<min(game.playerNames.count, 4), id: \.self) { idx in
-                let isMySeat = game.isSeatAssigned && (idx == game.myPlayerIndex)
+                let isMySeat = (idx == game.myPlayerIndex)
                 
                 HStack {
                     Button(action: {
@@ -3263,7 +3092,7 @@ struct RoomLobbyView: View {
     }
 }
 
-// MARK: - 18. 联机 Setup View
+// MARK: - 17. 联机 Setup View
 
 enum ActiveOnlineMode {
     case none
@@ -3290,8 +3119,8 @@ struct OnlineGameSetupView: View {
                 
                 TextField("输入昵称", text: $p2pManager.myNickname)
                     .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 180)
                     .disabled(p2pManager.isConnected || p2pManager.isConnecting)
+                    .frame(maxWidth: 180)
             }
             .padding(10)
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
@@ -3357,9 +3186,10 @@ struct OnlineGameSetupView: View {
                                     .first()
                                     .receive(on: DispatchQueue.main)
                                     .sink { _ in
+                                        game.playerNames[1] = p2pManager.myNickname
+                                        game.myPlayerIndex = 1
                                         game.activeOnlineMode = .localJoined
-                                        var syncPacket = P2PPacket(sequenceID: p2pManager.getNextSequenceID(), action: .syncRequest, senderID: p2pManager.myNickname)
-                                        syncPacket.playerIndex = nil
+                                        let syncPacket = P2PPacket(sequenceID: p2pManager.getNextSequenceID(), action: .syncRequest, senderID: p2pManager.myNickname)
                                         p2pManager.sendPacket(syncPacket)
                                     }
                             },
@@ -3385,7 +3215,7 @@ struct OnlineGameSetupView: View {
     }
 }
 
-// MARK: - 19. 主菜单 View
+// MARK: - 18. 主菜单 View
 
 struct StartMenuView: View {
     @ObservedObject var game: GameModel
@@ -3397,31 +3227,58 @@ struct StartMenuView: View {
     
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                Spacer()
-                
-                VStack(spacing: 16) {
-                    Text("COLOR WAR")
-                        .font(.system(size: 36, weight: .black, design: .rounded))
-                        .foregroundColor(.white)
-                    
-                    if selectedTab == 0 {
-                        LocalGameSetupView(game: game) {
-                            isSpinningRandomWheel = true
-                        }
-                        .transition(.opacity.combined(with: .scale(scale: 0.98)))
-                    } else {
-                        OnlineGameSetupView(game: game) {
-                            isSpinningRandomWheel = true
-                        }
-                        .transition(.opacity.combined(with: .scale(scale: 0.98)))
-                    }
+            ZStack {
+                if let customImg = game.customBackgroundImage {
+                    Image(uiImage: customImg)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+                        .ignoresSafeArea()
+                        .overlay(Color.black.opacity(0.35))
+                } else {
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.08, green: 0.28, blue: 0.65).opacity(0.85),
+                            Color(red: 0.03, green: 0.05, blue: 0.10)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .ignoresSafeArea()
                 }
-                .frame(maxWidth: 440)
                 
-                Spacer()
+                VStack(spacing: 0) {
+                    Spacer()
+                    
+                    VStack(spacing: 16) {
+                        Text("COLOR WAR")
+                            .font(.system(size: 36, weight: .black, design: .rounded))
+                            .foregroundStyle(
+                                LinearGradient(
+                                    colors: [.white, .white.opacity(0.7)],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
+                        
+                        if selectedTab == 0 {
+                            LocalGameSetupView(game: game) {
+                                isSpinningRandomWheel = true
+                            }
+                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                        } else {
+                            OnlineGameSetupView(game: game) {
+                                isSpinningRandomWheel = true
+                            }
+                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                        }
+                    }
+                    .frame(maxWidth: 440)
+                    
+                    Spacer()
+                }
+                .padding(.horizontal, 20)
             }
-            .padding(.horizontal, 20)
             .toolbar {
                 ToolbarItem(placement: .principal) {
                     Picker("Game Mode", selection: $selectedTab) {
@@ -3477,7 +3334,7 @@ struct StartMenuView: View {
     }
 }
 
-// MARK: - 20. 轮盘 Overlay
+// MARK: - 19. 轮盘 Overlay
 
 struct RandomPlayerWheelOverlay: View {
     @ObservedObject var game: GameModel
@@ -3489,7 +3346,7 @@ struct RandomPlayerWheelOverlay: View {
     var body: some View {
         ZStack {
             Color.black.opacity(0.75)
-                .ignoresSafeArea(.all)
+                .ignoresSafeArea()
             
             VStack(spacing: 24) {
                 Text("随机抽取先手玩家")
@@ -3571,7 +3428,7 @@ struct RandomPlayerWheelOverlay: View {
     }
 }
 
-// MARK: - 21. 游戏对局 View
+// MARK: - 20. 游戏对局 View
 
 struct GamePlayView: View {
     @ObservedObject var game: GameModel
@@ -3579,28 +3436,35 @@ struct GamePlayView: View {
     @Binding var isSpinningRandomWheel: Bool
     
     @State private var calculatedBoardWidth: CGFloat = 320
-    @State private var autoReturnCountdown: Int = 5
-    @State private var autoReturnTimer: Timer? = nil
-    @State private var showExitConfirmDialog: Bool = false
     
     var body: some View {
         ZStack {
+            if let customImg = game.customBackgroundImage {
+                Image(uiImage: customImg)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+                    .ignoresSafeArea()
+                    .overlay(Color.black.opacity(0.35))
+            } else {
+                LinearGradient(
+                    colors: [
+                        (game.colors[safe: game.currentPlayer] ?? .blue).opacity(0.35),
+                        Color(red: 0.03, green: 0.05, blue: 0.10)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea()
+                .animation(.easeInOut(duration: 0.8), value: game.currentPlayer)
+            }
+            
             VStack(spacing: 8) {
                 HStack {
                     Button(action: {
-                        if P2PNetworkManager.shared.isConnected && game.winnerIndex == nil {
-                            showExitConfirmDialog = true
-                        } else if game.winnerIndex != nil {
-                            stopCountdown()
-                            game.returnToLobby()
-                            withAnimation(.spring()) {
-                                isGameStarted = false
-                            }
-                        } else {
-                            game.exitToMenu()
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                                isGameStarted = false
-                            }
+                        game.exitToMenu()
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            isGameStarted = false
                         }
                     }) {
                         Image(systemName: "chevron.left")
@@ -3660,7 +3524,7 @@ struct GamePlayView: View {
             }
             
             if let wIdx = game.winnerIndex {
-                Color.black.opacity(0.8).ignoresSafeArea(.all)
+                Color.black.opacity(0.8).ignoresSafeArea()
                 
                 VStack(spacing: 24) {
                     ZStack {
@@ -3686,45 +3550,29 @@ struct GamePlayView: View {
                         .bold()
                         .foregroundColor(.white)
                     
-                    Text("\(autoReturnCountdown) 秒后自动返回房间界面...")
-                        .font(.caption)
-                        .bold()
-                        .foregroundColor(.cyan)
-                    
                     VStack(spacing: 12) {
-                        if !P2PNetworkManager.shared.isConnected || P2PNetworkManager.shared.isHost {
-                            Button(action: {
-                                stopCountdown()
-                                game.returnToLobby()
-                                withAnimation(.spring()) {
-                                    isGameStarted = false
-                                }
-                            }) {
-                                HStack {
-                                    Image(systemName: "arrow.clockwise")
-                                    Text("再来一局 (先回大厅)")
-                                }
-                                .font(.subheadline)
-                                .bold()
-                                .foregroundColor(.white)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 12)
-                                .contentShape(Capsule())
-                                .glassEffect(.regular.tint(.darkNavyBlue).interactive(), in: .capsule)
+                        Button(action: {
+                            isSpinningRandomWheel = true
+                        }) {
+                            HStack {
+                                Image(systemName: "arrow.clockwise")
+                                Text("再来一局")
                             }
-                            .buttonStyle(.plain)
-                        } else {
-                            Text("等待房主结束对局...")
-                                .font(.caption)
-                                .foregroundColor(.gray)
+                            .font(.subheadline)
+                            .bold()
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .contentShape(Capsule())
+                            .glassEffect(.regular.tint(.darkNavyBlue).interactive(), in: .capsule)
                         }
+                        .buttonStyle(.plain)
                         
                         Button(action: {
-                            stopCountdown()
-                            game.returnToLobby()
+                            game.exitToMenu()
                             withAnimation(.spring()) { isGameStarted = false }
                         }) {
-                            Text("返回房间大厅")
+                            Text("返回主菜单")
                                 .font(.subheadline)
                                 .foregroundColor(.white.opacity(0.9))
                                 .frame(maxWidth: .infinity)
@@ -3740,79 +3588,28 @@ struct GamePlayView: View {
                 .frame(maxWidth: 420)
                 .padding(.horizontal, 20)
                 .transition(.scale.combined(with: .opacity))
-                .onAppear {
-                    startAutoReturnTimer()
-                }
-                .onDisappear {
-                    stopCountdown()
-                }
             }
         }
         .sheet(isPresented: $game.showControlSheet) {
             PlayerTakeoverSheet(game: game)
         }
-        .confirmationDialog("确定要退出当前对局吗？", isPresented: $showExitConfirmDialog, titleVisibility: .visible) {
-            Button("退回大厅 (转为 AI 代打)") {
-                game.returnToLobby()
-                withAnimation(.spring()) { isGameStarted = false }
-            }
-            Button("彻底离开房间", role: .destructive) {
-                game.exitToMenu()
-                withAnimation(.spring()) { isGameStarted = false }
-            }
-            Button("继续游戏", role: .cancel) { }
-        } message: {
-            Text("联机中直接退出将转为 AI 接管。")
-        }
         .alert("连接断开", isPresented: $game.showDisconnectedAlert) {
             Button("确定", role: .cancel) {
-                game.exitToMenu()
                 withAnimation(.spring()) { isGameStarted = false }
             }
         } message: {
             Text("房主已断开连接，对局已自动结束。")
-        }
-        .alert("版本不兼容", isPresented: $game.showIncompatibleVersionAlert) {
-            Button("确定", role: .cancel) { }
-        } message: {
-            Text("检测到房间内有不兼容的客户端版本，请更新 App 后再试！")
         }
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true
         }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
-            stopCountdown()
         }
-    }
-    
-    private func startAutoReturnTimer() {
-        guard game.winnerIndex != nil else { return }
-        stopCountdown()
-        autoReturnCountdown = 5
-        autoReturnTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-            Task { @MainActor in
-                if self.autoReturnCountdown > 1 {
-                    self.autoReturnCountdown -= 1
-                } else {
-                    self.stopCountdown()
-                    self.game.returnToLobby()
-                    withAnimation(.spring()) {
-                        self.isGameStarted = false
-                    }
-                }
-            }
-        }
-    }
-    
-    private func stopCountdown() {
-        autoReturnTimer?.invalidate()
-        autoReturnTimer = nil
-        autoReturnCountdown = 5
     }
 }
 
-// MARK: - 22. 控制面板 Sheet
+// MARK: - 21. 控制面板 Sheet
 
 struct PlayerTakeoverSheet: View {
     @ObservedObject var game: GameModel
@@ -3822,23 +3619,17 @@ struct PlayerTakeoverSheet: View {
         NavigationStack {
             List {
                 Section {
-                    if !P2PNetworkManager.shared.isConnected || P2PNetworkManager.shared.isHost {
-                        Button(action: {
-                            game.restartCurrentGame()
-                            dismiss()
-                        }) {
-                            HStack {
-                                Spacer()
-                                Image(systemName: "arrow.clockwise.circle.fill").font(.title3)
-                                Text("重新开始本局").font(.headline).bold()
-                                Spacer()
-                            }
-                            .foregroundColor(.white.opacity(0.9))
+                    Button(action: {
+                        game.restartCurrentGame()
+                        dismiss()
+                    }) {
+                        HStack {
+                            Spacer()
+                            Image(systemName: "arrow.clockwise.circle.fill").font(.title3)
+                            Text("重新开始本局").font(.headline).bold()
+                            Spacer()
                         }
-                    } else {
-                        Text("联机模式下仅房主可重新开始对局")
-                            .font(.caption)
-                            .foregroundColor(.gray)
+                        .foregroundColor(.white.opacity(0.9))
                     }
                 }
                 
@@ -3898,30 +3689,17 @@ struct PlayerTakeoverSheet: View {
     }
 }
 
-// MARK: - 23. 根视图 ContentView (全屏均匀单色渲染背景)
+// MARK: - 22. 根视图 ContentView
 
 struct ContentView: View {
     @StateObject private var game = GameModel()
     @State private var isGameStarted = false
     @State private var isSpinningRandomWheel = false
     
-    // 主菜单界面的单一默认底色
-    private let menuBackgroundColor = Color(red: 0.08, green: 0.12, blue: 0.20)
-    
-    // 游戏对局界面的纯色背景：直接根据当前执子玩家的颜色渲染
-    private var currentGameBackgroundColor: Color {
-        game.colors[safe: game.currentPlayer] ?? menuBackgroundColor
-    }
-    
     var body: some View {
         ZStack {
-            // 全屏均匀单色渲染背景（无 Stack 叠加）
-            FullscreenBackground(
-                color: isGameStarted ? currentGameBackgroundColor : menuBackgroundColor,
-                customImage: game.customBackgroundImage
-            )
-            .animation(.easeInOut(duration: 0.35), value: game.currentPlayer)
-            .animation(.easeInOut(duration: 0.35), value: isGameStarted)
+            Color(red: 0.03, green: 0.05, blue: 0.10)
+                .ignoresSafeArea()
             
             if isGameStarted {
                 GamePlayView(
