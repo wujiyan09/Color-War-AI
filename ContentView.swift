@@ -30,13 +30,17 @@ enum PlayerControlType: String, CaseIterable, Identifiable, Codable {
     case human = "真人"
     case mathNightmare = "算法-噩梦"
     case enhancedNightmare = "算法-噩梦 (加强版)"
-    case p2pNetwork = "网络玩家 (P2P)"
+    case p2pNetwork = "网络玩家"
     case disabled = "未加入"
     
     var id: String { rawValue }
     
     var isAI: Bool {
         self == .mathNightmare || self == .enhancedNightmare
+    }
+    
+    var isEnabled: Bool {
+        self != .disabled
     }
 }
 
@@ -89,7 +93,19 @@ enum AIDifficultyLevel: Int, CaseIterable, Identifiable, Codable {
     }
 }
 
-struct PlayerPreset {
+struct PlayerPreset: Codable, Identifiable {
+    var id: Int
+    var name: String
+    var hexColor: String
+    var emoji: String?
+    var controller: PlayerControlType
+    var isEliminated: Bool = false
+    var hasEntered: Bool = false
+    
+    var color: Color {
+        Color(hex: hexColor)
+    }
+    
     static let maxPlayers = 8
     
     static let defaultColors: [Color] = [
@@ -112,7 +128,6 @@ struct PlayerPreset {
     ]
     
     static let defaultNames = ["玩家1", "玩家2", "玩家3", "玩家4", "玩家5", "玩家6", "玩家7", "玩家8"]
-    
     static let cardCornerRadius: CGFloat = 20.0
 }
 
@@ -139,6 +154,28 @@ struct CompactCellSnapshot: Codable {
     }
 }
 
+// 棋局持久化存档模型
+struct GameSaveArchive: Codable, Identifiable {
+    let id: UUID
+    let date: Date
+    let boardSize: Int
+    let currentPlayer: Int
+    let playerNames: [String]
+    let playerTypes: [PlayerControlType]
+    let colorsHex: [String]
+    let emojis: [String?]
+    let board: [[Cell]]
+    let hasEntered: [Bool]
+    let eliminated: [Bool]
+    
+    var displaySummary: String {
+        let activeCount = playerTypes.filter { $0.isEnabled }.count
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy/MM/dd HH:mm"
+        return "\(boardSize)×\(boardSize) 网格 | \(activeCount)人对局 | \(formatter.string(from: date))"
+    }
+}
+
 struct FlyingOrb: Identifiable, Sendable {
     let id = UUID()
     let player: Int
@@ -158,7 +195,7 @@ struct IdentifiableInt: Identifiable {
     let id: Int
 }
 
-// MARK: - 3. P2P 网络管理器
+// MARK: - 3. 局域网 P2P 网络管理器 (MultipeerConnectivity)
 
 enum P2PAction: String, Codable {
     case hostConfig
@@ -185,7 +222,7 @@ struct P2PPacket: Codable {
     var playerNames: [String]? = nil
     var playerTypes: [PlayerControlType]? = nil
     var colorsHex: [String]? = nil
-    var emojis: [String]? = nil
+    var emojis: [String?]? = nil
     var aiLevelRaw: Int? = nil
     var compactBoardSnapshot: [CompactCellSnapshot]? = nil
     var currentTurnIndex: Int? = nil
@@ -412,7 +449,90 @@ extension P2PNetworkManager: MCSessionDelegate, MCNearbyServiceAdvertiserDelegat
     nonisolated func session(_ session: MCSession, didFinishReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, at localURL: URL?, withError error: Error?) {}
 }
 
-// MARK: - 4. Color 扩展
+// MARK: - 4. 远程 WebSocket 公网中继网络管理器 (Cloudflare Worker)
+
+final class WebSocketNetworkManager: ObservableObject {
+    static let shared = WebSocketNetworkManager()
+    
+    let packetSubject = PassthroughSubject<P2PPacket, Never>()
+    
+    @Published var isConnected: Bool = false
+    @Published var currentRoomCode: String = ""
+    @Published var isHost: Bool = false
+    
+    private var webSocketTask: URLSessionWebSocketTask?
+    
+    private init() {}
+    
+    func connectAndJoinRoom(roomCode: String, isHost: Bool) {
+        self.isHost = isHost
+        self.currentRoomCode = roomCode
+        
+        // 💡 替换为您在 Cloudflare Workers 上部署得到的真实 wss:// 域名
+        let urlString = "wss://colorwar-server.your-subdomain.workers.dev"
+        guard let url = URL(string: urlString) else { return }
+        
+        let session = URLSession(configuration: .default)
+        webSocketTask = session.webSocketTask(with: url)
+        webSocketTask?.resume()
+        
+        self.isConnected = true
+        
+        let joinMessage: [String: String] = [
+            "action": "joinRoom",
+            "roomCode": roomCode
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: joinMessage),
+           let jsonString = String(data: data, encoding: .utf8) {
+            webSocketTask?.send(.string(jsonString)) { error in
+                if let error = error { print("WebSocket 建立房间失败: \(error)") }
+            }
+        }
+        
+        listenForMessages()
+    }
+    
+    func disconnect() {
+        webSocketTask?.cancel(with: .normalClosure, reason: nil)
+        webSocketTask = nil
+        isConnected = false
+        currentRoomCode = ""
+    }
+    
+    func sendPacket(_ packet: P2PPacket) {
+        guard isConnected, let task = webSocketTask else { return }
+        guard let data = try? JSONEncoder().encode(packet),
+              let jsonString = String(data: data, encoding: .utf8) else { return }
+        
+        task.send(.string(jsonString)) { error in
+            if let error = error { print("WebSocket 发送失败: \(error)") }
+        }
+    }
+    
+    private func listenForMessages() {
+        webSocketTask?.receive { [weak self] result in
+            guard let self = self else { return }
+            switch result {
+            case .success(let message):
+                if case .string(let text) = message,
+                   let data = text.data(using: .utf8),
+                   let packet = try? JSONDecoder().decode(P2PPacket.self, from: data) {
+                    DispatchQueue.main.async {
+                        self.packetSubject.send(packet)
+                    }
+                }
+                self.listenForMessages()
+            case .failure(let error):
+                print("WebSocket 连接中断: \(error)")
+                DispatchQueue.main.async {
+                    self.isConnected = false
+                }
+            }
+        }
+    }
+}
+
+// MARK: - 5. Color 扩展
 
 extension Color {
     static let darkNavyBlue = Color(red: 0.08, green: 0.28, blue: 0.65)
@@ -454,7 +574,7 @@ extension Color {
     }
 }
 
-// MARK: - 5. Zobrist 与启发式算力结构
+// MARK: - 6. Zobrist 与启发式算力结构
 
 struct TranspositionTable: Sendable {
     enum EntryType: Sendable { case exact, lowerBound, upperBound }
@@ -535,7 +655,7 @@ enum TacticalRiskMode {
     case desperate
 }
 
-// MARK: - 6. AI 算法引擎
+// MARK: - 7. AI 算法引擎
 
 struct AISolver: Sendable {
     struct SimCell: Sendable {
@@ -1488,7 +1608,7 @@ struct AISolver: Sendable {
     }
 }
 
-// MARK: - 7. GameModel ViewModel
+// MARK: - 8. GameModel ViewModel
 
 @MainActor
 final class GameModel: ObservableObject {
@@ -1539,6 +1659,7 @@ final class GameModel: ObservableObject {
     @Published var isProcessingCascade: Bool = false
     @Published var winnerIndex: Int? = nil
     @Published var showControlSheet: Bool = false
+    @Published var showArchivePickerSheet: Bool = false
     @Published var flyingOrbs: [FlyingOrb] = []
     @Published var emphasizedCells: Set<Int> = []
     @Published var showDisconnectedAlert: Bool = false
@@ -1557,9 +1678,18 @@ final class GameModel: ObservableObject {
     private var actionQueue: [(Int, Int, Int)] = []
     
     private var p2pCancellable: AnyCancellable? = nil
+    private var wsCancellable: AnyCancellable? = nil
     private var disconnectCancellable: AnyCancellable? = nil
     private var aiTask: Task<Void, Never>? = nil
     private var saveWorkItem: DispatchWorkItem? = nil
+    
+    var validPlayerCount: Int {
+        playerTypes.filter { $0.isEnabled }.count
+    }
+    
+    var canStartGame: Bool {
+        validPlayerCount >= 2
+    }
     
     func beginGame() {
         isGameInPlay = true
@@ -1574,28 +1704,23 @@ final class GameModel: ObservableObject {
         self.activePlayerIndices = playerTypes.enumerated().compactMap { $1 != .disabled ? $0 : nil }
     }
     
-    /// ✅ 修复：获取玩家可选角色类型（精准解包单机与联机逻辑，支持本地自由切换）
+    /// ✅ 所有席位均包含 `.disabled` (未加入) 的自由选择权
     func validSelectableTypes(forPlayerIndex idx: Int, isInLobby: Bool = false) -> [PlayerControlType] {
         let isP2PConnected = P2PNetworkManager.shared.isConnected
+        let isWSConnected = WebSocketNetworkManager.shared.isConnected
         
-        // 单机本地模式 (主菜单 setup 界面): 允许选 真人、噩梦AI、噩梦AI(加强)、禁用
-        if !isP2PConnected && !isInLobby && !isGameInPlay {
-            var options: [PlayerControlType] = [.human, .mathNightmare, .enhancedNightmare, .disabled]
-            // 前两位玩家不能选禁用，保证至少有2个玩家
-            if idx < 2 {
-                options.removeAll(where: { $0 == .disabled })
-            }
-            return options
+        // 单机本地模式: 允许所有席位在 真人、算法-噩梦、算法-噩梦(加强版)、未加入 间自由切换
+        if !isP2PConnected && !isWSConnected && !isInLobby && !isGameInPlay {
+            return [.human, .mathNightmare, .enhancedNightmare, .disabled]
         }
         
-        // P2P 联机模式或游戏中面板
         let isSeat0 = (idx == 0)
-        let isMySeat = (isP2PConnected && idx == myPlayerIndex)
+        let isMySeat = (isP2PConnected || isWSConnected) && (idx == myPlayerIndex)
         
         return PlayerControlType.allCases.filter { type in
             if (isSeat0 || isMySeat) && type == .disabled { return false }
             if isGameInPlay { return type == playerTypes[idx] || type.isAI || type == .human }
-            if type == .p2pNetwork { return isP2PConnected || isInLobby }
+            if type == .p2pNetwork { return isP2PConnected || isWSConnected || isInLobby }
             return true
         }
     }
@@ -1664,7 +1789,7 @@ final class GameModel: ObservableObject {
             }
         } else {
             self.playerTypes = [
-                .human, .mathNightmare, .enhancedNightmare, .human,
+                .human, .mathNightmare, .disabled, .disabled,
                 .disabled, .disabled, .disabled, .disabled
             ]
         }
@@ -1702,6 +1827,7 @@ final class GameModel: ObservableObject {
         self.playableCells = []
         
         setupP2PListener()
+        setupWebSocketListener()
         resetGame()
     }
     
@@ -1714,72 +1840,66 @@ final class GameModel: ObservableObject {
         }
     }
     
+    // MARK: - 棋局保存与恢复导入持久化
+    func saveCurrentGameArchive() {
+        let archive = GameSaveArchive(
+            id: UUID(),
+            date: Date(),
+            boardSize: boardSize,
+            currentPlayer: currentPlayer,
+            playerNames: playerNames,
+            playerTypes: playerTypes,
+            colorsHex: colors.map { $0.toHex() },
+            emojis: emojis,
+            board: board,
+            hasEntered: hasEntered,
+            eliminated: eliminated
+        )
+        var list = loadAllArchives()
+        list.insert(archive, at: 0)
+        if let encoded = try? JSONEncoder().encode(list) {
+            UserDefaults.standard.set(encoded, forKey: "CW_Saved_Game_Archives")
+        }
+    }
+    
+    func loadAllArchives() -> [GameSaveArchive] {
+        guard let data = UserDefaults.standard.data(forKey: "CW_Saved_Game_Archives"),
+              let list = try? JSONDecoder().decode([GameSaveArchive].self, from: data) else {
+            return []
+        }
+        return list
+    }
+    
+    func restoreArchive(_ archive: GameSaveArchive) {
+        self.boardSize = archive.boardSize
+        self.currentPlayer = archive.currentPlayer
+        self.playerNames = archive.playerNames
+        self.playerTypes = archive.playerTypes
+        self.colors = archive.colorsHex.map { Color(hex: $0) }
+        self.emojis = archive.emojis
+        self.board = archive.board
+        self.hasEntered = archive.hasEntered
+        self.eliminated = archive.eliminated
+        self.recalculateOrbCounts()
+        self.refreshActivePlayers()
+        self.updateCachedPlayableCells()
+        self.beginGame()
+    }
+    
+    func deleteArchive(at indexSet: IndexSet) {
+        var list = loadAllArchives()
+        list.remove(atOffsets: indexSet)
+        if let encoded = try? JSONEncoder().encode(list) {
+            UserDefaults.standard.set(encoded, forKey: "CW_Saved_Game_Archives")
+        }
+    }
+    
     private func setupP2PListener() {
         p2pCancellable?.cancel()
         p2pCancellable = P2PNetworkManager.shared.packetSubject
             .receive(on: DispatchQueue.main)
             .sink { [weak self] packet in
-                guard let self = self else { return }
-                
-                if packet.action != .ping && packet.action != .ack {
-                    guard packet.sequenceID > self.lastReceivedSeqID else { return }
-                    self.lastReceivedSeqID = packet.sequenceID
-                }
-                
-                switch packet.action {
-                case .playerMove:
-                    if let r = packet.row, let c = packet.col, let pIdx = packet.playerIndex {
-                        self.enqueueNetworkMove(row: r, column: c, player: pIdx)
-                    }
-                    
-                case .syncRequest:
-                    if P2PNetworkManager.shared.isHost {
-                        self.broadcastFullStateSnapshot()
-                    }
-                    
-                case .hostConfig:
-                    if let names = packet.playerNames { self.playerNames = names }
-                    if let types = packet.playerTypes { self.playerTypes = types }
-                    if let hexes = packet.colorsHex { self.colors = hexes.map { Color(hex: $0) } }
-                    if let ems = packet.emojis { self.emojis = ems.map { $0.isEmpty ? nil : $0 } }
-                    if let sz = packet.boardSize { self.boardSize = sz }
-                    if let rnd = packet.isRandomFirstPlayer { self.isRandomFirstPlayer = rnd }
-                    if let aiLvl = packet.aiLevelRaw, let level = AIDifficultyLevel(rawValue: aiLvl) { self.aiDifficultyLevel = level }
-                    
-                case .startGame:
-                    if let firstP = packet.firstPlayerIndex {
-                        self.resetGame(chosenFirstPlayer: firstP)
-                        self.beginGame()
-                        self.shouldNavigateToGame = true
-                    }
-                    
-                case .stateSnapshot:
-                    if let names = packet.playerNames { self.playerNames = names }
-                    if let types = packet.playerTypes { self.playerTypes = types }
-                    
-                    if let compactSnap = packet.compactBoardSnapshot, let turnP = packet.currentTurnIndex {
-                        var grid = [[Cell]](repeating: [Cell](repeating: Cell(owner: nil, count: 0), count: self.boardSize), count: self.boardSize)
-                        for item in compactSnap {
-                            let r = Int(item.r)
-                            let c = Int(item.c)
-                            if r < self.boardSize && c < self.boardSize {
-                                grid[r][c] = Cell(owner: item.owner < 0 ? nil : Int(item.owner), count: Int(item.count))
-                            }
-                        }
-                        self.board = grid
-                        if let entered = packet.hasEnteredSnapshot { self.hasEntered = entered }
-                        if let elim = packet.eliminatedSnapshot { self.eliminated = elim }
-                        self.recalculateOrbCounts()
-                        self.currentPlayer = turnP
-                        
-                        if P2PNetworkManager.shared.isHost {
-                            self.checkAndRunAITurn()
-                        }
-                    }
-                    
-                default:
-                    break
-                }
+                self?.handleIncomingPacket(packet)
             }
         
         disconnectCancellable?.cancel()
@@ -1806,21 +1926,103 @@ final class GameModel: ObservableObject {
             }
     }
     
+    private func setupWebSocketListener() {
+        wsCancellable?.cancel()
+        wsCancellable = WebSocketNetworkManager.shared.packetSubject
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] packet in
+                self?.handleIncomingPacket(packet)
+            }
+    }
+    
+    private func handleIncomingPacket(_ packet: P2PPacket) {
+        if packet.action != .ping && packet.action != .ack {
+            guard packet.sequenceID > self.lastReceivedSeqID else { return }
+            self.lastReceivedSeqID = packet.sequenceID
+        }
+        
+        switch packet.action {
+        case .playerMove:
+            if let r = packet.row, let c = packet.col, let pIdx = packet.playerIndex {
+                self.enqueueNetworkMove(row: r, column: c, player: pIdx)
+            }
+            
+        case .syncRequest:
+            if P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost {
+                self.broadcastFullStateSnapshot()
+            }
+            
+        case .hostConfig:
+            if let names = packet.playerNames { self.playerNames = names }
+            if let types = packet.playerTypes { self.playerTypes = types }
+            if let hexes = packet.colorsHex { self.colors = hexes.map { Color(hex: $0) } }
+            if let ems = packet.emojis { self.emojis = ems }
+            if let sz = packet.boardSize { self.boardSize = sz }
+            if let rnd = packet.isRandomFirstPlayer { self.isRandomFirstPlayer = rnd }
+            if let aiLvl = packet.aiLevelRaw, let level = AIDifficultyLevel(rawValue: aiLvl) { self.aiDifficultyLevel = level }
+            
+        case .startGame:
+            if let firstP = packet.firstPlayerIndex {
+                self.resetGame(chosenFirstPlayer: firstP)
+                self.beginGame()
+                self.shouldNavigateToGame = true
+            }
+            
+        case .stateSnapshot:
+            if let names = packet.playerNames { self.playerNames = names }
+            if let types = packet.playerTypes { self.playerTypes = types }
+            
+            if let compactSnap = packet.compactBoardSnapshot, let turnP = packet.currentTurnIndex {
+                var grid = [[Cell]](repeating: [Cell](repeating: Cell(owner: nil, count: 0), count: self.boardSize), count: self.boardSize)
+                for item in compactSnap {
+                    let r = Int(item.r)
+                    let c = Int(item.c)
+                    if r < self.boardSize && c < self.boardSize {
+                        grid[r][c] = Cell(owner: item.owner < 0 ? nil : Int(item.owner), count: Int(item.count))
+                    }
+                }
+                self.board = grid
+                if let entered = packet.hasEnteredSnapshot { self.hasEntered = entered }
+                if let elim = packet.eliminatedSnapshot { self.eliminated = elim }
+                self.recalculateOrbCounts()
+                self.currentPlayer = turnP
+                
+                if P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost {
+                    self.checkAndRunAITurn()
+                }
+            }
+            
+        default:
+            break
+        }
+    }
+    
     func syncRoomConfigToPeers() {
-        guard P2PNetworkManager.shared.isHost && P2PNetworkManager.shared.isConnected else { return }
-        var packet = P2PPacket(sequenceID: P2PNetworkManager.shared.getNextSequenceID(), action: .hostConfig, senderID: P2PNetworkManager.shared.myNickname)
+        let isHost = P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost
+        let isConn = P2PNetworkManager.shared.isConnected || WebSocketNetworkManager.shared.isConnected
+        guard isHost && isConn else { return }
+        
+        let seq = P2PNetworkManager.shared.isConnected ? P2PNetworkManager.shared.getNextSequenceID() : UInt64.random(in: 1...999999)
+        var packet = P2PPacket(sequenceID: seq, action: .hostConfig, senderID: P2PNetworkManager.shared.myNickname)
         packet.boardSize = boardSize
         packet.isRandomFirstPlayer = isRandomFirstPlayer
         packet.playerNames = playerNames
         packet.playerTypes = playerTypes
         packet.colorsHex = colors.map { $0.toHex() }
-        packet.emojis = emojis.map { $0 ?? "" }
+        packet.emojis = emojis
         packet.aiLevelRaw = aiDifficultyLevel.rawValue
-        P2PNetworkManager.shared.sendPacket(packet)
+        
+        if P2PNetworkManager.shared.isConnected {
+            P2PNetworkManager.shared.sendPacket(packet)
+        } else if WebSocketNetworkManager.shared.isConnected {
+            WebSocketNetworkManager.shared.sendPacket(packet)
+        }
     }
     
     private func broadcastFullStateSnapshot() {
-        guard P2PNetworkManager.shared.isHost && P2PNetworkManager.shared.isConnected else { return }
+        let isHost = P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost
+        let isConn = P2PNetworkManager.shared.isConnected || WebSocketNetworkManager.shared.isConnected
+        guard isHost && isConn else { return }
         
         var compactList = [CompactCellSnapshot]()
         for r in 0..<boardSize {
@@ -1832,14 +2034,20 @@ final class GameModel: ObservableObject {
             }
         }
         
-        var packet = P2PPacket(sequenceID: P2PNetworkManager.shared.getNextSequenceID(), action: .stateSnapshot, senderID: P2PNetworkManager.shared.myNickname)
+        let seq = P2PNetworkManager.shared.isConnected ? P2PNetworkManager.shared.getNextSequenceID() : UInt64.random(in: 1...999999)
+        var packet = P2PPacket(sequenceID: seq, action: .stateSnapshot, senderID: P2PNetworkManager.shared.myNickname)
         packet.playerNames = playerNames
         packet.playerTypes = playerTypes
         packet.compactBoardSnapshot = compactList
         packet.currentTurnIndex = currentPlayer
         packet.hasEnteredSnapshot = hasEntered
         packet.eliminatedSnapshot = eliminated
-        P2PNetworkManager.shared.sendPacket(packet)
+        
+        if P2PNetworkManager.shared.isConnected {
+            P2PNetworkManager.shared.sendPacket(packet)
+        } else if WebSocketNetworkManager.shared.isConnected {
+            WebSocketNetworkManager.shared.sendPacket(packet)
+        }
     }
     
     private func debounceSave() {
@@ -1920,10 +2128,17 @@ final class GameModel: ObservableObject {
             currentPlayer = active[0]
         }
         
-        if P2PNetworkManager.shared.isHost && P2PNetworkManager.shared.isConnected {
-            var startPacket = P2PPacket(sequenceID: P2PNetworkManager.shared.getNextSequenceID(), action: .startGame, senderID: P2PNetworkManager.shared.myNickname)
+        let isHost = P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost
+        let isConn = P2PNetworkManager.shared.isConnected || WebSocketNetworkManager.shared.isConnected
+        if isHost && isConn {
+            let seq = P2PNetworkManager.shared.isConnected ? P2PNetworkManager.shared.getNextSequenceID() : UInt64.random(in: 1...999999)
+            var startPacket = P2PPacket(sequenceID: seq, action: .startGame, senderID: P2PNetworkManager.shared.myNickname)
             startPacket.firstPlayerIndex = currentPlayer
-            P2PNetworkManager.shared.sendPacket(startPacket)
+            if P2PNetworkManager.shared.isConnected {
+                P2PNetworkManager.shared.sendPacket(startPacket)
+            } else if WebSocketNetworkManager.shared.isConnected {
+                WebSocketNetworkManager.shared.sendPacket(startPacket)
+            }
         }
         
         updateCachedPlayableCells()
@@ -1948,6 +2163,7 @@ final class GameModel: ObservableObject {
         winnerIndex = nil
         activeOnlineMode = .none
         P2PNetworkManager.shared.stopP2P()
+        WebSocketNetworkManager.shared.disconnect()
     }
     
     func updatePlayerType(at index: Int, to newType: PlayerControlType, forceInternal: Bool = false) {
@@ -1976,17 +2192,24 @@ final class GameModel: ObservableObject {
         guard !isProcessingCascade, winnerIndex == nil, playableCells.contains(flatIdx) else { return }
         
         let player = currentPlayer
-        let isP2P = P2PNetworkManager.shared.isConnected
+        let isConn = P2PNetworkManager.shared.isConnected || WebSocketNetworkManager.shared.isConnected
+        let isHost = P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost
         
-        if isP2P {
-            let isMyTurnToControl = (playerTypes[player] == .human && myPlayerIndex == player) || (P2PNetworkManager.shared.isHost && playerTypes[player].isAI)
+        if isConn {
+            let isMyTurnToControl = (playerTypes[player] == .human && myPlayerIndex == player) || (isHost && playerTypes[player].isAI)
             guard isMyTurnToControl else { return }
             
-            var packet = P2PPacket(sequenceID: P2PNetworkManager.shared.getNextSequenceID(), action: .playerMove, senderID: P2PNetworkManager.shared.myNickname)
+            let seq = P2PNetworkManager.shared.isConnected ? P2PNetworkManager.shared.getNextSequenceID() : UInt64.random(in: 1...999999)
+            var packet = P2PPacket(sequenceID: seq, action: .playerMove, senderID: P2PNetworkManager.shared.myNickname)
             packet.row = row
             packet.col = column
             packet.playerIndex = player
-            P2PNetworkManager.shared.sendPacket(packet)
+            
+            if P2PNetworkManager.shared.isConnected {
+                P2PNetworkManager.shared.sendPacket(packet)
+            } else if WebSocketNetworkManager.shared.isConnected {
+                WebSocketNetworkManager.shared.sendPacket(packet)
+            }
         } else {
             guard playerTypes[player] == .human || playerTypes[player].isAI else { return }
         }
@@ -2197,7 +2420,9 @@ final class GameModel: ObservableObject {
         
         guard isGameInPlay else { return }
         
-        if P2PNetworkManager.shared.isConnected && !P2PNetworkManager.shared.isHost {
+        let isP2P = P2PNetworkManager.shared.isConnected
+        let isWS = WebSocketNetworkManager.shared.isConnected
+        if (isP2P && !P2PNetworkManager.shared.isHost) || (isWS && !WebSocketNetworkManager.shared.isHost) {
             return
         }
         
@@ -2252,7 +2477,7 @@ final class GameModel: ObservableObject {
     }
 }
 
-// MARK: - 8. 玩家进度 View
+// MARK: - 9. 玩家进度 View
 
 struct PlayerProgressOrbView: View {
     @ObservedObject var game: GameModel
@@ -2314,7 +2539,7 @@ struct PlayerProgressOrbView: View {
     }
 }
 
-// MARK: - 9. 棋盘 View
+// MARK: - 10. 棋盘 View
 
 struct BoardView: View {
     @ObservedObject var game: GameModel
@@ -2416,7 +2641,7 @@ struct BoardView: View {
     }
 }
 
-// MARK: - 10. 单元格 (Equatable)
+// MARK: - 11. 单元格 (Equatable)
 
 struct CellView: View, Equatable {
     let cell: Cell
@@ -2455,7 +2680,7 @@ struct CellView: View, Equatable {
     }
 }
 
-// MARK: - 11. 棋子 View
+// MARK: - 12. 棋子 View
 
 struct PieceView: View {
     let color: Color
@@ -2500,7 +2725,7 @@ struct PieceView: View {
     }
 }
 
-// MARK: - 12. 棋子点阵 View
+// MARK: - 13. 棋子点阵 View
 
 struct DotPattern: View {
     let count: Int
@@ -2562,7 +2787,7 @@ struct DotPattern: View {
     }
 }
 
-// MARK: - 13. Emoji 选择器 Sheet
+// MARK: - 14. Emoji 选择器 Sheet
 
 struct EmojiPickerSheet: View {
     @ObservedObject var game: GameModel
@@ -2674,16 +2899,12 @@ extension Array {
     }
 }
 
-// MARK: - 14. 单机设置 View
+// MARK: - 15. Tab 0: 单机设置 View
 
 struct LocalGameSetupView: View {
     @ObservedObject var game: GameModel
     let onStartGame: () -> Void
     @State private var selectedPlayerForEmoji: IdentifiableInt? = nil
-    
-    var isPlayerCountValid: Bool {
-        game.activePlayerIndices.count >= 2
-    }
     
     @ViewBuilder
     private var playerRowsContent: some View {
@@ -2719,6 +2940,7 @@ struct LocalGameSetupView: View {
                     
                     Spacer(minLength: 4)
                     
+                    // 所有席位均允许自由选择包含 "未加入" 的所有类型
                     Picker("控制类型", selection: Binding(
                         get: { game.playerTypes[safe: idx] ?? .disabled },
                         set: { game.updatePlayerType(at: idx, to: $0) }
@@ -2807,20 +3029,23 @@ struct LocalGameSetupView: View {
             }
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
-            Button(action: onStartGame) {
+            // 开局按钮：<2人时变灰但保留 .interactive() 点击响应（点击后内部拦截开局逻辑）
+            Button(action: {
+                guard game.canStartGame else { return }
+                onStartGame()
+            }) {
                 HStack {
                     Image(systemName: "play.fill")
-                    Text("开始对决").font(.title3).bold()
+                    Text("开始对决 (\(game.validPlayerCount) 人)").font(.title3).bold()
                 }
                 .foregroundColor(.white)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
                 .contentShape(Capsule())
-                .glassEffect(.regular.tint(.darkNavyBlue).interactive(), in: .capsule)
+                .glassEffect(.regular.tint(game.canStartGame ? .darkNavyBlue : .gray).interactive(), in: .capsule)
             }
             .buttonStyle(.plain)
-            .opacity(isPlayerCountValid ? 1.0 : 0.4)
-            .disabled(!isPlayerCountValid)
+            .opacity(game.canStartGame ? 1.0 : 0.4)
         }
         .sheet(item: $selectedPlayerForEmoji) { item in
             EmojiPickerSheet(game: game, playerIndex: item.id)
@@ -2828,7 +3053,7 @@ struct LocalGameSetupView: View {
     }
 }
 
-// MARK: - 15. 本地搜寻 Inline View
+// MARK: - 16. Tab 1: 局域网 P2P Setup View
 
 struct LocalDeviceBrowserInlineView: View {
     @ObservedObject var p2pManager = P2PNetworkManager.shared
@@ -2926,71 +3151,163 @@ struct LocalDeviceBrowserInlineView: View {
     }
 }
 
-// MARK: - 16. 联机大厅 View
+// MARK: - 17. Tab 2: 远程 WebSocket Setup View
+
+struct RemoteWebSocketSetupView: View {
+    @ObservedObject var game: GameModel
+    @ObservedObject var wsManager = WebSocketNetworkManager.shared
+    let onStartGame: () -> Void
+    
+    @State private var inputRoomCode: String = ""
+    
+    var body: some View {
+        VStack(spacing: 12) {
+            if wsManager.isConnected {
+                VStack(spacing: 12) {
+                    HStack {
+                        Text("暗号房间: \(wsManager.currentRoomCode)")
+                            .font(.title3.bold())
+                            .foregroundColor(.cyan)
+                        Spacer()
+                        Button("解散/离开") {
+                            wsManager.disconnect()
+                        }
+                        .font(.subheadline)
+                        .foregroundColor(.red)
+                    }
+                    .padding(10)
+                    .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+                    
+                    RoomLobbyView(game: game, onExitLobby: { wsManager.disconnect() }, onStartGame: onStartGame)
+                }
+            } else {
+                VStack(spacing: 14) {
+                    Text("🌍 远程 4G/5G 房间暗号连线")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                    
+                    TextField("输入 6 位数字房间暗号", text: $inputRoomCode)
+                        .textFieldStyle(.roundedBorder)
+                        .keyboardType(.numberPad)
+                        .multilineTextAlignment(.center)
+                    
+                    HStack(spacing: 12) {
+                        Button(action: {
+                            let randomCode = String(Int.random(in: 100000...999999))
+                            inputRoomCode = randomCode
+                            game.myPlayerIndex = 0
+                            game.playerNames[0] = P2PNetworkManager.shared.myNickname
+                            wsManager.connectAndJoinRoom(roomCode: randomCode, isHost: true)
+                        }) {
+                            Text("创建房间")
+                                .bold()
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                                .contentShape(Capsule())
+                                .glassEffect(.regular.tint(.darkNavyBlue).interactive(), in: .capsule)
+                        }
+                        .buttonStyle(.plain)
+                        
+                        Button(action: {
+                            game.myPlayerIndex = 1
+                            game.playerNames[1] = P2PNetworkManager.shared.myNickname
+                            wsManager.connectAndJoinRoom(roomCode: inputRoomCode, isHost: false)
+                        }) {
+                            Text("加入房间")
+                                .bold()
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                                .contentShape(Capsule())
+                                .glassEffect(.regular.interactive(), in: .capsule)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(inputRoomCode.count < 4)
+                        .opacity(inputRoomCode.count >= 4 ? 1.0 : 0.5)
+                    }
+                }
+                .padding()
+                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+            }
+        }
+    }
+}
+
+// MARK: - 18. 动态房间大厅 (Lobby) View
 
 struct RoomLobbyView: View {
     @ObservedObject var game: GameModel
     @ObservedObject var p2pManager = P2PNetworkManager.shared
+    @ObservedObject var wsManager = WebSocketNetworkManager.shared
+    
     let onExitLobby: () -> Void
     let onStartGame: () -> Void
     
     @State private var selectedPlayerForEmoji: IdentifiableInt? = nil
     
+    var isHost: Bool {
+        p2pManager.isHost || wsManager.isHost
+    }
+    
     @ViewBuilder
     private var roomPlayerRowsContent: some View {
         VStack(spacing: 8) {
-            ForEach(0..<min(game.playerNames.count, 4), id: \.self) { idx in
+            ForEach(0..<min(game.playerNames.count, PlayerPreset.maxPlayers), id: \.self) { idx in
                 let isMySeat = (idx == game.myPlayerIndex)
+                let pType = game.playerTypes[safe: idx] ?? .disabled
                 
-                HStack {
-                    Button(action: {
-                        if isMySeat { selectedPlayerForEmoji = IdentifiableInt(id: idx) }
-                    }) {
-                        ZStack {
-                            Circle()
-                                .fill(game.colors[safe: idx] ?? .gray)
-                                .frame(width: 26, height: 26)
-                            
-                            if let em = game.emojis[safe: idx], let emoji = em {
-                                Text(emoji).font(.caption2)
+                if pType != .disabled || isHost {
+                    HStack {
+                        Button(action: {
+                            if isMySeat { selectedPlayerForEmoji = IdentifiableInt(id: idx) }
+                        }) {
+                            ZStack {
+                                Circle()
+                                    .fill(game.colors[safe: idx] ?? .gray)
+                                    .frame(width: 26, height: 26)
+                                
+                                if let em = game.emojis[safe: idx], let emoji = em {
+                                    Text(emoji).font(.caption2)
+                                }
                             }
                         }
-                    }
-                    .disabled(!isMySeat)
-                    
-                    if isMySeat {
-                        ColorPicker("", selection: Binding(
-                            get: { game.colors[safe: idx] ?? .red },
-                            set: { game.updatePlayerColor(at: idx, newColor: $0) }
-                        ))
-                        .labelsHidden()
-                    }
-                    
-                    Text((game.playerNames[safe: idx] ?? "玩家\(idx+1)") + (isMySeat ? " (我)" : ""))
-                        .font(.subheadline)
-                        .bold()
-                        .foregroundColor(isMySeat ? .cyan : .white)
-                    
-                    Spacer()
-                    
-                    if p2pManager.isHost {
-                        Picker("", selection: Binding(
-                            get: { game.playerTypes[safe: idx] ?? .disabled },
-                            set: { game.updatePlayerType(at: idx, to: $0) }
-                        )) {
-                            ForEach(game.validSelectableTypes(forPlayerIndex: idx, isInLobby: true)) { type in
-                                Text(type.rawValue).tag(type)
-                            }
+                        .disabled(!isMySeat)
+                        
+                        if isMySeat {
+                            ColorPicker("", selection: Binding(
+                                get: { game.colors[safe: idx] ?? .red },
+                                set: { game.updatePlayerColor(at: idx, newColor: $0) }
+                            ))
+                            .labelsHidden()
                         }
-                        .pickerStyle(.menu)
-                        .tint(.white)
-                    } else {
-                        Text((game.playerTypes[safe: idx] ?? .disabled).rawValue)
-                            .font(.caption)
-                            .foregroundColor(.gray)
+                        
+                        Text((game.playerNames[safe: idx] ?? "玩家\(idx+1)") + (isMySeat ? " (我)" : ""))
+                            .font(.subheadline)
+                            .bold()
+                            .foregroundColor(isMySeat ? .cyan : .white)
+                        
+                        Spacer()
+                        
+                        if isHost {
+                            Picker("", selection: Binding(
+                                get: { game.playerTypes[safe: idx] ?? .disabled },
+                                set: { game.updatePlayerType(at: idx, to: $0) }
+                            )) {
+                                ForEach(game.validSelectableTypes(forPlayerIndex: idx, isInLobby: true)) { type in
+                                    Text(type.rawValue).tag(type)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .tint(.white)
+                        } else {
+                            Text(pType.rawValue)
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                        }
                     }
+                    .padding(8)
                 }
-                .padding(8)
             }
         }
         .padding(6)
@@ -2998,25 +3315,7 @@ struct RoomLobbyView: View {
     
     var body: some View {
         VStack(spacing: 12) {
-            HStack {
-                Text(p2pManager.isHost ? "🏠 房主房间: \(p2pManager.myNickname)" : "🔗 已加入房间: \(p2pManager.hostDeviceName)")
-                    .font(.headline)
-                    .foregroundColor(.white)
-                Spacer()
-                Button(action: {
-                    p2pManager.stopP2P()
-                    onExitLobby()
-                }) {
-                    Text(p2pManager.isHost ? "解散房间" : "退出房间")
-                        .font(.subheadline)
-                        .bold()
-                        .foregroundColor(.white.opacity(0.8))
-                }
-            }
-            .padding(10)
-            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
-            
-            if p2pManager.isHost {
+            if isHost {
                 VStack(spacing: 8) {
                     HStack {
                         Text("网格尺寸: \(game.boardSize) × \(game.boardSize)")
@@ -3043,17 +3342,6 @@ struct RoomLobbyView: View {
                 }
                 .padding(10)
                 .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
-            } else {
-                HStack {
-                    Text("房主设定尺寸: \(game.boardSize) × \(game.boardSize)")
-                    Spacer()
-                    Text(game.isRandomFirstPlayer ? "随机先手" : "顺序先手")
-                }
-                .font(.caption)
-                .bold()
-                .foregroundColor(.cyan)
-                .padding(10)
-                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             }
             
             ViewThatFits(in: .vertical) {
@@ -3066,21 +3354,40 @@ struct RoomLobbyView: View {
             }
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
-            if p2pManager.isHost {
-                Button(action: onStartGame) {
+            if isHost {
+                Button(action: {
+                    if let disabledIdx = game.playerTypes.firstIndex(of: .disabled) {
+                        game.playerNames[disabledIdx] = "AI 助手 \(disabledIdx)"
+                        game.updatePlayerType(at: disabledIdx, to: .mathNightmare)
+                    }
+                }) {
+                    HStack {
+                        Image(systemName: "plus.circle.fill")
+                        Text("添加 AI 人机补位")
+                    }
+                    .font(.subheadline.bold())
+                    .foregroundColor(.cyan)
+                    .padding(.vertical, 4)
+                }
+                
+                Button(action: {
+                    guard game.canStartGame else { return }
+                    onStartGame()
+                }) {
                     HStack {
                         Image(systemName: "play.fill")
-                        Text("全员开始对决").bold()
+                        Text("全员开始对决 (\(game.validPlayerCount) 人)").bold()
                     }
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
                     .contentShape(Capsule())
-                    .glassEffect(.regular.tint(.darkNavyBlue).interactive(), in: .capsule)
+                    .glassEffect(.regular.tint(game.canStartGame ? .darkNavyBlue : .gray).interactive(), in: .capsule)
                 }
                 .buttonStyle(.plain)
+                .opacity(game.canStartGame ? 1.0 : 0.4)
             } else {
-                Text("等待房主 \(p2pManager.hostDeviceName) 启动对局...")
+                Text("等待房主启动对局...")
                     .font(.subheadline)
                     .foregroundColor(.cyan)
                     .padding(.vertical, 6)
@@ -3092,13 +3399,14 @@ struct RoomLobbyView: View {
     }
 }
 
-// MARK: - 17. 联机 Setup View
+// MARK: - 19. 联机综合 Setup View
 
 enum ActiveOnlineMode {
     case none
     case localHost
     case localSearching
     case localJoined
+    case remoteWS
 }
 
 struct OnlineGameSetupView: View {
@@ -3106,7 +3414,6 @@ struct OnlineGameSetupView: View {
     @ObservedObject var p2pManager = P2PNetworkManager.shared
     let onStartGame: () -> Void
     
-    @State private var showAlertError: Bool = false
     @State private var p2pConnectionSubscription: AnyCancellable? = nil
     
     var body: some View {
@@ -3138,7 +3445,7 @@ struct OnlineGameSetupView: View {
             } else {
                 VStack(spacing: 12) {
                     HStack {
-                        Text("🌐 本地局域网联机")
+                        Text("🌐 本地局域网 P2P 联机")
                             .font(.headline)
                             .foregroundColor(.white)
                         Spacer()
@@ -3200,22 +3507,16 @@ struct OnlineGameSetupView: View {
                                 game.activeOnlineMode = .none
                             }
                         )
-                        .transition(.opacity.combined(with: .move(edge: .top)))
                     }
                 }
                 .padding()
                 .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             }
         }
-        .alert("连接失败", isPresented: $showAlertError) {
-            Button("确定", role: .cancel) { }
-        } message: {
-            Text("房间不存在或网络连接超时！")
-        }
     }
 }
 
-// MARK: - 18. 主菜单 View
+// MARK: - 20. 主菜单 View
 
 struct StartMenuView: View {
     @ObservedObject var game: GameModel
@@ -3228,6 +3529,10 @@ struct StartMenuView: View {
     var body: some View {
         NavigationStack {
             ZStack {
+                // 统一全屏均匀背景（保持一致深暗黑色调）
+                Color(red: 0.03, green: 0.05, blue: 0.10)
+                    .ignoresSafeArea()
+                
                 if let customImg = game.customBackgroundImage {
                     Image(uiImage: customImg)
                         .resizable()
@@ -3235,16 +3540,6 @@ struct StartMenuView: View {
                         .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
                         .ignoresSafeArea()
                         .overlay(Color.black.opacity(0.35))
-                } else {
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.08, green: 0.28, blue: 0.65).opacity(0.85),
-                            Color(red: 0.03, green: 0.05, blue: 0.10)
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                    .ignoresSafeArea()
                 }
                 
                 VStack(spacing: 0) {
@@ -3253,24 +3548,23 @@ struct StartMenuView: View {
                     VStack(spacing: 16) {
                         Text("COLOR WAR")
                             .font(.system(size: 36, weight: .black, design: .rounded))
-                            .foregroundStyle(
-                                LinearGradient(
-                                    colors: [.white, .white.opacity(0.7)],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                )
-                            )
+                            .foregroundColor(.white)
                         
                         if selectedTab == 0 {
                             LocalGameSetupView(game: game) {
                                 isSpinningRandomWheel = true
                             }
-                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
-                        } else {
+                            .transition(.opacity)
+                        } else if selectedTab == 1 {
                             OnlineGameSetupView(game: game) {
                                 isSpinningRandomWheel = true
                             }
-                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                            .transition(.opacity)
+                        } else {
+                            RemoteWebSocketSetupView(game: game) {
+                                isSpinningRandomWheel = true
+                            }
+                            .transition(.opacity)
                         }
                     }
                     .frame(maxWidth: 440)
@@ -3280,13 +3574,28 @@ struct StartMenuView: View {
                 .padding(.horizontal, 20)
             }
             .toolbar {
+                // 左上角“导入”历史存档按钮
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(action: {
+                        game.showArchivePickerSheet = true
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "square.and.arrow.down")
+                            Text("导入")
+                        }
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.cyan)
+                    }
+                }
+                
                 ToolbarItem(placement: .principal) {
                     Picker("Game Mode", selection: $selectedTab) {
                         Text("单机模式").tag(0)
-                        Text("P2P 联机").tag(1)
+                        Text("局域网 P2P").tag(1)
+                        Text("远程公网").tag(2)
                     }
                     .pickerStyle(.segmented)
-                    .frame(width: 200)
+                    .frame(width: 260)
                 }
                 
                 ToolbarItem(placement: .topBarTrailing) {
@@ -3312,6 +3621,9 @@ struct StartMenuView: View {
                 }
             }
             .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhotosItem, matching: .images)
+            .sheet(isPresented: $game.showArchivePickerSheet) {
+                ArchivePickerSheet(game: game)
+            }
             .onChange(of: selectedPhotosItem) { _, newItem in
                 guard let newItem = newItem else { return }
                 Task {
@@ -3323,18 +3635,13 @@ struct StartMenuView: View {
                     }
                 }
             }
-            .onChange(of: selectedTab) { _, newTab in
-                if newTab == 0 && !P2PNetworkManager.shared.isConnected {
-                    P2PNetworkManager.shared.stopP2P()
-                }
-            }
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
         }
     }
 }
 
-// MARK: - 19. 轮盘 Overlay
+// MARK: - 21. 轮盘 Overlay
 
 struct RandomPlayerWheelOverlay: View {
     @ObservedObject var game: GameModel
@@ -3428,7 +3735,7 @@ struct RandomPlayerWheelOverlay: View {
     }
 }
 
-// MARK: - 20. 游戏对局 View
+// MARK: - 22. 游戏对局 View (背景冻结，保持均匀纯暗色)
 
 struct GamePlayView: View {
     @ObservedObject var game: GameModel
@@ -3439,6 +3746,10 @@ struct GamePlayView: View {
     
     var body: some View {
         ZStack {
+            // 全屏均匀一致暗色背景 (零颜色变幻改动)
+            Color(red: 0.03, green: 0.05, blue: 0.10)
+                .ignoresSafeArea()
+            
             if let customImg = game.customBackgroundImage {
                 Image(uiImage: customImg)
                     .resizable()
@@ -3446,17 +3757,6 @@ struct GamePlayView: View {
                     .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
                     .ignoresSafeArea()
                     .overlay(Color.black.opacity(0.35))
-            } else {
-                LinearGradient(
-                    colors: [
-                        (game.colors[safe: game.currentPlayer] ?? .blue).opacity(0.35),
-                        Color(red: 0.03, green: 0.05, blue: 0.10)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .ignoresSafeArea()
-                .animation(.easeInOut(duration: 0.8), value: game.currentPlayer)
             }
             
             VStack(spacing: 8) {
@@ -3475,7 +3775,6 @@ struct GamePlayView: View {
                             .glassEffect(.regular.interactive(), in: .circle)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("返回菜单")
                     
                     Spacer()
                     
@@ -3609,16 +3908,40 @@ struct GamePlayView: View {
     }
 }
 
-// MARK: - 21. 控制面板 Sheet
+// MARK: - 23. 控制面板 Sheet (内置“保存当前棋局”入口)
 
 struct PlayerTakeoverSheet: View {
     @ObservedObject var game: GameModel
     @Environment(\.dismiss) private var dismiss
+    @State private var showSavedToast: Bool = false
     
     var body: some View {
         NavigationStack {
             List {
                 Section {
+                    Button(action: {
+                        game.saveCurrentGameArchive()
+                        showSavedToast = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            showSavedToast = false
+                        }
+                    }) {
+                        HStack {
+                            Spacer()
+                            Image(systemName: "square.and.arrow.down.fill").font(.title3)
+                            Text("💾 保存当前棋局到本地").font(.headline).bold()
+                            Spacer()
+                        }
+                        .foregroundColor(.cyan)
+                    }
+                    
+                    if showSavedToast {
+                        Text("✅ 棋局已成功保存！")
+                            .font(.caption)
+                            .foregroundColor(.green)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                    }
+                    
                     Button(action: {
                         game.restartCurrentGame()
                         dismiss()
@@ -3659,7 +3982,7 @@ struct PlayerTakeoverSheet: View {
                     .padding(.vertical, 4)
                 }
                 
-                Section(header: Text("实时接管控制（AI / P2P 代打）")) {
+                Section(header: Text("实时接管控制（AI / 人类代打）")) {
                     ForEach(game.activePlayerIndices, id: \.self) { idx in
                         HStack {
                             Circle().fill(game.colors[safe: idx] ?? .gray).frame(width: 16, height: 16)
@@ -3689,7 +4012,74 @@ struct PlayerTakeoverSheet: View {
     }
 }
 
-// MARK: - 22. 根视图 ContentView
+// MARK: - 24. 历史存档恢复导入 Sheet
+
+struct ArchivePickerSheet: View {
+    @ObservedObject var game: GameModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var archives: [GameSaveArchive] = []
+    
+    var body: some View {
+        NavigationStack {
+            List {
+                if archives.isEmpty {
+                    Text("暂无保存的历史棋局存档")
+                        .foregroundColor(.gray)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding()
+                } else {
+                    ForEach(archives) { archive in
+                        Button(action: {
+                            game.restoreArchive(archive)
+                            dismiss()
+                            game.shouldNavigateToGame = true
+                        }) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(archive.displaySummary)
+                                    .font(.headline)
+                                    .foregroundColor(.white)
+                                
+                                HStack(spacing: 8) {
+                                    ForEach(0..<archive.playerTypes.count, id: \.self) { idx in
+                                        if archive.playerTypes[idx].isEnabled {
+                                            HStack(spacing: 2) {
+                                                Circle()
+                                                    .fill(Color(hex: archive.colorsHex[safe: idx] ?? "#FFFFFF"))
+                                                    .frame(width: 10, height: 10)
+                                                if let em = archive.emojis[safe: idx], let emoji = em {
+                                                    Text(emoji).font(.caption2)
+                                                }
+                                                Text(archive.playerNames[safe: idx] ?? "玩家")
+                                                    .font(.caption2)
+                                                    .foregroundColor(.gray)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                    .onDelete { indexSet in
+                        game.deleteArchive(at: indexSet)
+                        archives = game.loadAllArchives()
+                    }
+                }
+            }
+            .navigationTitle("恢复历史对局")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                Button("关闭") { dismiss() }
+            }
+            .onAppear {
+                archives = game.loadAllArchives()
+            }
+        }
+        .presentationBackground(.thinMaterial)
+    }
+}
+
+// MARK: - 25. 根视图 ContentView
 
 struct ContentView: View {
     @StateObject private var game = GameModel()
@@ -3698,6 +4088,7 @@ struct ContentView: View {
     
     var body: some View {
         ZStack {
+            // 全屏均匀一致暗色背景
             Color(red: 0.03, green: 0.05, blue: 0.10)
                 .ignoresSafeArea()
             
