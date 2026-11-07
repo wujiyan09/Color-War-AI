@@ -154,7 +154,6 @@ struct CompactCellSnapshot: Codable {
     }
 }
 
-// 棋局持久化存档模型
 struct GameSaveArchive: Codable, Identifiable {
     let id: UUID
     let date: Date
@@ -449,7 +448,7 @@ extension P2PNetworkManager: MCSessionDelegate, MCNearbyServiceAdvertiserDelegat
     nonisolated func session(_ session: MCSession, didFinishReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, at localURL: URL?, withError error: Error?) {}
 }
 
-// MARK: - 4. 远程 WebSocket 公网中继网络管理器 (Cloudflare Worker)
+// MARK: - 4. 远程 WebSocket 公网中继网络管理器
 
 final class WebSocketNetworkManager: ObservableObject {
     static let shared = WebSocketNetworkManager()
@@ -457,6 +456,7 @@ final class WebSocketNetworkManager: ObservableObject {
     let packetSubject = PassthroughSubject<P2PPacket, Never>()
     
     @Published var isConnected: Bool = false
+    @Published var isConnecting: Bool = false
     @Published var currentRoomCode: String = ""
     @Published var isHost: Bool = false
     
@@ -467,16 +467,18 @@ final class WebSocketNetworkManager: ObservableObject {
     func connectAndJoinRoom(roomCode: String, isHost: Bool) {
         self.isHost = isHost
         self.currentRoomCode = roomCode
+        self.isConnecting = true
         
         // 💡 替换为您在 Cloudflare Workers 上部署得到的真实 wss:// 域名
         let urlString = "wss://colorwar-server.your-subdomain.workers.dev"
-        guard let url = URL(string: urlString) else { return }
+        guard let url = URL(string: urlString) else {
+            self.isConnecting = false
+            return
+        }
         
         let session = URLSession(configuration: .default)
         webSocketTask = session.webSocketTask(with: url)
         webSocketTask?.resume()
-        
-        self.isConnected = true
         
         let joinMessage: [String: String] = [
             "action": "joinRoom",
@@ -484,8 +486,17 @@ final class WebSocketNetworkManager: ObservableObject {
         ]
         if let data = try? JSONSerialization.data(withJSONObject: joinMessage),
            let jsonString = String(data: data, encoding: .utf8) {
-            webSocketTask?.send(.string(jsonString)) { error in
-                if let error = error { print("WebSocket 建立房间失败: \(error)") }
+            webSocketTask?.send(.string(jsonString)) { [weak self] error in
+                DispatchQueue.main.async {
+                    if let error = error {
+                        print("WebSocket 发送加入房间失败: \(error)")
+                        self?.isConnecting = false
+                        self?.isConnected = false
+                    } else {
+                        self?.isConnecting = false
+                        self?.isConnected = true
+                    }
+                }
             }
         }
         
@@ -495,8 +506,11 @@ final class WebSocketNetworkManager: ObservableObject {
     func disconnect() {
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
         webSocketTask = nil
-        isConnected = false
-        currentRoomCode = ""
+        DispatchQueue.main.async {
+            self.isConnected = false
+            self.isConnecting = false
+            self.currentRoomCode = ""
+        }
     }
     
     func sendPacket(_ packet: P2PPacket) {
@@ -526,6 +540,7 @@ final class WebSocketNetworkManager: ObservableObject {
                 print("WebSocket 连接中断: \(error)")
                 DispatchQueue.main.async {
                     self.isConnected = false
+                    self.isConnecting = false
                 }
             }
         }
@@ -1704,12 +1719,17 @@ final class GameModel: ObservableObject {
         self.activePlayerIndices = playerTypes.enumerated().compactMap { $1 != .disabled ? $0 : nil }
     }
     
-    /// ✅ 所有席位均包含 `.disabled` (未加入) 的自由选择权
+    func prepareLobbyForHosting() {
+        self.playerTypes = [.human, .disabled, .disabled, .disabled, .disabled, .disabled, .disabled, .disabled]
+        self.playerNames[0] = P2PNetworkManager.shared.myNickname
+        self.myPlayerIndex = 0
+        self.refreshActivePlayers()
+    }
+    
     func validSelectableTypes(forPlayerIndex idx: Int, isInLobby: Bool = false) -> [PlayerControlType] {
         let isP2PConnected = P2PNetworkManager.shared.isConnected
         let isWSConnected = WebSocketNetworkManager.shared.isConnected
         
-        // 单机本地模式: 允许所有席位在 真人、算法-噩梦、算法-噩梦(加强版)、未加入 间自由切换
         if !isP2PConnected && !isWSConnected && !isInLobby && !isGameInPlay {
             return [.human, .mathNightmare, .enhancedNightmare, .disabled]
         }
@@ -1840,7 +1860,6 @@ final class GameModel: ObservableObject {
         }
     }
     
-    // MARK: - 棋局保存与恢复导入持久化
     func saveCurrentGameArchive() {
         let archive = GameSaveArchive(
             id: UUID(),
@@ -2940,7 +2959,6 @@ struct LocalGameSetupView: View {
                     
                     Spacer(minLength: 4)
                     
-                    // 所有席位均允许自由选择包含 "未加入" 的所有类型
                     Picker("控制类型", selection: Binding(
                         get: { game.playerTypes[safe: idx] ?? .disabled },
                         set: { game.updatePlayerType(at: idx, to: $0) }
@@ -3029,7 +3047,6 @@ struct LocalGameSetupView: View {
             }
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
-            // 开局按钮：<2人时变灰但保留 .interactive() 点击响应（点击后内部拦截开局逻辑）
             Button(action: {
                 guard game.canStartGame else { return }
                 onStartGame()
@@ -3162,23 +3179,21 @@ struct RemoteWebSocketSetupView: View {
     
     var body: some View {
         VStack(spacing: 12) {
-            if wsManager.isConnected {
+            if wsManager.isConnected || game.activeOnlineMode == .remoteWS {
                 VStack(spacing: 12) {
                     HStack {
                         Text("暗号房间: \(wsManager.currentRoomCode)")
                             .font(.title3.bold())
                             .foregroundColor(.cyan)
                         Spacer()
-                        Button("解散/离开") {
-                            wsManager.disconnect()
-                        }
-                        .font(.subheadline)
-                        .foregroundColor(.red)
                     }
                     .padding(10)
                     .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
                     
-                    RoomLobbyView(game: game, onExitLobby: { wsManager.disconnect() }, onStartGame: onStartGame)
+                    RoomLobbyView(game: game, onExitLobby: {
+                        wsManager.disconnect()
+                        game.activeOnlineMode = .none
+                    }, onStartGame: onStartGame)
                 }
             } else {
                 VStack(spacing: 14) {
@@ -3195,8 +3210,8 @@ struct RemoteWebSocketSetupView: View {
                         Button(action: {
                             let randomCode = String(Int.random(in: 100000...999999))
                             inputRoomCode = randomCode
-                            game.myPlayerIndex = 0
-                            game.playerNames[0] = P2PNetworkManager.shared.myNickname
+                            game.prepareLobbyForHosting()
+                            game.activeOnlineMode = .remoteWS
                             wsManager.connectAndJoinRoom(roomCode: randomCode, isHost: true)
                         }) {
                             Text("创建房间")
@@ -3212,6 +3227,7 @@ struct RemoteWebSocketSetupView: View {
                         Button(action: {
                             game.myPlayerIndex = 1
                             game.playerNames[1] = P2PNetworkManager.shared.myNickname
+                            game.activeOnlineMode = .remoteWS
                             wsManager.connectAndJoinRoom(roomCode: inputRoomCode, isHost: false)
                         }) {
                             Text("加入房间")
@@ -3234,7 +3250,7 @@ struct RemoteWebSocketSetupView: View {
     }
 }
 
-// MARK: - 18. 动态房间大厅 (Lobby) View
+// MARK: - 18. 动态房间大厅 (Lobby) View (纯净席位，支持左划删除)
 
 struct RoomLobbyView: View {
     @ObservedObject var game: GameModel
@@ -3250,71 +3266,20 @@ struct RoomLobbyView: View {
         p2pManager.isHost || wsManager.isHost
     }
     
-    @ViewBuilder
-    private var roomPlayerRowsContent: some View {
-        VStack(spacing: 8) {
-            ForEach(0..<min(game.playerNames.count, PlayerPreset.maxPlayers), id: \.self) { idx in
-                let isMySeat = (idx == game.myPlayerIndex)
-                let pType = game.playerTypes[safe: idx] ?? .disabled
-                
-                if pType != .disabled || isHost {
-                    HStack {
-                        Button(action: {
-                            if isMySeat { selectedPlayerForEmoji = IdentifiableInt(id: idx) }
-                        }) {
-                            ZStack {
-                                Circle()
-                                    .fill(game.colors[safe: idx] ?? .gray)
-                                    .frame(width: 26, height: 26)
-                                
-                                if let em = game.emojis[safe: idx], let emoji = em {
-                                    Text(emoji).font(.caption2)
-                                }
-                            }
-                        }
-                        .disabled(!isMySeat)
-                        
-                        if isMySeat {
-                            ColorPicker("", selection: Binding(
-                                get: { game.colors[safe: idx] ?? .red },
-                                set: { game.updatePlayerColor(at: idx, newColor: $0) }
-                            ))
-                            .labelsHidden()
-                        }
-                        
-                        Text((game.playerNames[safe: idx] ?? "玩家\(idx+1)") + (isMySeat ? " (我)" : ""))
-                            .font(.subheadline)
-                            .bold()
-                            .foregroundColor(isMySeat ? .cyan : .white)
-                        
-                        Spacer()
-                        
-                        if isHost {
-                            Picker("", selection: Binding(
-                                get: { game.playerTypes[safe: idx] ?? .disabled },
-                                set: { game.updatePlayerType(at: idx, to: $0) }
-                            )) {
-                                ForEach(game.validSelectableTypes(forPlayerIndex: idx, isInLobby: true)) { type in
-                                    Text(type.rawValue).tag(type)
-                                }
-                            }
-                            .pickerStyle(.menu)
-                            .tint(.white)
-                        } else {
-                            Text(pType.rawValue)
-                                .font(.caption)
-                                .foregroundColor(.gray)
-                        }
-                    }
-                    .padding(8)
-                }
-            }
-        }
-        .padding(6)
-    }
-    
     var body: some View {
         VStack(spacing: 12) {
+            HStack {
+                Text(isHost ? "🏠 房主房间大厅" : "🔗 已连入房间大厅")
+                    .font(.headline)
+                    .foregroundColor(.white)
+                Spacer()
+                Button("解散/离开", action: onExitLobby)
+                    .font(.subheadline)
+                    .foregroundColor(.red)
+            }
+            .padding(10)
+            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+            
             if isHost {
                 VStack(spacing: 8) {
                     HStack {
@@ -3344,26 +3309,77 @@ struct RoomLobbyView: View {
                 .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             }
             
-            ViewThatFits(in: .vertical) {
-                roomPlayerRowsContent
-                
-                ScrollView(.vertical, showsIndicators: true) {
-                    roomPlayerRowsContent
+            VStack(spacing: 8) {
+                HStack {
+                    Text("当前房间成员列表 (\(game.validPlayerCount) 人)")
+                        .font(.caption)
+                        .bold()
+                        .foregroundColor(.white.opacity(0.8))
+                    Spacer()
                 }
-                .frame(maxHeight: 180)
+                
+                // Swift Native List 实现精美左划删除 (Swipe to Delete)
+                List {
+                    ForEach(0..<PlayerPreset.maxPlayers, id: \.self) { idx in
+                        if game.playerTypes[idx].isEnabled {
+                            let isMySeat = (idx == game.myPlayerIndex)
+                            HStack {
+                                Button(action: {
+                                    if isMySeat { selectedPlayerForEmoji = IdentifiableInt(id: idx) }
+                                }) {
+                                    ZStack {
+                                        Circle()
+                                            .fill(game.colors[safe: idx] ?? .gray)
+                                            .frame(width: 24, height: 24)
+                                        
+                                        if let em = game.emojis[safe: idx], let emoji = em {
+                                            Text(emoji).font(.caption2)
+                                        }
+                                    }
+                                }
+                                .disabled(!isMySeat)
+                                
+                                Text((game.playerNames[safe: idx] ?? "玩家\(idx+1)") + (isMySeat ? " (我)" : ""))
+                                    .font(.subheadline)
+                                    .bold()
+                                    .foregroundColor(isMySeat ? .cyan : .white)
+                                
+                                Spacer()
+                                
+                                Text(game.playerTypes[idx].rawValue)
+                                    .font(.caption)
+                                    .foregroundColor(.white.opacity(0.6))
+                            }
+                            .listRowBackground(Color.white.opacity(0.06))
+                        }
+                    }
+                    .onDelete { indexSet in
+                        guard isHost else { return }
+                        for idx in indexSet {
+                            if idx != game.myPlayerIndex {
+                                game.updatePlayerType(at: idx, to: .disabled)
+                            }
+                        }
+                    }
+                }
+                .listStyle(.plain)
+                .frame(height: min(CGFloat(game.validPlayerCount) * 44 + 10, 220))
+                .cornerRadius(PlayerPreset.cardCornerRadius - 4)
             }
+            .padding(8)
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
             if isHost {
                 Button(action: {
                     if let disabledIdx = game.playerTypes.firstIndex(of: .disabled) {
-                        game.playerNames[disabledIdx] = "AI 助手 \(disabledIdx)"
-                        game.updatePlayerType(at: disabledIdx, to: .mathNightmare)
+                        let randomType: PlayerControlType = Bool.random() ? .mathNightmare : .enhancedNightmare
+                        game.playerNames[disabledIdx] = "\(randomType.rawValue) \(disabledIdx+1)"
+                        game.updatePlayerType(at: disabledIdx, to: randomType)
                     }
                 }) {
                     HStack {
                         Image(systemName: "plus.circle.fill")
-                        Text("添加 AI 人机补位")
+                        Text("增加 AI 人机 (随机噩梦/加强版)")
                     }
                     .font(.subheadline.bold())
                     .foregroundColor(.cyan)
@@ -3437,6 +3453,7 @@ struct OnlineGameSetupView: View {
                     game: game,
                     onExitLobby: {
                         game.activeOnlineMode = .none
+                        p2pManager.stopP2P()
                         p2pConnectionSubscription?.cancel()
                         p2pConnectionSubscription = nil
                     },
@@ -3454,8 +3471,7 @@ struct OnlineGameSetupView: View {
                     HStack(spacing: 12) {
                         Button(action: {
                             p2pManager.startLocalHosting()
-                            game.playerNames[0] = p2pManager.myNickname
-                            game.myPlayerIndex = 0
+                            game.prepareLobbyForHosting()
                             game.activeOnlineMode = .localHost
                         }) {
                             Text("创建房间")
@@ -3529,7 +3545,6 @@ struct StartMenuView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                // 统一全屏均匀背景（保持一致深暗黑色调）
                 Color(red: 0.03, green: 0.05, blue: 0.10)
                     .ignoresSafeArea()
                 
@@ -3574,7 +3589,6 @@ struct StartMenuView: View {
                 .padding(.horizontal, 20)
             }
             .toolbar {
-                // 左上角“导入”历史存档按钮
                 ToolbarItem(placement: .topBarLeading) {
                     Button(action: {
                         game.showArchivePickerSheet = true
@@ -3735,7 +3749,7 @@ struct RandomPlayerWheelOverlay: View {
     }
 }
 
-// MARK: - 22. 游戏对局 View (背景冻结，保持均匀纯暗色)
+// MARK: - 22. 游戏对局 View (背景随玩家回合平滑变幻)
 
 struct GamePlayView: View {
     @ObservedObject var game: GameModel
@@ -3746,10 +3760,6 @@ struct GamePlayView: View {
     
     var body: some View {
         ZStack {
-            // 全屏均匀一致暗色背景 (零颜色变幻改动)
-            Color(red: 0.03, green: 0.05, blue: 0.10)
-                .ignoresSafeArea()
-            
             if let customImg = game.customBackgroundImage {
                 Image(uiImage: customImg)
                     .resizable()
@@ -3757,6 +3767,18 @@ struct GamePlayView: View {
                     .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
                     .ignoresSafeArea()
                     .overlay(Color.black.opacity(0.35))
+            } else {
+                // 原版平滑变幻背景（已完好恢复）
+                LinearGradient(
+                    colors: [
+                        (game.colors[safe: game.currentPlayer] ?? .blue).opacity(0.35),
+                        Color(red: 0.03, green: 0.05, blue: 0.10)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea()
+                .animation(.easeInOut(duration: 0.8), value: game.currentPlayer)
             }
             
             VStack(spacing: 8) {
@@ -4088,7 +4110,6 @@ struct ContentView: View {
     
     var body: some View {
         ZStack {
-            // 全屏均匀一致暗色背景
             Color(red: 0.03, green: 0.05, blue: 0.10)
                 .ignoresSafeArea()
             
