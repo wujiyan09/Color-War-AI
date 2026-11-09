@@ -461,6 +461,7 @@ extension P2PNetworkManager: MCSessionDelegate, MCNearbyServiceAdvertiserDelegat
 
 final class WebSocketNetworkManager: ObservableObject {
     static let shared = WebSocketNetworkManager()
+    static let defaultServerURL = "https://colorwar-server.wujiyan2009.workers.dev"
 
     let packetSubject = PassthroughSubject<P2PPacket, Never>()
 
@@ -491,7 +492,9 @@ final class WebSocketNetworkManager: ObservableObject {
         self.lastError = nil
         sequenceCounter = 0
 
-        guard var components = URLComponents(string: UserDefaults.standard.string(forKey: "CW_WebSocketServerURL") ?? ""),
+        let savedServerURL = UserDefaults.standard.string(forKey: "CW_WebSocketServerURL")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let serverURL = (savedServerURL?.isEmpty == false) ? savedServerURL! : Self.defaultServerURL
+        guard var components = URLComponents(string: serverURL),
               let scheme = components.scheme?.lowercased(),
               ["https", "http", "wss", "ws"].contains(scheme),
               components.host != nil else {
@@ -3288,7 +3291,7 @@ struct RemoteWebSocketSetupView: View {
     let onStartGame: () -> Void
 
     @State private var inputRoomCode: String = ""
-    @AppStorage("CW_WebSocketServerURL") private var serverURL = ""
+    @AppStorage("CW_WebSocketServerURL") private var serverURL = WebSocketNetworkManager.defaultServerURL
 
     var body: some View {
         VStack(spacing: 12) {
