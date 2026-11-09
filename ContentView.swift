@@ -492,8 +492,7 @@ final class WebSocketNetworkManager: ObservableObject {
         self.lastError = nil
         sequenceCounter = 0
 
-        let savedServerURL = UserDefaults.standard.string(forKey: "CW_WebSocketServerURL")?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let serverURL = (savedServerURL?.isEmpty == false) ? savedServerURL! : Self.defaultServerURL
+        let serverURL = Self.defaultServerURL
         guard var components = URLComponents(string: serverURL),
               let scheme = components.scheme?.lowercased(),
               ["https", "http", "wss", "ws"].contains(scheme),
@@ -3291,7 +3290,6 @@ struct RemoteWebSocketSetupView: View {
     let onStartGame: () -> Void
 
     @State private var inputRoomCode: String = ""
-    @AppStorage("CW_WebSocketServerURL") private var serverURL = WebSocketNetworkManager.defaultServerURL
 
     var body: some View {
         VStack(spacing: 12) {
@@ -3323,10 +3321,6 @@ struct RemoteWebSocketSetupView: View {
                         .font(.headline)
                         .foregroundColor(.white)
 
-                    TextField("Worker 服务地址（https://…workers.dev）", text: $serverURL)
-                        .textFieldStyle(.roundedBorder)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
                     TextField("输入 6 位数字房间暗号", text: $inputRoomCode)
                         .textFieldStyle(.roundedBorder)
                         .keyboardType(.numberPad)
