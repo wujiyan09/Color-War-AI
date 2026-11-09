@@ -2522,11 +2522,16 @@ final class GameModel: ObservableObject {
         }
     }
     
-    func play(row: Int, column: Int) {
+    func play(row: Int, column: Int, isAIMove: Bool = false) {
         let flatIdx = row * boardSize + column
-        guard !isProcessingCascade, winnerIndex == nil, playableCells.contains(flatIdx) else { return }
+        guard !isProcessingCascade,
+              winnerIndex == nil,
+              playableCells.contains(flatIdx),
+              playerTypes.indices.contains(currentPlayer) else { return }
         
         let player = currentPlayer
+        // Board taps are human input; they must never impersonate the AI during its turn.
+        guard playerTypes[player].isAI == isAIMove else { return }
         let isConn = P2PNetworkManager.shared.isConnected || WebSocketNetworkManager.shared.isConnected
         let isHost = P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost
         
@@ -2804,7 +2809,7 @@ final class GameModel: ObservableObject {
                 if !Task.isCancelled {
                     await MainActor.run {
                         if self.currentGameSessionID == sessionID && self.currentPlayer == targetPlayer && self.isGameInPlay {
-                            self.play(row: bestMove.0, column: bestMove.1)
+                            self.play(row: bestMove.0, column: bestMove.1, isAIMove: true)
                         }
                     }
                 }
@@ -3975,6 +3980,16 @@ struct StartMenuView: View {
     @State private var showPhotoPicker: Bool = false
     @State private var selectedPhotosItem: PhotosPickerItem? = nil
 
+    private func startGame() {
+        if game.isRandomFirstPlayer {
+            isSpinningRandomWheel = true
+        } else {
+            game.resetGame()
+            game.beginGame()
+            game.shouldNavigateToGame = true
+        }
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -4001,7 +4016,7 @@ struct StartMenuView: View {
 
                             LocalGameSetupView(game: game) {
                                 game.prepareLocalPlayerNamesForGame()
-                                isSpinningRandomWheel = true
+                                startGame()
                             }
                             .transition(.opacity)
                         }
@@ -4017,7 +4032,7 @@ struct StartMenuView: View {
                             .foregroundColor(.white)
 
                         RemoteWebSocketSetupView(game: game) {
-                            isSpinningRandomWheel = true
+                            startGame()
                         }
                         .transition(.opacity)
                     }
@@ -4312,7 +4327,11 @@ struct GamePlayView: View {
                     
                     VStack(spacing: 12) {
                         Button(action: {
-                            isSpinningRandomWheel = true
+                            if game.isRandomFirstPlayer {
+                                isSpinningRandomWheel = true
+                            } else {
+                                game.restartCurrentGame()
+                            }
                         }) {
                             HStack {
                                 Image(systemName: "arrow.clockwise")
