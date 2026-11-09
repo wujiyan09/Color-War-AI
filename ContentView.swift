@@ -205,6 +205,12 @@ enum P2PAction: String, Codable {
     case playerLeft
     case ping
     case ack
+    case joinRoom
+    case leaveRoom
+    case roomJoined
+    case roomRoster
+    case roomError
+    case roomClosed
 }
 
 struct P2PPacket: Codable {
@@ -227,7 +233,10 @@ struct P2PPacket: Codable {
     var currentTurnIndex: Int? = nil
     var hasEnteredSnapshot: [Bool]? = nil
     var eliminatedSnapshot: [Bool]? = nil
-    
+    var roomCode: String? = nil
+    var isHost: Bool? = nil
+    var message: String? = nil
+
     init(sequenceID: UInt64, action: P2PAction, senderID: String) {
         self.sequenceID = sequenceID
         self.action = action
@@ -452,95 +461,132 @@ extension P2PNetworkManager: MCSessionDelegate, MCNearbyServiceAdvertiserDelegat
 
 final class WebSocketNetworkManager: ObservableObject {
     static let shared = WebSocketNetworkManager()
-    
+
     let packetSubject = PassthroughSubject<P2PPacket, Never>()
-    
-    @Published var isConnected: Bool = false
-    @Published var isConnecting: Bool = false
-    @Published var currentRoomCode: String = ""
-    @Published var isHost: Bool = false
-    
+
+    @Published var isConnected = false
+    @Published var isConnecting = false
+    @Published var currentRoomCode = ""
+    @Published var isHost = false
+    @Published var playerIndex = 0
+    @Published var lastError: String?
+
     private var webSocketTask: URLSessionWebSocketTask?
-    
+    private var sequenceCounter: UInt64 = 0
+
     private init() {}
-    
-    func connectAndJoinRoom(roomCode: String, isHost: Bool) {
+
+    @MainActor
+    func getNextSequenceID() -> UInt64 {
+        sequenceCounter += 1
+        return sequenceCounter
+    }
+
+    @MainActor
+    func connectAndJoinRoom(roomCode: String, isHost: Bool, nickname: String) {
+        disconnect()
         self.isHost = isHost
         self.currentRoomCode = roomCode
         self.isConnecting = true
-        
-        // 💡 替换为您在 Cloudflare Workers 上部署得到的真实 wss:// 域名
-        let urlString = "wss://colorwar-server.your-subdomain.workers.dev"
-        guard let url = URL(string: urlString) else {
+        self.lastError = nil
+        sequenceCounter = 0
+
+        guard var components = URLComponents(string: UserDefaults.standard.string(forKey: "CW_WebSocketServerURL") ?? ""),
+              let scheme = components.scheme?.lowercased(),
+              ["https", "http", "wss", "ws"].contains(scheme),
+              components.host != nil else {
             self.isConnecting = false
+            self.lastError = "请先填写已部署的 WebSocket 服务地址。"
             return
         }
-        
-        let session = URLSession(configuration: .default)
-        webSocketTask = session.webSocketTask(with: url)
-        webSocketTask?.resume()
-        
-        let joinMessage: [String: String] = [
-            "action": "joinRoom",
-            "roomCode": roomCode
+        if components.scheme == "https" { components.scheme = "wss" }
+        if components.scheme == "http" { components.scheme = "ws" }
+        components.path = "/ws/\(roomCode)"
+        components.queryItems = [
+            URLQueryItem(name: "role", value: isHost ? "host" : "player"),
+            URLQueryItem(name: "nickname", value: nickname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "玩家" : nickname)
         ]
-        if let data = try? JSONSerialization.data(withJSONObject: joinMessage),
-           let jsonString = String(data: data, encoding: .utf8) {
-            webSocketTask?.send(.string(jsonString)) { [weak self] error in
-                DispatchQueue.main.async {
-                    if let error = error {
-                        print("WebSocket 发送加入房间失败: \(error)")
-                        self?.isConnecting = false
-                        self?.isConnected = false
-                    } else {
-                        self?.isConnecting = false
-                        self?.isConnected = true
-                    }
-                }
+        guard let url = components.url else {
+            self.isConnecting = false
+            self.lastError = "服务地址无效。"
+            return
+        }
+
+        let task = URLSession(configuration: .default).webSocketTask(with: url)
+        webSocketTask = task
+        task.resume()
+        listenForMessages(task)
+
+    }
+
+    @MainActor
+    func disconnect() {
+        if let task = webSocketTask, isConnected {
+            var leave = P2PPacket(sequenceID: getNextSequenceID(), action: .leaveRoom, senderID: "")
+            leave.roomCode = currentRoomCode
+            if let data = try? JSONEncoder().encode(leave), let text = String(data: data, encoding: .utf8) {
+                task.send(.string(text)) { _ in }
             }
         }
-        
-        listenForMessages()
-    }
-    
-    func disconnect() {
-        webSocketTask?.cancel(with: .normalClosure, reason: nil)
+        let task = webSocketTask
         webSocketTask = nil
-        DispatchQueue.main.async {
-            self.isConnected = false
-            self.isConnecting = false
-            self.currentRoomCode = ""
-        }
+        task?.cancel(with: .normalClosure, reason: nil)
+        isConnected = false
+        isConnecting = false
+        currentRoomCode = ""
+        playerIndex = 0
     }
-    
+
     func sendPacket(_ packet: P2PPacket) {
-        guard isConnected, let task = webSocketTask else { return }
-        guard let data = try? JSONEncoder().encode(packet),
+        guard let task = webSocketTask,
+              let data = try? JSONEncoder().encode(packet),
               let jsonString = String(data: data, encoding: .utf8) else { return }
-        
-        task.send(.string(jsonString)) { error in
-            if let error = error { print("WebSocket 发送失败: \(error)") }
+        task.send(.string(jsonString)) { [weak self] error in
+            guard let error else { return }
+            DispatchQueue.main.async {
+                self?.lastError = "WebSocket 发送失败：\(error.localizedDescription)"
+                self?.isConnected = false
+            }
         }
     }
-    
-    private func listenForMessages() {
-        webSocketTask?.receive { [weak self] result in
-            guard let self = self else { return }
+
+    private func listenForMessages(_ task: URLSessionWebSocketTask) {
+        task.receive { [weak self, weak task] result in
+            guard let self, let task else { return }
             switch result {
             case .success(let message):
                 if case .string(let text) = message,
                    let data = text.data(using: .utf8),
                    let packet = try? JSONDecoder().decode(P2PPacket.self, from: data) {
                     DispatchQueue.main.async {
+                        switch packet.action {
+                        case .roomJoined:
+                            self.isConnected = true
+                            self.isConnecting = false
+                            self.isHost = packet.isHost ?? self.isHost
+                            self.playerIndex = packet.playerIndex ?? self.playerIndex
+                            self.currentRoomCode = packet.roomCode ?? self.currentRoomCode
+                            self.lastError = nil
+                        case .roomError:
+                            self.isConnected = false
+                            self.isConnecting = false
+                            self.lastError = packet.message ?? "无法加入房间。"
+                        case .roomClosed:
+                            self.isConnected = false
+                            self.isConnecting = false
+                            self.lastError = packet.message ?? "房主已离开房间。"
+                        default: break
+                        }
                         self.packetSubject.send(packet)
                     }
                 }
-                self.listenForMessages()
+                self.listenForMessages(task)
             case .failure(let error):
-                print("WebSocket 连接中断: \(error)")
                 DispatchQueue.main.async {
+                    guard self.webSocketTask === task else { return }
                     self.isConnected = false
                     self.isConnecting = false
+                    self.lastError = "无法连接服务器：\(error.localizedDescription)"
                 }
             }
         }
@@ -1953,44 +1999,106 @@ final class GameModel: ObservableObject {
                 self?.handleIncomingPacket(packet)
             }
     }
-    
+
     private func handleIncomingPacket(_ packet: P2PPacket) {
         if packet.action != .ping && packet.action != .ack {
             guard packet.sequenceID > self.lastReceivedSeqID else { return }
             self.lastReceivedSeqID = packet.sequenceID
         }
-        
+
         switch packet.action {
-        case .playerMove:
-            if let r = packet.row, let c = packet.col, let pIdx = packet.playerIndex {
-                self.enqueueNetworkMove(row: r, column: c, player: pIdx)
+        case .roomJoined:
+            guard let seat = packet.playerIndex else { return }
+            self.myPlayerIndex = seat
+            if WebSocketNetworkManager.shared.isHost {
+                if seat > 0 { self.playerTypes[seat] = .p2pNetwork }
+            } else {
+                self.playerTypes[seat] = .human
             }
-            
+            if let names = packet.playerNames { self.playerNames = names }
+            if let types = packet.playerTypes {
+                for i in 0..<min(types.count, self.playerTypes.count) where i != seat {
+                    if WebSocketNetworkManager.shared.isHost, types[i] == .p2pNetwork { self.playerTypes[i] = .p2pNetwork }
+                }
+            }
+            self.refreshActivePlayers()
+            if WebSocketNetworkManager.shared.isHost { self.syncRoomConfigToPeers() }
+
+        case .roomRoster:
+            if let names = packet.playerNames {
+                for i in 0..<min(names.count, self.playerNames.count) where !names[i].isEmpty { self.playerNames[i] = names[i] }
+            }
+            if let types = packet.playerTypes {
+                for i in 0..<min(types.count, self.playerTypes.count) {
+                    if WebSocketNetworkManager.shared.isHost {
+                        if types[i] == .p2pNetwork { self.playerTypes[i] = .p2pNetwork }
+                    } else if i == self.myPlayerIndex {
+                        self.playerTypes[i] = .human
+                    }
+                }
+            }
+            self.refreshActivePlayers()
+            if WebSocketNetworkManager.shared.isHost { self.syncRoomConfigToPeers() }
+
+        case .playerLeft:
+            if let seat = packet.playerIndex, seat >= 0, seat < self.playerTypes.count, WebSocketNetworkManager.shared.isHost {
+                self.playerTypes[seat] = self.isGameInPlay ? .mathNightmare : .disabled
+                self.playerNames[seat] = self.isGameInPlay ? "AI 玩家\(seat + 1)" : PlayerPreset.defaultNames[seat]
+                self.refreshActivePlayers()
+                self.syncRoomConfigToPeers()
+            }
+
+        case .roomClosed:
+            self.showDisconnectedAlert = true
+            self.exitToMenu()
+
+        case .roomError:
+            break
+
+        case .playerMove:
+            if let r = packet.row, let c = packet.col, let pIdx = packet.playerIndex,
+               pIdx == self.currentPlayer,
+               r >= 0, r < self.boardSize, c >= 0, c < self.boardSize,
+               self.playableCells.contains(r * self.boardSize + c) {
+                self.enqueueNetworkMove(row: r, column: c, player: pIdx)
+            } else if WebSocketNetworkManager.shared.isHost {
+                self.broadcastFullStateSnapshot()
+            }
+
         case .syncRequest:
             if P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost {
                 self.broadcastFullStateSnapshot()
             }
-            
+
         case .hostConfig:
             if let names = packet.playerNames { self.playerNames = names }
             if let types = packet.playerTypes { self.playerTypes = types }
+            if WebSocketNetworkManager.shared.isConnected && !WebSocketNetworkManager.shared.isHost,
+               self.myPlayerIndex >= 0, self.myPlayerIndex < self.playerTypes.count {
+                self.playerTypes[self.myPlayerIndex] = .human
+            }
             if let hexes = packet.colorsHex { self.colors = hexes.map { Color(hex: $0) } }
             if let ems = packet.emojis { self.emojis = ems }
             if let sz = packet.boardSize { self.boardSize = sz }
             if let rnd = packet.isRandomFirstPlayer { self.isRandomFirstPlayer = rnd }
             if let aiLvl = packet.aiLevelRaw, let level = AIDifficultyLevel(rawValue: aiLvl) { self.aiDifficultyLevel = level }
-            
+            self.refreshActivePlayers()
+
         case .startGame:
             if let firstP = packet.firstPlayerIndex {
                 self.resetGame(chosenFirstPlayer: firstP)
                 self.beginGame()
                 self.shouldNavigateToGame = true
             }
-            
+
         case .stateSnapshot:
             if let names = packet.playerNames { self.playerNames = names }
             if let types = packet.playerTypes { self.playerTypes = types }
-            
+            if WebSocketNetworkManager.shared.isConnected && !WebSocketNetworkManager.shared.isHost,
+               self.myPlayerIndex >= 0, self.myPlayerIndex < self.playerTypes.count {
+                self.playerTypes[self.myPlayerIndex] = .human
+            }
+
             if let compactSnap = packet.compactBoardSnapshot, let turnP = packet.currentTurnIndex {
                 var grid = [[Cell]](repeating: [Cell](repeating: Cell(owner: nil, count: 0), count: self.boardSize), count: self.boardSize)
                 for item in compactSnap {
@@ -2003,6 +2111,7 @@ final class GameModel: ObservableObject {
                 self.board = grid
                 if let entered = packet.hasEnteredSnapshot { self.hasEntered = entered }
                 if let elim = packet.eliminatedSnapshot { self.eliminated = elim }
+                self.refreshActivePlayers()
                 self.recalculateOrbCounts()
                 self.currentPlayer = turnP
                 
@@ -2374,6 +2483,9 @@ final class GameModel: ObservableObject {
             } else {
                 advanceToNextTurn()
             }
+            if WebSocketNetworkManager.shared.isHost && WebSocketNetworkManager.shared.isConnected {
+                broadcastFullStateSnapshot()
+            }
         } catch {
             self.board = boardBackup
             self.hasEntered = hasEnteredBackup
@@ -2383,7 +2495,7 @@ final class GameModel: ObservableObject {
             isProcessingCascade = false
         }
     }
-    
+
     private func updateEliminationStatus() {
         var appears = [Bool](repeating: false, count: PlayerPreset.maxPlayers)
         for row in board {
@@ -2399,11 +2511,11 @@ final class GameModel: ObservableObject {
             }
         }
     }
-    
+
     private func checkGameOver() -> Bool {
         let alive = activePlayerIndices.filter { $0 < eliminated.count && !eliminated[$0] }
         let allEnteredOrEliminated = activePlayerIndices.allSatisfy { $0 < hasEntered.count && $0 < eliminated.count && (hasEntered[$0] || eliminated[$0]) }
-        
+
         if allEnteredOrEliminated && alive.count <= 1 {
             winnerIndex = alive.first
             Haptics.shared.heavyImpact()
@@ -2411,14 +2523,14 @@ final class GameModel: ObservableObject {
         }
         return false
     }
-    
+
     private func advanceToNextTurn() {
         let active = activePlayerIndices
         guard !active.isEmpty, let idx = active.firstIndex(of: currentPlayer) else { return }
-        
+
         var nextIdx = (idx + 1) % active.count
         var loopCount = 0
-        
+
         while loopCount < active.count {
             let p = active[nextIdx]
             if p < eliminated.count && p < playerTypes.count {
@@ -3174,12 +3286,13 @@ struct RemoteWebSocketSetupView: View {
     @ObservedObject var game: GameModel
     @ObservedObject var wsManager = WebSocketNetworkManager.shared
     let onStartGame: () -> Void
-    
+
     @State private var inputRoomCode: String = ""
-    
+    @AppStorage("CW_WebSocketServerURL") private var serverURL = ""
+
     var body: some View {
         VStack(spacing: 12) {
-            if wsManager.isConnected || game.activeOnlineMode == .remoteWS {
+            if wsManager.isConnected {
                 VStack(spacing: 12) {
                     HStack {
                         Text("暗号房间: \(wsManager.currentRoomCode)")
@@ -3189,7 +3302,7 @@ struct RemoteWebSocketSetupView: View {
                     }
                     .padding(10)
                     .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
-                    
+
                     RoomLobbyView(game: game, onExitLobby: {
                         wsManager.disconnect()
                         game.activeOnlineMode = .none
@@ -3197,22 +3310,33 @@ struct RemoteWebSocketSetupView: View {
                 }
             } else {
                 VStack(spacing: 14) {
-                    Text("🌍 远程 4G/5G 房间暗号连线")
+                    if wsManager.isConnecting {
+                        ProgressView("正在连接房间…").tint(.cyan)
+                    }
+                    if let error = wsManager.lastError {
+                        Text(error).font(.caption).foregroundColor(.orange)
+                    }
+                    Text("🌍 远程 WebSocket 房间")
                         .font(.headline)
                         .foregroundColor(.white)
-                    
+
+                    TextField("Worker 服务地址（https://…workers.dev）", text: $serverURL)
+                        .textFieldStyle(.roundedBorder)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
                     TextField("输入 6 位数字房间暗号", text: $inputRoomCode)
                         .textFieldStyle(.roundedBorder)
                         .keyboardType(.numberPad)
                         .multilineTextAlignment(.center)
-                    
+
                     HStack(spacing: 12) {
                         Button(action: {
                             let randomCode = String(Int.random(in: 100000...999999))
                             inputRoomCode = randomCode
                             game.prepareLobbyForHosting()
+                            game.playerTypes[1] = .p2pNetwork
                             game.activeOnlineMode = .remoteWS
-                            wsManager.connectAndJoinRoom(roomCode: randomCode, isHost: true)
+                            wsManager.connectAndJoinRoom(roomCode: randomCode, isHost: true, nickname: P2PNetworkManager.shared.myNickname)
                         }) {
                             Text("创建房间")
                                 .bold()
@@ -3223,12 +3347,10 @@ struct RemoteWebSocketSetupView: View {
                                 .glassEffect(.regular.tint(.darkNavyBlue).interactive(), in: .capsule)
                         }
                         .buttonStyle(.plain)
-                        
+
                         Button(action: {
-                            game.myPlayerIndex = 1
-                            game.playerNames[1] = P2PNetworkManager.shared.myNickname
                             game.activeOnlineMode = .remoteWS
-                            wsManager.connectAndJoinRoom(roomCode: inputRoomCode, isHost: false)
+                            wsManager.connectAndJoinRoom(roomCode: inputRoomCode, isHost: false, nickname: P2PNetworkManager.shared.myNickname)
                         }) {
                             Text("加入房间")
                                 .bold()
@@ -3570,11 +3692,6 @@ struct StartMenuView: View {
                                 isSpinningRandomWheel = true
                             }
                             .transition(.opacity)
-                        } else if selectedTab == 1 {
-                            OnlineGameSetupView(game: game) {
-                                isSpinningRandomWheel = true
-                            }
-                            .transition(.opacity)
                         } else {
                             RemoteWebSocketSetupView(game: game) {
                                 isSpinningRandomWheel = true
@@ -3605,11 +3722,10 @@ struct StartMenuView: View {
                 ToolbarItem(placement: .principal) {
                     Picker("Game Mode", selection: $selectedTab) {
                         Text("单机模式").tag(0)
-                        Text("局域网 P2P").tag(1)
-                        Text("远程公网").tag(2)
+                        Text("在线 WebSocket").tag(1)
                     }
                     .pickerStyle(.segmented)
-                    .frame(width: 260)
+                    .frame(width: 220)
                 }
                 
                 ToolbarItem(placement: .topBarTrailing) {
