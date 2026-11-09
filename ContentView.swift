@@ -54,18 +54,18 @@ enum AIDifficultyLevel: Int, CaseIterable, Identifiable, Codable {
     
     var title: String {
         switch self {
-        case .fast: return "1档 · 快手 (极速)"
-        case .balanced: return "2档 · 平衡 (推荐)"
-        case .deep: return "3档 · 深谋 (算力)"
-        case .extreme: return "4档 · 极限 (烧脑)"
+        case .fast: return "1档 · 快手"
+        case .balanced: return "2档 · 平衡"
+        case .deep: return "3档 · 深谋"
+        case .extreme: return "4档 · 极限"
         }
     }
     
     var description: String {
         switch self {
-        case .fast: return "深度 2-3 层 | 基础评估"
-        case .balanced: return "深度 3-5 层 | Alpha-Beta 剪枝"
-        case .deep: return "深度 4-6 层 | 置换表+静止搜索"
+        case .fast: return "深度 2 层 | 快手极速"
+        case .balanced: return "深度 3-4 层 | Alpha-Beta 剪枝"
+        case .deep: return "深度 4-5 层 | 置换表+静止搜索"
         case .extreme: return "深度 6-8 层 | 全局链图+极限推理"
         }
     }
@@ -3179,6 +3179,7 @@ extension Array {
 struct LocalGameSetupView: View {
     @ObservedObject var game: GameModel
     let onStartGame: () -> Void
+    let onChooseBackground: () -> Void
     @State private var selectedPlayerForEmoji: IdentifiableInt? = nil
     
     @ViewBuilder
@@ -3270,7 +3271,7 @@ struct LocalGameSetupView: View {
             
             VStack(spacing: 8) {
                 HStack {
-                    Text("🧠 AI 思考算力/深度:")
+                    Text("🧠 AI 算力/深度:")
                         .font(.subheadline)
                         .bold()
                         .foregroundColor(.white)
@@ -3309,13 +3310,35 @@ struct LocalGameSetupView: View {
             }
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
+            HStack(spacing: 8) {
+                Button(action: onChooseBackground) label: {
+                    Label("选择背景", systemImage: "photo.on.rectangle")
+                        .font(.caption.bold())
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .glassEffect(.regular.interactive(), in: .capsule)
+                }
+                .buttonStyle(.plain)
+
+                Button { game.saveCustomBackground(nil) } label: {
+                    Label("恢复背景", systemImage: "trash")
+                        .font(.caption.bold())
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .glassEffect(.regular.interactive(), in: .capsule)
+                }
+                .buttonStyle(.plain)
+                .disabled(game.customBackgroundImage == nil)
+                .opacity(game.customBackgroundImage == nil ? 0.55 : 1)
+            }
+
             Button(action: {
                 guard game.canStartGame else { return }
                 onStartGame()
             }) {
                 HStack {
                     Image(systemName: "play.fill")
-                    Text("开始对决 (\(game.validPlayerCount) 人)").font(.title3).bold()
+                    Text("开始对决").font(.title3).bold()
                 }
                 .foregroundColor(.white)
                 .frame(maxWidth: .infinity)
@@ -3466,7 +3489,7 @@ struct RemoteWebSocketSetupView: View {
             if wsManager.isConnected {
                 VStack(spacing: 12) {
                     HStack {
-                        Text("暗号房间: \(wsManager.currentRoomCode)")
+                        Text("房间邀请码: \(wsManager.currentRoomCode)")
                             .font(.title3.bold())
                             .foregroundColor(.cyan)
                         Spacer()
@@ -3487,33 +3510,33 @@ struct RemoteWebSocketSetupView: View {
                     if let error = wsManager.lastError {
                         Text(error).font(.caption).foregroundColor(.orange)
                     }
-                    Text("🌍 远程 WebSocket 房间")
-                        .font(.headline)
-                        .foregroundColor(.white)
-
-                    TextField("输入 6 位数字房间暗号", text: $inputRoomCode)
-                        .textFieldStyle(.roundedBorder)
-                        .keyboardType(.numberPad)
-                        .multilineTextAlignment(.center)
-
-                    HStack(spacing: 12) {
-                        Button(action: {
+                    Button(action: {
                             let randomCode = String(Int.random(in: 100000...999999))
                             inputRoomCode = randomCode
                             game.prepareLobbyForHosting()
                             game.playerTypes[1] = .p2pNetwork
                             game.activeOnlineMode = .remoteWS
                             wsManager.connectAndJoinRoom(roomCode: randomCode, isHost: true, nickname: P2PNetworkManager.shared.myNickname)
-                        }) {
-                            Text("创建房间")
-                                .bold()
-                                .foregroundColor(.white)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 12)
-                                .contentShape(Capsule())
-                                .glassEffect(.regular.tint(.darkNavyBlue).interactive(), in: .capsule)
-                        }
-                        .buttonStyle(.plain)
+                    }) {
+                        Text("创建联机房间 (担任房主)")
+                            .bold()
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .contentShape(Capsule())
+                            .glassEffect(.regular.tint(.darkNavyBlue).interactive(), in: .capsule)
+                    }
+                    .buttonStyle(.plain)
+
+                    HStack(spacing: 8) {
+                        TextField("输入6位房间邀请码", text: Binding(
+                            get: { inputRoomCode },
+                            set: { inputRoomCode = String($0.filter { $0 >= "0" && $0 <= "9" }.prefix(6)) }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                        .keyboardType(.numberPad)
+                        .multilineTextAlignment(.center)
+                        .textContentType(.oneTimeCode)
 
                         Button(action: {
                             game.activeOnlineMode = .remoteWS
@@ -3522,14 +3545,14 @@ struct RemoteWebSocketSetupView: View {
                             Text("加入房间")
                                 .bold()
                                 .foregroundColor(.white)
-                                .frame(maxWidth: .infinity)
+                                .padding(.horizontal, 14)
                                 .padding(.vertical, 12)
                                 .contentShape(Capsule())
                                 .glassEffect(.regular.interactive(), in: .capsule)
                         }
                         .buttonStyle(.plain)
-                        .disabled(inputRoomCode.count < 4)
-                        .opacity(inputRoomCode.count >= 4 ? 1.0 : 0.5)
+                        .disabled(inputRoomCode.count != 6)
+                        .opacity(inputRoomCode.count == 6 ? 1.0 : 0.5)
                     }
                 }
                 .padding()
@@ -3562,7 +3585,7 @@ struct RoomLobbyView: View {
                     .font(.headline)
                     .foregroundColor(.white)
                 Spacer()
-                Button("解散/离开", action: onExitLobby)
+                Button("退出房间", action: onExitLobby)
                     .font(.subheadline)
                     .foregroundColor(.red)
             }
@@ -3609,6 +3632,26 @@ struct RoomLobbyView: View {
                         step: 1
                     )
                     .tint(Color.darkNavyBlue)
+
+                    HStack {
+                        Text("🧠 AI 算力等级:")
+                            .font(.caption)
+                            .bold()
+                            .foregroundColor(.white)
+                        Spacer()
+                        Text(game.aiDifficultyLevel.title)
+                            .font(.caption2.bold())
+                            .foregroundColor(.cyan)
+                    }
+                    Slider(
+                        value: Binding<Double>(
+                            get: { Double(game.aiDifficultyLevel.rawValue) },
+                            set: { game.aiDifficultyLevel = AIDifficultyLevel(rawValue: Int($0)) ?? .balanced }
+                        ),
+                        in: 1...4,
+                        step: 1
+                    )
+                    .tint(Color.darkNavyBlue)
                     
                     Toggle(isOn: $game.isRandomFirstPlayer) {
                         Text("随机挑选先手").foregroundColor(.white).font(.caption).bold()
@@ -3621,7 +3664,7 @@ struct RoomLobbyView: View {
             
             VStack(spacing: 8) {
                 HStack {
-                    Text("当前房间成员列表 (\(game.validPlayerCount) 人)")
+                    Text("📋 房间席位配置")
                         .font(.caption)
                         .bold()
                         .foregroundColor(.white.opacity(0.8))
@@ -3719,7 +3762,7 @@ struct RoomLobbyView: View {
                 }) {
                     HStack {
                         Image(systemName: "play.fill")
-                        Text("全员开始对决 (\(game.validPlayerCount) 人)").bold()
+                        Text("全员开始对决 ▶").bold()
                     }
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity)
@@ -3888,18 +3931,26 @@ struct StartMenuView: View {
                         .overlay(Color.black.opacity(0.35))
                 }
                 
-                VStack(spacing: 0) {
-                    Spacer()
-                    
+                ScrollView(.vertical) {
                     VStack(spacing: 16) {
                         Text("COLOR WAR")
                             .font(.system(size: 36, weight: .black, design: .rounded))
                             .foregroundColor(.white)
-                        
+
+                        Picker("游戏模式", selection: $selectedTab) {
+                            Text("单机模式").tag(0)
+                            Text("云端联机").tag(1)
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(maxWidth: 440)
+                        .padding(.bottom, 2)
+
                         if selectedTab == 0 {
-                            LocalGameSetupView(game: game) {
+                            LocalGameSetupView(game: game, onStartGame: {
                                 isSpinningRandomWheel = true
-                            }
+                            }, onChooseBackground: {
+                                showPhotoPicker = true
+                            })
                             .transition(.opacity)
                         } else {
                             RemoteWebSocketSetupView(game: game) {
@@ -3909,10 +3960,10 @@ struct StartMenuView: View {
                         }
                     }
                     .frame(maxWidth: 440)
-                    
-                    Spacer()
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 20)
+                    .frame(maxWidth: .infinity)
                 }
-                .padding(.horizontal, 20)
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -3928,36 +3979,6 @@ struct StartMenuView: View {
                     }
                 }
                 
-                ToolbarItem(placement: .principal) {
-                    Picker("Game Mode", selection: $selectedTab) {
-                        Text("单机模式").tag(0)
-                        Text("在线 WebSocket").tag(1)
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 220)
-                }
-                
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button {
-                            showPhotoPicker = true
-                        } label: {
-                            Label("从相册选择背景", systemImage: "photo.on.rectangle")
-                        }
-                        
-                        if game.customBackgroundImage != nil {
-                            Button(role: .destructive) {
-                                game.saveCustomBackground(nil)
-                            } label: {
-                                Label("清除自定义背景", systemImage: "trash")
-                            }
-                        }
-                    } label: {
-                        Image(systemName: "photo.badge.plus")
-                            .foregroundColor(.white)
-                            .font(.system(size: 16, weight: .medium))
-                    }
-                }
             }
             .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhotosItem, matching: .images)
             .sheet(isPresented: $game.showArchivePickerSheet) {
@@ -4114,12 +4135,13 @@ struct GamePlayView: View {
                             isGameStarted = false
                         }
                     }) {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 16, weight: .semibold))
+                        Label("菜单", systemImage: "chevron.left")
+                            .font(.caption.bold())
                             .foregroundColor(.white)
-                            .frame(width: 34, height: 34)
-                            .contentShape(Circle())
-                            .glassEffect(.regular.interactive(), in: .circle)
+                            .padding(.horizontal, 10)
+                            .frame(height: 34)
+                            .contentShape(Capsule())
+                            .glassEffect(.regular.interactive(), in: .capsule)
                     }
                     .buttonStyle(.plain)
                     
@@ -4147,12 +4169,13 @@ struct GamePlayView: View {
                     Spacer()
                     
                     Button(action: { game.showControlSheet = true }) {
-                        Image(systemName: "gearshape.fill")
-                            .font(.system(size: 16, weight: .semibold))
+                        Label("控制", systemImage: "gearshape.fill")
+                            .font(.caption.bold())
                             .foregroundColor(.white)
-                            .frame(width: 34, height: 34)
-                            .contentShape(Circle())
-                            .glassEffect(.regular.interactive(), in: .circle)
+                            .padding(.horizontal, 10)
+                            .frame(height: 34)
+                            .contentShape(Capsule())
+                            .glassEffect(.regular.interactive(), in: .capsule)
                     }
                     .buttonStyle(.plain)
                 }
@@ -4315,7 +4338,7 @@ struct PlayerTakeoverSheet: View {
                     }
                 }
                 
-                Section(header: Text("AI 思考算力/档位调整")) {
+                Section(header: Text("AI 算力/深度")) {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
                             Text(game.aiDifficultyLevel.title)
