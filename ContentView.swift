@@ -2457,6 +2457,21 @@ final class GameModel: ObservableObject {
         WebSocketNetworkManager.shared.disconnect()
     }
     
+    @discardableResult
+    func addAIToRemoteLobby() -> Bool {
+        guard activeOnlineMode == .remoteWS,
+              WebSocketNetworkManager.shared.isConnected,
+              WebSocketNetworkManager.shared.isHost,
+              !isGameInPlay,
+              let seat = playerTypes.firstIndex(of: .disabled) else { return false }
+
+        let aiType: PlayerControlType = Bool.random() ? .mathNightmare : .enhancedNightmare
+        playerNames[seat] = "\(aiType.rawValue) \(seat + 1)"
+        playerTypes[seat] = aiType
+        syncRoomConfigToPeers()
+        return true
+    }
+
     func updatePlayerType(at index: Int, to newType: PlayerControlType, forceInternal: Bool = false) {
         guard index >= 0 && index < PlayerPreset.maxPlayers else { return }
         // Protect the model as well as the UI. Internal disconnect/recovery handling may still update a seat.
@@ -3752,11 +3767,13 @@ struct RoomLobbyView: View {
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
             if isHost {
-                if !game.isOnlineMultiplayer {
+                if !game.isOnlineMultiplayer || (game.activeOnlineMode == .remoteWS && wsManager.isHost) {
                     Button(action: {
-                        if let disabledIdx = game.playerTypes.firstIndex(of: .disabled) {
+                        if game.isOnlineMultiplayer {
+                            game.addAIToRemoteLobby()
+                        } else if let disabledIdx = game.playerTypes.firstIndex(of: .disabled) {
                             let randomType: PlayerControlType = Bool.random() ? .mathNightmare : .enhancedNightmare
-                            game.playerNames[disabledIdx] = "\(randomType.rawValue) \(disabledIdx+1)"
+                            game.playerNames[disabledIdx] = "\(randomType.rawValue) \(disabledIdx + 1)"
                             game.updatePlayerType(at: disabledIdx, to: randomType)
                         }
                     }) {
@@ -3768,6 +3785,8 @@ struct RoomLobbyView: View {
                         .foregroundColor(.cyan)
                         .padding(.vertical, 4)
                     }
+                    .disabled(game.playerTypes.allSatisfy { $0 != .disabled } || game.isGameInPlay)
+                    .opacity(game.playerTypes.allSatisfy { $0 != .disabled } || game.isGameInPlay ? 0.45 : 1.0)
                 }
                 
                 Button(action: {
@@ -3776,7 +3795,7 @@ struct RoomLobbyView: View {
                 }) {
                     HStack {
                         Image(systemName: "play.fill")
-                        Text(game.activeOnlineMode == .remoteWS ? "全员开始对决 ▶" : "全员开始对决 (\(game.validPlayerCount) 人)").bold()
+                        Text(game.activeOnlineMode == .remoteWS ? "全员开始对决" : "全员开始对决 (\(game.validPlayerCount) 人)").bold()
                     }
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity)
