@@ -2141,7 +2141,13 @@ final class GameModel: ObservableObject {
             }
             if let hexes = packet.colorsHex { self.colors = hexes.map { Color(hex: $0) } }
             if let ems = packet.emojis { self.emojis = ems }
-            if let sz = packet.boardSize, (5...12).contains(sz) { self.boardSize = sz }
+            // WebSocket hosts own their pending lobby selection. The server echoes each
+            // canonical hostConfig to everyone, including the host; a delayed older echo
+            // must not roll the host's slider back while guests still consume that config.
+            if !(WebSocketNetworkManager.shared.isConnected && WebSocketNetworkManager.shared.isHost),
+               let sz = packet.boardSize, (5...12).contains(sz) {
+                self.boardSize = sz
+            }
             if let rnd = packet.isRandomFirstPlayer { self.isRandomFirstPlayer = rnd }
             if let aiLvl = packet.aiLevelRaw, let level = AIDifficultyLevel(rawValue: aiLvl) { self.aiDifficultyLevel = level }
             isApplyingRoomConfiguration = false
@@ -3574,18 +3580,11 @@ struct RoomLobbyView: View {
     let onStartGame: () -> Void
     
     @State private var selectedPlayerForEmoji: IdentifiableInt? = nil
-    @State private var cloudBoardSizeDraft: Double? = nil
     
     var isHost: Bool {
         p2pManager.isHost || wsManager.isHost
     }
 
-    private var displayedBoardSize: Int {
-        if game.activeOnlineMode == .remoteWS, isHost, let cloudBoardSizeDraft {
-            return Int(cloudBoardSizeDraft.rounded())
-        }
-        return game.boardSize
-    }
     
     var body: some View {
         VStack(spacing: 12) {
@@ -3625,42 +3624,26 @@ struct RoomLobbyView: View {
             if isHost {
                 VStack(spacing: 8) {
                     HStack {
-                        Text("网格尺寸: \(displayedBoardSize) × \(displayedBoardSize)")
+                        Text("网格尺寸: \(game.boardSize) × \(game.boardSize)")
                             .font(.caption)
                             .bold()
                             .foregroundColor(.white)
                         Spacer()
                     }
 
-                    if game.activeOnlineMode == .remoteWS {
-                        Slider(
-                            value: Binding<Double>(
-                                get: { cloudBoardSizeDraft ?? Double(game.boardSize) },
-                                set: { cloudBoardSizeDraft = $0 }
-                            ),
-                            in: 5...12,
-                            step: 1,
-                            onEditingChanged: { isEditing in
-                                guard !isEditing else { return }
-                                let selectedSize = Int((cloudBoardSizeDraft ?? Double(game.boardSize)).rounded())
-                                cloudBoardSizeDraft = nil
-                                if selectedSize != game.boardSize {
-                                    game.boardSize = selectedSize
-                                }
+                    Slider(
+                        value: Binding<Double>(
+                            get: { Double(game.boardSize) },
+                            set: { value in
+                                let selectedSize = Int(value.rounded())
+                                guard (5...12).contains(selectedSize), selectedSize != game.boardSize else { return }
+                                game.boardSize = selectedSize
                             }
-                        )
-                        .tint(Color.darkNavyBlue)
-                    } else {
-                        Slider(
-                            value: Binding<Double>(
-                                get: { Double(game.boardSize) },
-                                set: { game.boardSize = Int($0) }
-                            ),
-                            in: 5...12,
-                            step: 1
-                        )
-                        .tint(Color.darkNavyBlue)
-                    }
+                        ),
+                        in: 5...12,
+                        step: 1
+                    )
+                    .tint(Color.darkNavyBlue)
 
                     if game.activeOnlineMode == .remoteWS {
                         HStack {
