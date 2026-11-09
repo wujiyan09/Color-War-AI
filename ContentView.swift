@@ -3311,7 +3311,7 @@ struct LocalGameSetupView: View {
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
             HStack(spacing: 8) {
-                Button(action: onChooseBackground) label: {
+                Button(action: onChooseBackground) {
                     Label("选择背景", systemImage: "photo.on.rectangle")
                         .font(.caption.bold())
                         .frame(maxWidth: .infinity)
