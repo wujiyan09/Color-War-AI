@@ -1757,6 +1757,7 @@ final class GameModel: ObservableObject {
     @Published var flyingOrbs: [FlyingOrb] = []
     @Published var emphasizedCells: Set<Int> = []
     @Published var showDisconnectedAlert: Bool = false
+    @Published var disconnectedMessage: String = "房主已断开连接，对局已自动结束。"
     @Published var activeOnlineMode: ActiveOnlineMode = .none
     
     @Published var customBackgroundImage: UIImage? = nil
@@ -2103,6 +2104,7 @@ final class GameModel: ObservableObject {
             }
 
         case .roomClosed:
+            self.disconnectedMessage = packet.message ?? "房主已断开连接，对局已自动结束。"
             self.showDisconnectedAlert = true
             self.exitToMenu()
 
@@ -4305,6 +4307,13 @@ struct GamePlayView: View {
         .sheet(isPresented: $game.showControlSheet) {
             PlayerTakeoverSheet(game: game)
         }
+        .alert("连接断开", isPresented: $game.showDisconnectedAlert) {
+            Button("确定", role: .cancel) {
+                withAnimation(.spring()) { isGameStarted = false }
+            }
+        } message: {
+            Text(game.disconnectedMessage)
+        }
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true
         }
@@ -4541,11 +4550,6 @@ struct ContentView: View {
                         }
                     }
                 )
-            }
-        }
-        .alert("房间断开连接", isPresented: $game.showDisconnectedAlert) {
-            Button("确定", role: .cancel) {
-                withAnimation(.spring()) { isGameStarted = false }
             }
         }
         .onChange(of: game.shouldNavigateToGame) { _, shouldNav in
