@@ -1795,20 +1795,31 @@ final class GameModel: ObservableObject {
     }
     
     func validSelectableTypes(forPlayerIndex idx: Int, isInLobby: Bool = false) -> [PlayerControlType] {
+        guard idx >= 0 && idx < playerTypes.count else { return [] }
         let isP2PConnected = P2PNetworkManager.shared.isConnected
         let isWSConnected = WebSocketNetworkManager.shared.isConnected
-        
-        if !isP2PConnected && !isWSConnected && !isInLobby && !isGameInPlay {
+        let isOnline = isP2PConnected || isWSConnected
+
+        if isOnline && !isGameInPlay && isInLobby {
+            let isHost = P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost
+            guard isHost else { return [] }
+            if idx == myPlayerIndex {
+                return [.human, .mathNightmare, .enhancedNightmare]
+            }
+            if playerTypes[idx] == .p2pNetwork { return [.p2pNetwork] }
+            return [.mathNightmare, .enhancedNightmare, .disabled]
+        }
+
+        if !isOnline && !isInLobby && !isGameInPlay {
             return [.human, .mathNightmare, .enhancedNightmare, .disabled]
         }
-        
+
         let isSeat0 = (idx == 0)
-        let isMySeat = (isP2PConnected || isWSConnected) && (idx == myPlayerIndex)
-        
+        let isMySeat = isOnline && (idx == myPlayerIndex)
         return PlayerControlType.allCases.filter { type in
             if (isSeat0 || isMySeat) && type == .disabled { return false }
             if isGameInPlay { return type == playerTypes[idx] || type.isAI || type == .human }
-            if type == .p2pNetwork { return isP2PConnected || isWSConnected || isInLobby }
+            if type == .p2pNetwork { return isOnline || isInLobby }
             return true
         }
     }
@@ -2430,7 +2441,7 @@ final class GameModel: ObservableObject {
         guard index >= 0 && index < PlayerPreset.maxPlayers else { return }
         
         if !forceInternal {
-            let valids = validSelectableTypes(forPlayerIndex: index, isInLobby: false)
+            let valids = validSelectableTypes(forPlayerIndex: index, isInLobby: !isGameInPlay)
             guard valids.contains(newType) else { return }
         }
         
@@ -3643,9 +3654,24 @@ struct RoomLobbyView: View {
                                 
                                 Spacer()
                                 
-                                Text(game.playerTypes[idx].rawValue)
-                                    .font(.caption)
-                                    .foregroundColor(.white.opacity(0.6))
+                                let selectableTypes = game.validSelectableTypes(forPlayerIndex: idx, isInLobby: true)
+                                if isHost && selectableTypes.count > 1 {
+                                    Picker("角色", selection: Binding(
+                                        get: { game.playerTypes[idx] },
+                                        set: { game.updatePlayerType(at: idx, to: $0) }
+                                    )) {
+                                        ForEach(selectableTypes) { type in
+                                            Text(type.rawValue).tag(type)
+                                        }
+                                    }
+                                    .pickerStyle(.menu)
+                                    .tint(.cyan)
+                                    .frame(maxWidth: 170, alignment: .trailing)
+                                } else {
+                                    Text(game.playerTypes[idx].rawValue)
+                                        .font(.caption)
+                                        .foregroundColor(.white.opacity(0.6))
+                                }
                             }
                             .listRowBackground(Color.white.opacity(0.06))
                         }
