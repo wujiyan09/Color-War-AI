@@ -1727,9 +1727,8 @@ final class GameModel: ObservableObject {
     
     @Published var board: [[Cell]] = []
     
-    @Published var playerNames: [String] {
-        didSet { debounceSave() }
-    }
+    @Published var playerNames: [String]
+    @Published private(set) var localPlayerNames: [String]
     @Published var playerTypes: [PlayerControlType] {
         didSet {
             debounceSave()
@@ -1808,6 +1807,22 @@ final class GameModel: ObservableObject {
         self.playerNames[0] = P2PNetworkManager.shared.myNickname
         self.myPlayerIndex = 0
         self.refreshActivePlayers()
+    }
+
+    func updateLocalPlayerName(at index: Int, to name: String) {
+        guard (0..<PlayerPreset.maxPlayers).contains(index) else { return }
+        var names = localPlayerNames
+        names[index] = name
+        localPlayerNames = names
+        UserDefaults.standard.set(names, forKey: "CW_Saved_PlayerNames")
+        if !isOnlineMultiplayer && activeOnlineMode == .none {
+            playerNames[index] = name
+        }
+    }
+
+    func prepareLocalPlayerNamesForGame() {
+        guard !isOnlineMultiplayer else { return }
+        playerNames = localPlayerNames
     }
     
     var isOnlineMultiplayer: Bool {
@@ -1903,12 +1918,15 @@ final class GameModel: ObservableObject {
             ]
         }
         
+        let savedPlayerNames: [String]
         if let namesArray = UserDefaults.standard.stringArray(forKey: "CW_Saved_PlayerNames"),
            namesArray.count == PlayerPreset.maxPlayers {
-            self.playerNames = namesArray
+            savedPlayerNames = namesArray
         } else {
-            self.playerNames = PlayerPreset.defaultNames
+            savedPlayerNames = PlayerPreset.defaultNames
         }
+        self.localPlayerNames = savedPlayerNames
+        self.playerNames = savedPlayerNames
         
         if let hexArray = UserDefaults.standard.stringArray(forKey: "CW_Saved_PlayerColors"),
            hexArray.count == PlayerPreset.maxPlayers {
@@ -2201,7 +2219,11 @@ final class GameModel: ObservableObject {
             : myPlayerIndex
         guard seat >= 0 && seat < playerNames.count else { return }
         myPlayerIndex = seat
-        playerNames[seat] = name
+        if isOnlineMultiplayer {
+            playerNames[seat] = name
+        } else {
+            updateLocalPlayerName(at: seat, to: name)
+        }
 
         if P2PNetworkManager.shared.isConnected || WebSocketNetworkManager.shared.isConnected {
             let sequence = WebSocketNetworkManager.shared.isConnected
@@ -2341,7 +2363,6 @@ final class GameModel: ObservableObject {
         saveWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
-            UserDefaults.standard.set(self.playerNames, forKey: "CW_Saved_PlayerNames")
             if let encoded = try? JSONEncoder().encode(self.playerTypes) {
                 UserDefaults.standard.set(encoded, forKey: "CW_Saved_PlayerTypes")
             }
@@ -2439,6 +2460,12 @@ final class GameModel: ObservableObject {
         beginGame()
     }
     
+    func returnToMenuPreservingOnlineSession() {
+        shouldNavigateToGame = false
+        guard !(isOnlineMultiplayer && activeOnlineMode != .none) else { return }
+        exitToMenu()
+    }
+
     func exitToMenu() {
         currentGameSessionID = UUID()
         stopOnlineSnapshotRecovery()
@@ -3246,8 +3273,8 @@ struct LocalGameSetupView: View {
                     .labelsHidden()
                     
                     TextField("名称", text: Binding(
-                        get: { game.playerNames[safe: idx] ?? "玩家\(idx+1)" },
-                        set: { if idx < game.playerNames.count { game.playerNames[idx] = $0 } }
+                        get: { game.localPlayerNames[safe: idx] ?? "玩家\(idx+1)" },
+                        set: { game.updateLocalPlayerName(at: idx, to: $0) }
                     ))
                     .foregroundColor(.white)
                     .font(.subheadline)
@@ -3943,9 +3970,8 @@ struct OnlineGameSetupView: View {
 
 struct StartMenuView: View {
     @ObservedObject var game: GameModel
+    @Binding var selectedTab: Int
     @Binding var isSpinningRandomWheel: Bool
-
-    @State private var selectedTab: Int = 0
     @State private var showPhotoPicker: Bool = false
     @State private var selectedPhotosItem: PhotosPickerItem? = nil
 
@@ -3974,6 +4000,7 @@ struct StartMenuView: View {
                                 .foregroundColor(.white)
 
                             LocalGameSetupView(game: game) {
+                                game.prepareLocalPlayerNamesForGame()
                                 isSpinningRandomWheel = true
                             }
                             .transition(.opacity)
@@ -4196,7 +4223,7 @@ struct GamePlayView: View {
             VStack(spacing: 8) {
                 HStack {
                     Button(action: {
-                        game.exitToMenu()
+                        game.returnToMenuPreservingOnlineSession()
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                             isGameStarted = false
                         }
@@ -4302,7 +4329,7 @@ struct GamePlayView: View {
                         .buttonStyle(.plain)
                         
                         Button(action: {
-                            game.exitToMenu()
+                            game.returnToMenuPreservingOnlineSession()
                             withAnimation(.spring()) { isGameStarted = false }
                         }) {
                             Text("返回主菜单")
@@ -4537,6 +4564,7 @@ struct ContentView: View {
     @StateObject private var game = GameModel()
     @State private var isGameStarted = false
     @State private var isSpinningRandomWheel = false
+    @State private var selectedSetupTab = 0
     
     var body: some View {
         ZStack {
@@ -4552,6 +4580,7 @@ struct ContentView: View {
             } else {
                 StartMenuView(
                     game: game,
+                    selectedTab: $selectedSetupTab,
                     isSpinningRandomWheel: $isSpinningRandomWheel
                 )
             }
