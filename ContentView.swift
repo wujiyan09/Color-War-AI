@@ -1794,21 +1794,15 @@ final class GameModel: ObservableObject {
         self.refreshActivePlayers()
     }
     
+    var isOnlineMultiplayer: Bool {
+        P2PNetworkManager.shared.isConnected || WebSocketNetworkManager.shared.isConnected
+    }
+
     func validSelectableTypes(forPlayerIndex idx: Int, isInLobby: Bool = false) -> [PlayerControlType] {
         guard idx >= 0 && idx < playerTypes.count else { return [] }
-        let isP2PConnected = P2PNetworkManager.shared.isConnected
-        let isWSConnected = WebSocketNetworkManager.shared.isConnected
-        let isOnline = isP2PConnected || isWSConnected
-
-        if isOnline && !isGameInPlay && isInLobby {
-            let isHost = P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost
-            guard isHost else { return [] }
-            if idx == myPlayerIndex {
-                return [.human, .mathNightmare, .enhancedNightmare]
-            }
-            if playerTypes[idx] == .p2pNetwork { return [.p2pNetwork] }
-            return [.mathNightmare, .enhancedNightmare, .disabled]
-        }
+        let isOnline = isOnlineMultiplayer
+        // Online seats are assigned by the room; no participant may change a seat's role.
+        if isOnline { return [] }
 
         if !isOnline && !isInLobby && !isGameInPlay {
             return [.human, .mathNightmare, .enhancedNightmare, .disabled]
@@ -2439,6 +2433,8 @@ final class GameModel: ObservableObject {
     
     func updatePlayerType(at index: Int, to newType: PlayerControlType, forceInternal: Bool = false) {
         guard index >= 0 && index < PlayerPreset.maxPlayers else { return }
+        // Protect the model as well as the UI. Internal disconnect/recovery handling may still update a seat.
+        if !forceInternal && isOnlineMultiplayer { return }
         
         if !forceInternal {
             let valids = validSelectableTypes(forPlayerIndex: index, isInLobby: !isGameInPlay)
@@ -3219,16 +3215,22 @@ struct LocalGameSetupView: View {
                     
                     Spacer(minLength: 4)
                     
-                    Picker("控制类型", selection: Binding(
-                        get: { game.playerTypes[safe: idx] ?? .disabled },
-                        set: { game.updatePlayerType(at: idx, to: $0) }
-                    )) {
-                        ForEach(game.validSelectableTypes(forPlayerIndex: idx, isInLobby: false)) { type in
-                            Text(type.rawValue).tag(type)
+                    if game.isOnlineMultiplayer {
+                        Text(game.playerTypes[safe: idx]?.rawValue ?? "未加入")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.65))
+                    } else {
+                        Picker("控制类型", selection: Binding(
+                            get: { game.playerTypes[safe: idx] ?? .disabled },
+                            set: { game.updatePlayerType(at: idx, to: $0) }
+                        )) {
+                            ForEach(game.validSelectableTypes(forPlayerIndex: idx, isInLobby: false)) { type in
+                                Text(type.rawValue).tag(type)
+                            }
                         }
+                        .pickerStyle(.menu)
+                        .tint(.cyan)
                     }
-                    .pickerStyle(.menu)
-                    .tint(.cyan)
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 2)
@@ -3655,7 +3657,7 @@ struct RoomLobbyView: View {
                                 Spacer()
                                 
                                 let selectableTypes = game.validSelectableTypes(forPlayerIndex: idx, isInLobby: true)
-                                if isHost && selectableTypes.count > 1 {
+                                if isHost && !game.isOnlineMultiplayer && selectableTypes.count > 1 {
                                     Picker("角色", selection: Binding(
                                         get: { game.playerTypes[idx] },
                                         set: { game.updatePlayerType(at: idx, to: $0) }
@@ -3677,7 +3679,7 @@ struct RoomLobbyView: View {
                         }
                     }
                     .onDelete { indexSet in
-                        guard isHost else { return }
+                        guard isHost, !game.isOnlineMultiplayer else { return }
                         for idx in indexSet {
                             if idx != game.myPlayerIndex {
                                 game.updatePlayerType(at: idx, to: .disabled)
@@ -3693,20 +3695,22 @@ struct RoomLobbyView: View {
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
             if isHost {
-                Button(action: {
-                    if let disabledIdx = game.playerTypes.firstIndex(of: .disabled) {
-                        let randomType: PlayerControlType = Bool.random() ? .mathNightmare : .enhancedNightmare
-                        game.playerNames[disabledIdx] = "\(randomType.rawValue) \(disabledIdx+1)"
-                        game.updatePlayerType(at: disabledIdx, to: randomType)
+                if !game.isOnlineMultiplayer {
+                    Button(action: {
+                        if let disabledIdx = game.playerTypes.firstIndex(of: .disabled) {
+                            let randomType: PlayerControlType = Bool.random() ? .mathNightmare : .enhancedNightmare
+                            game.playerNames[disabledIdx] = "\(randomType.rawValue) \(disabledIdx+1)"
+                            game.updatePlayerType(at: disabledIdx, to: randomType)
+                        }
+                    }) {
+                        HStack {
+                            Image(systemName: "plus.circle.fill")
+                            Text("增加 AI 人机 (随机噩梦/加强版)")
+                        }
+                        .font(.subheadline.bold())
+                        .foregroundColor(.cyan)
+                        .padding(.vertical, 4)
                     }
-                }) {
-                    HStack {
-                        Image(systemName: "plus.circle.fill")
-                        Text("增加 AI 人机 (随机噩梦/加强版)")
-                    }
-                    .font(.subheadline.bold())
-                    .foregroundColor(.cyan)
-                    .padding(.vertical, 4)
                 }
                 
                 Button(action: {
@@ -4344,15 +4348,21 @@ struct PlayerTakeoverSheet: View {
                             Text(game.playerNames[safe: idx] ?? "玩家\(idx+1)").font(.body)
                             Spacer()
                             
-                            Picker("", selection: Binding(
-                                get: { game.playerTypes[safe: idx] ?? .disabled },
-                                set: { game.updatePlayerType(at: idx, to: $0) }
-                            )) {
-                                ForEach(game.validSelectableTypes(forPlayerIndex: idx, isInLobby: false)) { type in
-                                    Text(type.rawValue).tag(type)
+                            if game.isOnlineMultiplayer {
+                                Text(game.playerTypes[safe: idx]?.rawValue ?? "未加入")
+                                    .font(.caption)
+                                    .foregroundColor(.white.opacity(0.65))
+                            } else {
+                                Picker("", selection: Binding(
+                                    get: { game.playerTypes[safe: idx] ?? .disabled },
+                                    set: { game.updatePlayerType(at: idx, to: $0) }
+                                )) {
+                                    ForEach(game.validSelectableTypes(forPlayerIndex: idx, isInLobby: false)) { type in
+                                        Text(type.rawValue).tag(type)
+                                    }
                                 }
+                                .pickerStyle(.menu)
                             }
-                            .pickerStyle(.menu)
                         }
                     }
                 }
