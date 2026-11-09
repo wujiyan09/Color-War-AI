@@ -3965,30 +3965,19 @@ struct StartMenuView: View {
                     }
                     .padding(.horizontal, 20)
                 } else {
-                    ScrollView(.vertical) {
-                        VStack(spacing: 16) {
-                            Text("COLOR WAR")
-                                .font(.system(size: 36, weight: .black, design: .rounded))
-                                .foregroundColor(.white)
+                    VStack(spacing: 16) {
+                        Text("COLOR WAR")
+                            .font(.system(size: 36, weight: .black, design: .rounded))
+                            .foregroundColor(.white)
 
-                            Picker("游戏模式", selection: $selectedTab) {
-                                Text("单机模式").tag(0)
-                                Text("云端联机").tag(1)
-                            }
-                            .pickerStyle(.segmented)
-                            .frame(maxWidth: 440)
-                            .padding(.bottom, 2)
-
-                            RemoteWebSocketSetupView(game: game) {
-                                isSpinningRandomWheel = true
-                            }
-                            .transition(.opacity)
+                        RemoteWebSocketSetupView(game: game) {
+                            isSpinningRandomWheel = true
                         }
-                        .frame(maxWidth: 440)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 20)
-                        .frame(maxWidth: .infinity)
+                        .transition(.opacity)
                     }
+                    .frame(maxWidth: 440)
+                    .padding(.horizontal, 20)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
             .toolbar {
@@ -4005,16 +3994,16 @@ struct StartMenuView: View {
                     }
                 }
 
-                if selectedTab == 0 {
-                    ToolbarItem(placement: .principal) {
-                        Picker("Game Mode", selection: $selectedTab) {
-                            Text("单机模式").tag(0)
-                            Text("在线 WebSocket").tag(1)
-                        }
-                        .pickerStyle(.segmented)
-                        .frame(width: 220)
+                ToolbarItem(placement: .principal) {
+                    Picker("Game Mode", selection: $selectedTab) {
+                        Text("单机模式").tag(0)
+                        Text("云端联机").tag(1)
                     }
+                    .pickerStyle(.segmented)
+                    .frame(width: 220)
+                }
 
+                if selectedTab == 0 {
                     ToolbarItem(placement: .topBarTrailing) {
                         Menu {
                             Button {
