@@ -262,7 +262,7 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
         didSet {
             guard !myNickname.isEmpty else { return }
             UserDefaults.standard.set(myNickname, forKey: "CW_Saved_MyNickname")
-            if !isConnected && !isConnecting {
+            if !isConnected && !isConnecting && !WebSocketNetworkManager.shared.isConnected {
                 rebuildPeerID()
             }
         }
@@ -548,10 +548,9 @@ final class WebSocketNetworkManager: ObservableObject {
               let data = try? JSONEncoder().encode(packet),
               let jsonString = String(data: data, encoding: .utf8) else { return }
         task.send(.string(jsonString)) { [weak self] error in
-            guard let error else { return }
+            guard let self, let error else { return }
             DispatchQueue.main.async {
-                self?.lastError = "WebSocket 发送失败：\(error.localizedDescription)"
-                self?.isConnected = false
+                self.handleSocketFailure(error, task: task)
             }
         }
     }
@@ -589,12 +588,25 @@ final class WebSocketNetworkManager: ObservableObject {
                 self.listenForMessages(task)
             case .failure(let error):
                 DispatchQueue.main.async {
-                    guard self.webSocketTask === task else { return }
-                    self.isConnected = false
-                    self.isConnecting = false
-                    self.lastError = "无法连接服务器：\(error.localizedDescription)"
+                    self.handleSocketFailure(error, task: task)
                 }
             }
+        }
+    }
+
+    private func handleSocketFailure(_ error: Error, task: URLSessionWebSocketTask) {
+        guard webSocketTask === task else { return }
+        let wasConnected = isConnected
+        let wasGuest = !isHost
+        isConnected = false
+        isConnecting = false
+        if wasConnected && wasGuest {
+            lastError = "远程房间连接中断，对局已结束。"
+            var closed = P2PPacket(sequenceID: 0, action: .roomClosed, senderID: "server")
+            closed.message = lastError
+            packetSubject.send(closed)
+        } else {
+            lastError = "WebSocket 连接中断：\(error.localizedDescription)"
         }
     }
 }
@@ -1730,6 +1742,7 @@ final class GameModel: ObservableObject {
     @Published var flyingOrbs: [FlyingOrb] = []
     @Published var emphasizedCells: Set<Int> = []
     @Published var showDisconnectedAlert: Bool = false
+    @Published var disconnectedMessage: String = "房主已断开连接，对局已自动结束。"
     @Published var activeOnlineMode: ActiveOnlineMode = .none
     
     @Published var customBackgroundImage: UIImage? = nil
@@ -2010,7 +2023,11 @@ final class GameModel: ObservableObject {
     }
 
     private func handleIncomingPacket(_ packet: P2PPacket) {
-        if packet.action != .ping && packet.action != .ack {
+        if packet.action == .roomJoined {
+            // A new room has a new sequence stream; reset before applying its first packet.
+            lastReceivedSeqID = 0
+        }
+        if packet.action != .ping && packet.action != .ack && packet.action != .roomClosed {
             guard packet.sequenceID > self.lastReceivedSeqID else { return }
             self.lastReceivedSeqID = packet.sequenceID
         }
@@ -2062,9 +2079,11 @@ final class GameModel: ObservableObject {
                 self.playerNames[seat] = self.isGameInPlay ? "AI 玩家\(seat + 1)" : PlayerPreset.defaultNames[seat]
                 self.refreshActivePlayers()
                 self.syncRoomConfigToPeers()
+                if self.currentPlayer == seat && !self.isProcessingCascade { self.checkAndRunAITurn() }
             }
 
         case .roomClosed:
+            self.disconnectedMessage = packet.message ?? "房主已断开连接，对局已自动结束。"
             self.showDisconnectedAlert = true
             self.exitToMenu()
 
@@ -2098,12 +2117,29 @@ final class GameModel: ObservableObject {
             }
             if let hexes = packet.colorsHex { self.colors = hexes.map { Color(hex: $0) } }
             if let ems = packet.emojis { self.emojis = ems }
-            if let sz = packet.boardSize { self.boardSize = sz }
+            if let sz = packet.boardSize, (5...12).contains(sz) { self.boardSize = sz }
             if let rnd = packet.isRandomFirstPlayer { self.isRandomFirstPlayer = rnd }
             if let aiLvl = packet.aiLevelRaw, let level = AIDifficultyLevel(rawValue: aiLvl) { self.aiDifficultyLevel = level }
             self.refreshActivePlayers()
 
         case .startGame:
+            if let size = packet.boardSize, (5...12).contains(size) {
+                self.boardSize = size
+            }
+            if let names = packet.playerNames {
+                self.playerNames = names
+            }
+            if let types = packet.playerTypes {
+                self.playerTypes = types
+            }
+            // The server roster describes connected remote seats as network players;
+            // locally, this device must control its own seat as a human.
+            if WebSocketNetworkManager.shared.isConnected,
+               !WebSocketNetworkManager.shared.isHost,
+               self.myPlayerIndex >= 0, self.myPlayerIndex < self.playerTypes.count {
+                self.playerTypes[self.myPlayerIndex] = .human
+            }
+            self.refreshActivePlayers()
             if let firstP = packet.firstPlayerIndex {
                 self.resetGame(chosenFirstPlayer: firstP)
                 self.beginGame()
@@ -2129,8 +2165,11 @@ final class GameModel: ObservableObject {
         let name = String(proposedName.trimmingCharacters(in: .whitespacesAndNewlines).prefix(32))
         guard !name.isEmpty else { return }
         P2PNetworkManager.shared.myNickname = name
-        let seat = myPlayerIndex
+        let seat = WebSocketNetworkManager.shared.isConnected
+            ? WebSocketNetworkManager.shared.playerIndex
+            : myPlayerIndex
         guard seat >= 0 && seat < playerNames.count else { return }
+        myPlayerIndex = seat
         playerNames[seat] = name
 
         if P2PNetworkManager.shared.isConnected || WebSocketNetworkManager.shared.isConnected {
@@ -2182,8 +2221,13 @@ final class GameModel: ObservableObject {
     }
 
     private func applyAuthoritativeSnapshot(_ packet: P2PPacket) {
-        guard let compactSnap = packet.compactBoardSnapshot, let turnP = packet.currentTurnIndex else { return }
+        guard let compactSnap = packet.compactBoardSnapshot, let turnP = packet.currentTurnIndex,
+              (0..<PlayerPreset.maxPlayers).contains(turnP) else { return }
         stopOnlineSnapshotRecovery()
+        if let size = packet.boardSize, (5...12).contains(size), size != boardSize {
+            boardSize = size
+            updateCachedPlayableCells()
+        }
         if let names = packet.playerNames { self.playerNames = names }
         if let types = packet.playerTypes { self.playerTypes = types }
         if WebSocketNetworkManager.shared.isConnected && !WebSocketNetworkManager.shared.isHost,
@@ -2194,7 +2238,7 @@ final class GameModel: ObservableObject {
         for item in compactSnap {
             let r = Int(item.r)
             let c = Int(item.c)
-            if r < self.boardSize && c < self.boardSize {
+            if r >= 0 && r < self.boardSize && c >= 0 && c < self.boardSize {
                 grid[r][c] = Cell(owner: item.owner < 0 ? nil : Int(item.owner), count: Int(item.count))
             }
         }
@@ -2316,7 +2360,6 @@ final class GameModel: ObservableObject {
     
     func resetGame(chosenFirstPlayer: Int? = nil) {
         currentGameSessionID = UUID()
-        lastReceivedSeqID = 0
         stopOnlineSnapshotRecovery()
         pendingStateSnapshot = nil
         aiTask?.cancel()
@@ -2348,6 +2391,7 @@ final class GameModel: ObservableObject {
             let seq = P2PNetworkManager.shared.isConnected ? P2PNetworkManager.shared.getNextSequenceID() : UInt64.random(in: 1...999999)
             var startPacket = P2PPacket(sequenceID: seq, action: .startGame, senderID: P2PNetworkManager.shared.myNickname)
             startPacket.firstPlayerIndex = currentPlayer
+            startPacket.boardSize = boardSize
             if P2PNetworkManager.shared.isConnected {
                 P2PNetworkManager.shared.sendPacket(startPacket)
             } else if WebSocketNetworkManager.shared.isConnected {
@@ -3378,12 +3422,34 @@ struct LocalDeviceBrowserInlineView: View {
 struct RemoteWebSocketSetupView: View {
     @ObservedObject var game: GameModel
     @ObservedObject var wsManager = WebSocketNetworkManager.shared
+    @ObservedObject var p2pManager = P2PNetworkManager.shared
     let onStartGame: () -> Void
 
     @State private var inputRoomCode: String = ""
 
     var body: some View {
         VStack(spacing: 12) {
+            if !wsManager.isConnected {
+                HStack(spacing: 8) {
+                    Text("我的玩家昵称:")
+                        .font(.subheadline)
+                        .bold()
+                        .foregroundColor(.white)
+                    TextField("输入昵称", text: $p2pManager.myNickname)
+                        .textFieldStyle(.roundedBorder)
+                        .textInputAutocapitalization(.never)
+                        .frame(maxWidth: 180)
+                        .submitLabel(.done)
+                        .onSubmit { game.renameMyPlayer(to: p2pManager.myNickname) }
+                    Button("更新昵称") {
+                        game.renameMyPlayer(to: p2pManager.myNickname)
+                    }
+                    .disabled(p2pManager.myNickname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                .padding(10)
+                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+            }
+
             if wsManager.isConnected {
                 VStack(spacing: 12) {
                     HStack {
@@ -3489,7 +3555,28 @@ struct RoomLobbyView: View {
             }
             .padding(10)
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
-            
+
+            HStack(spacing: 8) {
+                TextField("我的玩家昵称", text: $p2pManager.myNickname)
+                    .textFieldStyle(.roundedBorder)
+                    .textInputAutocapitalization(.never)
+                    .submitLabel(.done)
+                    .onSubmit { game.renameMyPlayer(to: p2pManager.myNickname) }
+                Button("更新昵称") {
+                    game.renameMyPlayer(to: p2pManager.myNickname)
+                }
+                .disabled(p2pManager.myNickname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .padding(.horizontal, 10)
+
+            if !isHost {
+                Text("房间棋盘：\(game.boardSize) × \(game.boardSize)")
+                    .font(.caption.bold())
+                    .foregroundColor(.cyan)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+            }
+
             if isHost {
                 VStack(spacing: 8) {
                     HStack {
@@ -3652,10 +3739,12 @@ struct OnlineGameSetupView: View {
                 
                 TextField("输入昵称", text: $p2pManager.myNickname)
                     .textFieldStyle(.roundedBorder)
-                    .disabled(p2pManager.isConnecting || game.isGameInPlay)
+                    .disabled(p2pManager.isConnecting)
+                    .submitLabel(.done)
+                    .onSubmit { game.renameMyPlayer(to: p2pManager.myNickname) }
                     .frame(maxWidth: 180)
                 Button("更新昵称") { game.renameMyPlayer(to: p2pManager.myNickname) }
-                    .disabled(p2pManager.isConnecting || game.isGameInPlay || p2pManager.myNickname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(p2pManager.isConnecting || p2pManager.myNickname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .padding(10)
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
@@ -4125,7 +4214,7 @@ struct GamePlayView: View {
                 withAnimation(.spring()) { isGameStarted = false }
             }
         } message: {
-            Text("房主已断开连接，对局已自动结束。")
+            Text(game.disconnectedMessage)
         }
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true
