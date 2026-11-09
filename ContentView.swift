@@ -1703,19 +1703,25 @@ final class GameModel: ObservableObject {
     @Published var boardSize: Int {
         didSet {
             UserDefaults.standard.set(boardSize, forKey: "CW_Saved_BoardSize")
-            syncRoomConfigToPeers()
+            if oldValue != boardSize && !isApplyingRoomConfiguration {
+                syncRoomConfigToPeers()
+            }
         }
     }
     @Published var isRandomFirstPlayer: Bool {
         didSet {
             UserDefaults.standard.set(isRandomFirstPlayer, forKey: "CW_Saved_IsRandomFirst")
-            syncRoomConfigToPeers()
+            if oldValue != isRandomFirstPlayer && !isApplyingRoomConfiguration {
+                syncRoomConfigToPeers()
+            }
         }
     }
     @Published var aiDifficultyLevel: AIDifficultyLevel {
         didSet {
             UserDefaults.standard.set(aiDifficultyLevel.rawValue, forKey: "CW_Saved_AIDifficultyLevel")
-            syncRoomConfigToPeers()
+            if oldValue != aiDifficultyLevel && !isApplyingRoomConfiguration {
+                syncRoomConfigToPeers()
+            }
         }
     }
     
@@ -1763,6 +1769,7 @@ final class GameModel: ObservableObject {
     @Published private(set) var cachedOrbCounts: [Int: Int] = [:]
     
     private var lastReceivedSeqID: UInt64 = 0
+    private var isApplyingRoomConfiguration = false
     private var currentGameSessionID: UUID = UUID()
     private var actionQueue: [(Int, Int, Int)] = []
     private var pendingStateSnapshot: P2PPacket? = nil
@@ -2123,6 +2130,9 @@ final class GameModel: ObservableObject {
             }
 
         case .hostConfig:
+            // The server echoes its canonical config to every client, including the host.
+            // Applying that echo must not send another hostConfig and create a feedback loop.
+            isApplyingRoomConfiguration = true
             if let names = packet.playerNames { self.playerNames = names }
             if let types = packet.playerTypes { self.playerTypes = types }
             if WebSocketNetworkManager.shared.isConnected && !WebSocketNetworkManager.shared.isHost,
@@ -2134,6 +2144,7 @@ final class GameModel: ObservableObject {
             if let sz = packet.boardSize, (5...12).contains(sz) { self.boardSize = sz }
             if let rnd = packet.isRandomFirstPlayer { self.isRandomFirstPlayer = rnd }
             if let aiLvl = packet.aiLevelRaw, let level = AIDifficultyLevel(rawValue: aiLvl) { self.aiDifficultyLevel = level }
+            isApplyingRoomConfiguration = false
             self.refreshActivePlayers()
 
         case .startGame:
@@ -3563,9 +3574,17 @@ struct RoomLobbyView: View {
     let onStartGame: () -> Void
     
     @State private var selectedPlayerForEmoji: IdentifiableInt? = nil
+    @State private var cloudBoardSizeDraft: Double? = nil
     
     var isHost: Bool {
         p2pManager.isHost || wsManager.isHost
+    }
+
+    private var displayedBoardSize: Int {
+        if game.activeOnlineMode == .remoteWS, isHost, let cloudBoardSizeDraft {
+            return Int(cloudBoardSizeDraft.rounded())
+        }
+        return game.boardSize
     }
     
     var body: some View {
@@ -3606,22 +3625,42 @@ struct RoomLobbyView: View {
             if isHost {
                 VStack(spacing: 8) {
                     HStack {
-                        Text("网格尺寸: \(game.boardSize) × \(game.boardSize)")
+                        Text("网格尺寸: \(displayedBoardSize) × \(displayedBoardSize)")
                             .font(.caption)
                             .bold()
                             .foregroundColor(.white)
                         Spacer()
                     }
-                    
-                    Slider(
-                        value: Binding<Double>(
-                            get: { Double(game.boardSize) },
-                            set: { game.boardSize = Int($0) }
-                        ),
-                        in: 5...12,
-                        step: 1
-                    )
-                    .tint(Color.darkNavyBlue)
+
+                    if game.activeOnlineMode == .remoteWS {
+                        Slider(
+                            value: Binding<Double>(
+                                get: { cloudBoardSizeDraft ?? Double(game.boardSize) },
+                                set: { cloudBoardSizeDraft = $0 }
+                            ),
+                            in: 5...12,
+                            step: 1,
+                            onEditingChanged: { isEditing in
+                                guard !isEditing else { return }
+                                let selectedSize = Int((cloudBoardSizeDraft ?? Double(game.boardSize)).rounded())
+                                cloudBoardSizeDraft = nil
+                                if selectedSize != game.boardSize {
+                                    game.boardSize = selectedSize
+                                }
+                            }
+                        )
+                        .tint(Color.darkNavyBlue)
+                    } else {
+                        Slider(
+                            value: Binding<Double>(
+                                get: { Double(game.boardSize) },
+                                set: { game.boardSize = Int($0) }
+                            ),
+                            in: 5...12,
+                            step: 1
+                        )
+                        .tint(Color.darkNavyBlue)
+                    }
 
                     if game.activeOnlineMode == .remoteWS {
                         HStack {
