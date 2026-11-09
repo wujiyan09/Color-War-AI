@@ -207,6 +207,7 @@ enum P2PAction: String, Codable {
     case ack
     case joinRoom
     case leaveRoom
+    case renamePlayer
     case roomJoined
     case roomRoster
     case roomError
@@ -236,6 +237,7 @@ struct P2PPacket: Codable {
     var roomCode: String? = nil
     var isHost: Bool? = nil
     var message: String? = nil
+    var nickname: String? = nil
 
     init(sequenceID: UInt64, action: P2PAction, senderID: String) {
         self.sequenceID = sequenceID
@@ -307,6 +309,7 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
     
     @MainActor
     func startLocalHosting() {
+        rebuildPeerID()
         isHost = true
         hostDeviceName = myPeerID.displayName
         sequenceCounter = 0
@@ -320,6 +323,7 @@ final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
     
     @MainActor
     func startLocalBrowsing() {
+        rebuildPeerID()
         isHost = false
         sequenceCounter = 0
         discoveredDevices.removeAll()
@@ -1739,6 +1743,9 @@ final class GameModel: ObservableObject {
     private var lastReceivedSeqID: UInt64 = 0
     private var currentGameSessionID: UUID = UUID()
     private var actionQueue: [(Int, Int, Int)] = []
+    private var pendingStateSnapshot: P2PPacket? = nil
+    private var onlineSnapshotRetryWorkItem: DispatchWorkItem? = nil
+    private var onlineSnapshotRetryCount = 0
     
     private var p2pCancellable: AnyCancellable? = nil
     private var wsCancellable: AnyCancellable? = nil
@@ -2042,6 +2049,13 @@ final class GameModel: ObservableObject {
             self.refreshActivePlayers()
             if WebSocketNetworkManager.shared.isHost { self.syncRoomConfigToPeers() }
 
+        case .renamePlayer:
+            if let seat = packet.playerIndex, seat >= 0, seat < self.playerNames.count,
+               let nickname = packet.nickname?.trimmingCharacters(in: .whitespacesAndNewlines), !nickname.isEmpty {
+                self.playerNames[seat] = String(nickname.prefix(32))
+                if P2PNetworkManager.shared.isHost { self.syncRoomConfigToPeers() }
+            }
+
         case .playerLeft:
             if let seat = packet.playerIndex, seat >= 0, seat < self.playerTypes.count, WebSocketNetworkManager.shared.isHost {
                 self.playerTypes[seat] = self.isGameInPlay ? .mathNightmare : .disabled
@@ -2062,13 +2076,16 @@ final class GameModel: ObservableObject {
                pIdx == self.currentPlayer,
                r >= 0, r < self.boardSize, c >= 0, c < self.boardSize,
                self.playableCells.contains(r * self.boardSize + c) {
+                if WebSocketNetworkManager.shared.isConnected && !WebSocketNetworkManager.shared.isHost {
+                    self.beginOnlineSnapshotRecovery()
+                }
                 self.enqueueNetworkMove(row: r, column: c, player: pIdx)
             } else if WebSocketNetworkManager.shared.isHost {
                 self.broadcastFullStateSnapshot()
             }
 
         case .syncRequest:
-            if P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost {
+            if (P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost) && !self.isProcessingCascade {
                 self.broadcastFullStateSnapshot()
             }
 
@@ -2094,32 +2111,13 @@ final class GameModel: ObservableObject {
             }
 
         case .stateSnapshot:
-            if let names = packet.playerNames { self.playerNames = names }
-            if let types = packet.playerTypes { self.playerTypes = types }
-            if WebSocketNetworkManager.shared.isConnected && !WebSocketNetworkManager.shared.isHost,
-               self.myPlayerIndex >= 0, self.myPlayerIndex < self.playerTypes.count {
-                self.playerTypes[self.myPlayerIndex] = .human
+            if packet.compactBoardSnapshot != nil && packet.currentTurnIndex != nil {
+                stopOnlineSnapshotRecovery()
             }
-
-            if let compactSnap = packet.compactBoardSnapshot, let turnP = packet.currentTurnIndex {
-                var grid = [[Cell]](repeating: [Cell](repeating: Cell(owner: nil, count: 0), count: self.boardSize), count: self.boardSize)
-                for item in compactSnap {
-                    let r = Int(item.r)
-                    let c = Int(item.c)
-                    if r < self.boardSize && c < self.boardSize {
-                        grid[r][c] = Cell(owner: item.owner < 0 ? nil : Int(item.owner), count: Int(item.count))
-                    }
-                }
-                self.board = grid
-                if let entered = packet.hasEnteredSnapshot { self.hasEntered = entered }
-                if let elim = packet.eliminatedSnapshot { self.eliminated = elim }
-                self.refreshActivePlayers()
-                self.recalculateOrbCounts()
-                self.currentPlayer = turnP
-                
-                if P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost {
-                    self.checkAndRunAITurn()
-                }
+            if isProcessingCascade {
+                pendingStateSnapshot = packet
+            } else {
+                applyAuthoritativeSnapshot(packet)
             }
             
         default:
@@ -2127,6 +2125,90 @@ final class GameModel: ObservableObject {
         }
     }
     
+    func renameMyPlayer(to proposedName: String) {
+        let name = String(proposedName.trimmingCharacters(in: .whitespacesAndNewlines).prefix(32))
+        guard !name.isEmpty else { return }
+        P2PNetworkManager.shared.myNickname = name
+        let seat = myPlayerIndex
+        guard seat >= 0 && seat < playerNames.count else { return }
+        playerNames[seat] = name
+
+        if P2PNetworkManager.shared.isConnected || WebSocketNetworkManager.shared.isConnected {
+            let sequence = WebSocketNetworkManager.shared.isConnected
+                ? WebSocketNetworkManager.shared.getNextSequenceID()
+                : P2PNetworkManager.shared.getNextSequenceID()
+            var packet = P2PPacket(sequenceID: sequence, action: .renamePlayer, senderID: name)
+            packet.playerIndex = seat
+            packet.nickname = name
+            if P2PNetworkManager.shared.isConnected {
+                P2PNetworkManager.shared.sendPacket(packet)
+            } else {
+                WebSocketNetworkManager.shared.sendPacket(packet)
+            }
+        }
+    }
+
+    private func beginOnlineSnapshotRecovery() {
+        guard WebSocketNetworkManager.shared.isConnected, !WebSocketNetworkManager.shared.isHost else { return }
+        onlineSnapshotRetryWorkItem?.cancel()
+        onlineSnapshotRetryCount = 0
+        scheduleOnlineSnapshotRetry()
+    }
+
+    private func scheduleOnlineSnapshotRetry() {
+        guard WebSocketNetworkManager.shared.isConnected, !WebSocketNetworkManager.shared.isHost,
+              onlineSnapshotRetryCount < 6 else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, WebSocketNetworkManager.shared.isConnected,
+                  !WebSocketNetworkManager.shared.isHost else { return }
+            self.onlineSnapshotRetryCount += 1
+            var packet = P2PPacket(
+                sequenceID: WebSocketNetworkManager.shared.getNextSequenceID(),
+                action: .syncRequest,
+                senderID: P2PNetworkManager.shared.myNickname
+            )
+            packet.roomCode = WebSocketNetworkManager.shared.currentRoomCode
+            WebSocketNetworkManager.shared.sendPacket(packet)
+            self.scheduleOnlineSnapshotRetry()
+        }
+        onlineSnapshotRetryWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
+    }
+
+    private func stopOnlineSnapshotRecovery() {
+        onlineSnapshotRetryWorkItem?.cancel()
+        onlineSnapshotRetryWorkItem = nil
+        onlineSnapshotRetryCount = 0
+    }
+
+    private func applyAuthoritativeSnapshot(_ packet: P2PPacket) {
+        guard let compactSnap = packet.compactBoardSnapshot, let turnP = packet.currentTurnIndex else { return }
+        stopOnlineSnapshotRecovery()
+        if let names = packet.playerNames { self.playerNames = names }
+        if let types = packet.playerTypes { self.playerTypes = types }
+        if WebSocketNetworkManager.shared.isConnected && !WebSocketNetworkManager.shared.isHost,
+           self.myPlayerIndex >= 0, self.myPlayerIndex < self.playerTypes.count {
+            self.playerTypes[self.myPlayerIndex] = .human
+        }
+        var grid = [[Cell]](repeating: [Cell](repeating: Cell(owner: nil, count: 0), count: self.boardSize), count: self.boardSize)
+        for item in compactSnap {
+            let r = Int(item.r)
+            let c = Int(item.c)
+            if r < self.boardSize && c < self.boardSize {
+                grid[r][c] = Cell(owner: item.owner < 0 ? nil : Int(item.owner), count: Int(item.count))
+            }
+        }
+        self.board = grid
+        if let entered = packet.hasEnteredSnapshot { self.hasEntered = entered }
+        if let elim = packet.eliminatedSnapshot { self.eliminated = elim }
+        self.refreshActivePlayers()
+        self.recalculateOrbCounts()
+        self.currentPlayer = turnP
+        if P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost {
+            self.checkAndRunAITurn()
+        }
+    }
+
     func syncRoomConfigToPeers() {
         let isHost = P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost
         let isConn = P2PNetworkManager.shared.isConnected || WebSocketNetworkManager.shared.isConnected
@@ -2235,6 +2317,8 @@ final class GameModel: ObservableObject {
     func resetGame(chosenFirstPlayer: Int? = nil) {
         currentGameSessionID = UUID()
         lastReceivedSeqID = 0
+        stopOnlineSnapshotRecovery()
+        pendingStateSnapshot = nil
         aiTask?.cancel()
         aiTask = nil
         actionQueue.removeAll()
@@ -2282,6 +2366,8 @@ final class GameModel: ObservableObject {
     
     func exitToMenu() {
         currentGameSessionID = UUID()
+        stopOnlineSnapshotRecovery()
+        pendingStateSnapshot = nil
         aiTask?.cancel()
         aiTask = nil
         actionQueue.removeAll()
@@ -2339,6 +2425,7 @@ final class GameModel: ObservableObject {
                 P2PNetworkManager.shared.sendPacket(packet)
             } else if WebSocketNetworkManager.shared.isConnected {
                 WebSocketNetworkManager.shared.sendPacket(packet)
+                if !WebSocketNetworkManager.shared.isHost { beginOnlineSnapshotRecovery() }
             }
         } else {
             guard playerTypes[player] == .human || playerTypes[player].isAI else { return }
@@ -2360,6 +2447,10 @@ final class GameModel: ObservableObject {
                 let (r, c, p) = actionQueue.removeFirst()
                 Haptics.shared.lightImpact()
                 await resolveMove(row: r, column: c, player: p)
+                if !isProcessingCascade, let snapshot = pendingStateSnapshot {
+                    pendingStateSnapshot = nil
+                    applyAuthoritativeSnapshot(snapshot)
+                }
             }
         }
     }
@@ -3561,8 +3652,10 @@ struct OnlineGameSetupView: View {
                 
                 TextField("输入昵称", text: $p2pManager.myNickname)
                     .textFieldStyle(.roundedBorder)
-                    .disabled(p2pManager.isConnected || p2pManager.isConnecting)
+                    .disabled(p2pManager.isConnecting || game.isGameInPlay)
                     .frame(maxWidth: 180)
+                Button("更新昵称") { game.renameMyPlayer(to: p2pManager.myNickname) }
+                    .disabled(p2pManager.isConnecting || game.isGameInPlay || p2pManager.myNickname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .padding(10)
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
@@ -4047,12 +4140,24 @@ struct GamePlayView: View {
 
 struct PlayerTakeoverSheet: View {
     @ObservedObject var game: GameModel
+    @ObservedObject var p2pManager = P2PNetworkManager.shared
+    @ObservedObject var wsManager = WebSocketNetworkManager.shared
     @Environment(\.dismiss) private var dismiss
     @State private var showSavedToast: Bool = false
     
     var body: some View {
         NavigationStack {
             List {
+                if p2pManager.isConnected || wsManager.isConnected {
+                    Section(header: Text("我的联机昵称")) {
+                        HStack {
+                            TextField("输入昵称", text: $p2pManager.myNickname)
+                            Button("更新") { game.renameMyPlayer(to: p2pManager.myNickname) }
+                                .disabled(p2pManager.myNickname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        }
+                    }
+                }
+
                 Section {
                     Button(action: {
                         game.saveCurrentGameArchive()
