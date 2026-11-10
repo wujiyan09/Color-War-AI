@@ -1,0 +1,60 @@
+name: Build Diagnostic IPA (No Live Activity)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec project.yml
+
+      - name: Build unsigned diagnostic app
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          xcodebuild clean build \
+            -project ColorWarAI.xcodeproj \
+            -scheme ColorWarAI \
+            -derivedDataPath build/DerivedData \
+            -destination 'generic/platform=iOS' \
+            -configuration Release \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+          APP_PATH="build/DerivedData/Build/Products/Release-iphoneos/ColorWarAI.app"
+          test -d "$APP_PATH"
+          test -s "$APP_PATH/Assets.car"
+          test -s "$APP_PATH/AppIcon60x60@2x.png"
+          test ! -e "$APP_PATH/PlugIns/ColorWarLiveActivity.appex"
+          test ! -e "$APP_PATH/embedded.mobileprovision"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist" | grep -Fx 'ColorWarAI'
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$APP_PATH/Info.plist" | grep -Fx 'ColorWarAI'
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Info.plist" | grep -Fx 'com.example.ColorWarAI'
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist" | grep -Fx '1'
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist" | grep -Fx '1.0'
+          mkdir -p build/Payload
+          cp -R "$APP_PATH" build/Payload/
+          cd build
+          zip -qr -y ColorWarAI-Diagnostic-NoLiveActivity.ipa Payload
+          unzip -l ColorWarAI-Diagnostic-NoLiveActivity.ipa > archive-list.txt
+          ! grep -q 'ColorWarLiveActivity.appex' archive-list.txt
+          grep -q 'Assets.car' archive-list.txt
+
+      - name: Upload diagnostic IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ColorWarAI-Diagnostic-NoLiveActivity
+          path: build/ColorWarAI-Diagnostic-NoLiveActivity.ipa
+          if-no-files-found: error
+          retention-days: 14
