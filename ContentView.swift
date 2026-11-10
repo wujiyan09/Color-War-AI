@@ -1,6 +1,7 @@
 import SwiftUI
 import Combine
 import UIKit
+import Security
 import QuartzCore
 import MultipeerConnectivity
 import PhotosUI
@@ -219,8 +220,11 @@ enum P2PAction: String, Codable {
     case renamePlayer
     case roomJoined
     case roomRoster
+    case hostDisconnected
+    case hostReconnected
     case roomError
     case roomClosed
+    case activityToken
 }
 
 struct P2PPacket: Codable {
@@ -247,6 +251,8 @@ struct P2PPacket: Codable {
     var isHost: Bool? = nil
     var message: String? = nil
     var nickname: String? = nil
+    var hostResumeToken: String? = nil
+    var activityPushToken: String? = nil
 
     init(sequenceID: UInt64, action: P2PAction, senderID: String) {
         self.sequenceID = sequenceID
@@ -487,8 +493,46 @@ final class WebSocketNetworkManager: ObservableObject {
 
     private var webSocketTask: URLSessionWebSocketTask?
     private var sequenceCounter: UInt64 = 0
+    private var lastNickname = "玩家"
+    private var hostResumeToken: String?
+    private var isResumeAttempt = false
+    private var resumeRetryCount = 0
+    private var resumeRetryWorkItem: DispatchWorkItem?
+    private static let hostTokenService = "com.colorwarai.room-resume"
 
     private init() {}
+
+    private static func loadHostResumeToken(roomCode: String) -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: hostTokenService,
+            kSecAttrAccount as String: roomCode,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func saveHostResumeToken(_ token: String, roomCode: String) {
+        let key: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: hostTokenService,
+            kSecAttrAccount as String: roomCode
+        ]
+        let values: [String: Any] = [
+            kSecValueData as String: Data(token.utf8),
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ]
+        let status = SecItemUpdate(key as CFDictionary, values as CFDictionary)
+        if status == errSecItemNotFound {
+            var item = key
+            values.forEach { item[$0.key] = $0.value }
+            SecItemAdd(item as CFDictionary, nil)
+        }
+    }
 
     @MainActor
     func getNextSequenceID() -> UInt64 {
@@ -497,10 +541,21 @@ final class WebSocketNetworkManager: ObservableObject {
     }
 
     @MainActor
-    func connectAndJoinRoom(roomCode: String, isHost: Bool, nickname: String) {
-        disconnect()
+    func connectAndJoinRoom(roomCode: String, isHost: Bool, nickname: String, resuming: Bool = false) {
+        disconnect(clearSession: !resuming)
         self.isHost = isHost
         self.currentRoomCode = roomCode
+        self.lastNickname = nickname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "玩家" : nickname
+        if isHost {
+            if resuming {
+                self.hostResumeToken = self.hostResumeToken ?? Self.loadHostResumeToken(roomCode: roomCode)
+            } else {
+                let token = UUID().uuidString + UUID().uuidString
+                self.hostResumeToken = token
+                Self.saveHostResumeToken(token, roomCode: roomCode)
+            }
+        }
+        self.isResumeAttempt = resuming
         self.isConnecting = true
         self.lastError = nil
         sequenceCounter = 0
@@ -519,7 +574,7 @@ final class WebSocketNetworkManager: ObservableObject {
         components.path = "/ws/\(roomCode)"
         components.queryItems = [
             URLQueryItem(name: "role", value: isHost ? "host" : "player"),
-            URLQueryItem(name: "nickname", value: nickname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "玩家" : nickname)
+            URLQueryItem(name: "nickname", value: self.lastNickname)
         ]
         guard let url = components.url else {
             self.isConnecting = false
@@ -527,7 +582,12 @@ final class WebSocketNetworkManager: ObservableObject {
             return
         }
 
-        let task = URLSession(configuration: .default).webSocketTask(with: url)
+        var request = URLRequest(url: url)
+        if isHost, let hostResumeToken {
+            // Keep the room-resume credential out of URLs, access logs and copied links.
+            request.setValue(hostResumeToken, forHTTPHeaderField: "X-ColorWar-Host-Token")
+        }
+        let task = URLSession(configuration: .default).webSocketTask(with: request)
         webSocketTask = task
         task.resume()
         listenForMessages(task)
@@ -535,8 +595,27 @@ final class WebSocketNetworkManager: ObservableObject {
     }
 
     @MainActor
-    func disconnect() {
-        if let task = webSocketTask, isConnected {
+    func reconnectAfterForegroundIfNeeded() {
+        guard !currentRoomCode.isEmpty else { return }
+        let roomCode = currentRoomCode
+        let wasHost = isHost
+        let nickname = lastNickname
+        resumeRetryWorkItem?.cancel()
+        resumeRetryCount = 0
+        // Close only the transport; never send leaveRoom for a lifecycle transition.
+        // A short delay lets the server observe the old socket close before resume auth.
+        disconnect(clearSession: false, notifyServer: false)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self, self.currentRoomCode == roomCode, !self.isConnecting else { return }
+            self.connectAndJoinRoom(roomCode: roomCode, isHost: wasHost, nickname: nickname, resuming: true)
+        }
+    }
+
+    @MainActor
+    func disconnect(clearSession: Bool = true, notifyServer: Bool = true) {
+        resumeRetryWorkItem?.cancel()
+        resumeRetryWorkItem = nil
+        if notifyServer, let task = webSocketTask, isConnected {
             var leave = P2PPacket(sequenceID: getNextSequenceID(), action: .leaveRoom, senderID: "")
             leave.roomCode = currentRoomCode
             if let data = try? JSONEncoder().encode(leave), let text = String(data: data, encoding: .utf8) {
@@ -548,8 +627,24 @@ final class WebSocketNetworkManager: ObservableObject {
         task?.cancel(with: .normalClosure, reason: nil)
         isConnected = false
         isConnecting = false
-        currentRoomCode = ""
-        playerIndex = 0
+        if clearSession {
+            currentRoomCode = ""
+            lastNickname = "玩家"
+            hostResumeToken = nil
+            playerIndex = 0
+            isResumeAttempt = false
+            resumeRetryCount = 0
+        }
+    }
+
+    @MainActor
+    func sendActivityPushToken(_ token: String) {
+        guard isConnected, !currentRoomCode.isEmpty else { return }
+        var packet = P2PPacket(sequenceID: getNextSequenceID(), action: .activityToken, senderID: lastNickname)
+        packet.roomCode = currentRoomCode
+        packet.playerIndex = playerIndex
+        packet.activityPushToken = token
+        sendPacket(packet)
     }
 
     func sendPacket(_ packet: P2PPacket) {
@@ -580,7 +675,16 @@ final class WebSocketNetworkManager: ObservableObject {
                             self.isHost = packet.isHost ?? self.isHost
                             self.playerIndex = packet.playerIndex ?? self.playerIndex
                             self.currentRoomCode = packet.roomCode ?? self.currentRoomCode
+                            LiveActivityCoordinator.shared.resendTokenIfAvailable()
+                            if self.isHost, let token = packet.hostResumeToken {
+                                self.hostResumeToken = token
+                                Self.saveHostResumeToken(token, roomCode: self.currentRoomCode)
+                            }
                             self.lastError = nil
+                            self.isResumeAttempt = false
+                            self.resumeRetryCount = 0
+                            self.resumeRetryWorkItem?.cancel()
+                            self.resumeRetryWorkItem = nil
                         case .roomError:
                             self.isConnected = false
                             self.isConnecting = false
@@ -609,14 +713,36 @@ final class WebSocketNetworkManager: ObservableObject {
         let wasGuest = !isHost
         isConnected = false
         isConnecting = false
+        // A transport failure is not proof that the room or match ended. In particular,
+        // iOS may suspend this process shortly after backgrounding. Keep the room code and
+        // game state so the app can attempt a foreground rejoin; the server remains the
+        // authority on whether that room/session still exists.
         if wasConnected && wasGuest {
-            lastError = "远程房间连接中断，对局已结束。"
-            var closed = P2PPacket(sequenceID: 0, action: .roomClosed, senderID: "server")
-            closed.message = lastError
-            packetSubject.send(closed)
+            lastError = "远程连接暂时中断；返回应用后将尝试重新连接并恢复棋局。"
+        } else if wasConnected {
+            lastError = "房主连接暂时中断；房间状态保留，返回应用后将尝试恢复。"
         } else {
             lastError = "WebSocket 连接中断：\(error.localizedDescription)"
         }
+        if isResumeAttempt { scheduleForegroundResumeRetry() }
+    }
+
+    @MainActor
+    private func scheduleForegroundResumeRetry() {
+        guard !isConnected, !isConnecting, !currentRoomCode.isEmpty,
+              resumeRetryCount < 5 else { return }
+        resumeRetryCount += 1
+        let delay = min(0.5 * pow(2.0, Double(resumeRetryCount - 1)), 4.0)
+        let roomCode = currentRoomCode
+        let nickname = lastNickname
+        let wasHost = isHost
+        let retry = DispatchWorkItem { [weak self] in
+            guard let self, self.currentRoomCode == roomCode,
+                  !self.isConnected, !self.isConnecting else { return }
+            self.connectAndJoinRoom(roomCode: roomCode, isHost: wasHost, nickname: nickname, resuming: true)
+        }
+        resumeRetryWorkItem = retry
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: retry)
     }
 }
 
@@ -1725,7 +1851,11 @@ final class GameModel: ObservableObject {
         }
     }
     
-    @Published var board: [[Cell]] = []
+    @Published var board: [[Cell]] = [] {
+        didSet {
+            if !isProcessingCascade { updateLiveActivityIfNeeded() }
+        }
+    }
     
     @Published var playerNames: [String]
     @Published private(set) var localPlayerNames: [String]
@@ -1742,7 +1872,13 @@ final class GameModel: ObservableObject {
         didSet { debounceSave() }
     }
     @Published var currentPlayer: Int = 0 {
-        didSet { updateCachedPlayableCells() }
+        didSet {
+            updateCachedPlayableCells()
+            if oldValue != currentPlayer, activeOnlineMode == .remoteWS, currentPlayer == myPlayerIndex {
+                Haptics.shared.lightImpact()
+            }
+            updateLiveActivityIfNeeded()
+        }
     }
     @Published var myPlayerIndex: Int = 0
     @Published var hasEntered: [Bool] = Array(repeating: false, count: PlayerPreset.maxPlayers)
@@ -1791,11 +1927,51 @@ final class GameModel: ObservableObject {
     
     func beginGame() {
         isGameInPlay = true
+        updateLiveActivityIfNeeded()
         checkAndRunAITurn()
+    }
+
+    func resumeRemoteRoomIfNeeded() {
+        guard activeOnlineMode == .remoteWS, isGameInPlay else { return }
+        WebSocketNetworkManager.shared.reconnectAfterForegroundIfNeeded()
+    }
+
+    func suspendRemoteRoomTransportForBackground() {
+        // Keep the socket open while iOS grants background execution. The OS may still
+        // suspend this process at any time; foreground re-entry performs authoritative rejoin.
+        guard activeOnlineMode == .remoteWS, isGameInPlay else { return }
     }
     
     func endGame() {
         isGameInPlay = false
+        LiveActivityCoordinator.shared.end(roomCode: WebSocketNetworkManager.shared.currentRoomCode)
+    }
+
+    private func updateLiveActivityIfNeeded() {
+        guard activeOnlineMode == .remoteWS, isGameInPlay,
+              !WebSocketNetworkManager.shared.currentRoomCode.isEmpty,
+              !board.isEmpty else { return }
+        let rows = board.map { row in
+            row.map { cell -> String in
+                guard let owner = cell.owner else { return "0" }
+                let encoded = max(1, owner * 4 + min(max(cell.count, 1), 3))
+                return String(encoded, radix: 36).uppercased()
+            }.joined()
+        }
+        let state = ColorWarActivityAttributes.ContentState(
+            boardRows: rows,
+            boardSize: boardSize,
+            currentPlayer: currentPlayer,
+            currentPlayerName: playerNames[safe: currentPlayer] ?? "玩家",
+            colors: colors.map { $0.toHex() },
+            isMyTurn: currentPlayer == myPlayerIndex,
+            status: currentPlayer == myPlayerIndex ? "轮到你了" : "等待对手落子"
+        )
+        LiveActivityCoordinator.shared.sync(
+            roomCode: WebSocketNetworkManager.shared.currentRoomCode,
+            seat: WebSocketNetworkManager.shared.playerIndex,
+            state: state
+        )
     }
     
     private func refreshActivePlayers() {
@@ -2122,9 +2298,17 @@ final class GameModel: ObservableObject {
             }
 
         case .roomClosed:
-            self.disconnectedMessage = packet.message ?? "房主已断开连接，对局已自动结束。"
+            self.disconnectedMessage = packet.message ?? "房间已结束。"
             self.showDisconnectedAlert = true
             self.exitToMenu()
+
+        case .hostDisconnected:
+            // A temporarily suspended host is recoverable; do not destroy the guest's
+            // visible match or navigate away. The server keeps the latest snapshot.
+            self.disconnectedMessage = packet.message ?? "房主暂时断线，棋局等待恢复。"
+
+        case .hostReconnected:
+            self.disconnectedMessage = packet.message ?? "房主已恢复连接，正在同步棋局。"
 
         case .roomError:
             break
@@ -2347,6 +2531,7 @@ final class GameModel: ObservableObject {
         var packet = P2PPacket(sequenceID: seq, action: .stateSnapshot, senderID: P2PNetworkManager.shared.myNickname)
         packet.playerNames = playerNames
         packet.playerTypes = playerTypes
+        packet.colorsHex = colors.map { $0.toHex() }
         packet.compactBoardSnapshot = compactList
         packet.currentTurnIndex = currentPlayer
         packet.hasEnteredSnapshot = hasEntered
@@ -2969,7 +3154,7 @@ struct BoardView: View {
                         .allowsHitTesting(false)
                     }
                 }
-                .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
                 .frame(width: actualBoardDimension, height: actualBoardDimension)
                 
                 VStack(spacing: 12) {
@@ -4580,6 +4765,7 @@ struct ArchivePickerSheet: View {
 // MARK: - 25. 根视图 ContentView
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var game = GameModel()
     @State private var isGameStarted = false
     @State private var isSpinningRandomWheel = false
@@ -4624,6 +4810,13 @@ struct ContentView: View {
                 withAnimation(.spring()) {
                     isGameStarted = true
                 }
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background {
+                game.suspendRemoteRoomTransportForBackground()
+            } else if phase == .active {
+                game.resumeRemoteRoomIfNeeded()
             }
         }
     }

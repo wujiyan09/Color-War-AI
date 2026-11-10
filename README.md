@@ -49,3 +49,20 @@
 ```bash
 git clone [https://github.com/wujiyan09/Color-War-AI.git](https://github.com/wujiyan09/Color-War-AI.git)
 cd Color-War-AI
+```
+
+## Dynamic Island / ActivityKit push setup
+
+The app starts one Live Activity for an online room, renders a compact board preview in the expanded Dynamic Island and lock-screen presentation, and registers the ActivityKit push token with the room server over the active room WebSocket. The server sends best-effort `liveactivity` APNs updates after it accepts an authoritative `stateSnapshot`. The token is scoped to the participant seat; it is not an APNs credential and is not written to source control. The host-only room-resume credential is stored in Keychain and sent in an HTTPS WebSocket request header, not the URL.
+
+The Live Activity is display-only. It cannot host a WebSocket or independently fetch game state. iOS can suspend the game process; APNs may update the activity, but cannot guarantee a background socket or a timely app wake. On foreground the app reconnects and requests the authoritative saved snapshot. Room state is retained for two hours after activity, and the last committed snapshot wins if a move was interrupted before it was committed.
+
+To enable real APNs updates on a signed installation:
+
+1. In Apple Developer, enable Push Notifications for the app's App ID and use the same bundle identifier configured in `project.yml` (replace the sample `com.example.ColorWarAI` before distribution). Enable Live Activities for the app as well.
+2. Create an APNs authentication key (`.p8`) and note its Key ID and Team ID. Do not commit the `.p8` file, its contents, or token values.
+3. Configure Worker secrets with `npx wrangler secret put APNS_TEAM_ID`, `APNS_KEY_ID`, `APNS_PRIVATE_KEY`, and `APNS_BUNDLE_ID`. Paste the private key only into the Wrangler secret prompt. The server accepts an optional `APNS_HOST` variable set to exactly `https://api.push.apple.com` (production, default) or `https://api.sandbox.push.apple.com` (development); the device token's environment must match.
+4. Build and sign the app with matching Push Notifications entitlement and provisioning profile. The checked-in `ColorWarAI.entitlements` uses the development APNs environment as a template; set it to production for distribution signing. An unsigned IPA cannot register for APNs or provide an operational Live Activity push token.
+5. Deploy the server separately after configuring secrets, then test on a physical supported iPhone with Live Activities enabled. GitHub's macOS runner can build an Xcode project, but this repository's workflow and project conversion have not yet been run or verified in this environment.
+
+APNs failures are intentionally non-fatal: the room's authoritative snapshot remains available for reconnection. The Worker deletes a token only when APNs reports it as expired (HTTP 410); APNs credentials, app signing, notification settings, network delivery and iOS scheduling must all be valid for a real update.

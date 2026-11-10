@@ -5,110 +5,43 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-latest
-    permissions:
-      contents: write
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Build Archive
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec project.yml
+
+      - name: Build unsigned app and Live Activity extension
         run: |
           set -euo pipefail
-          SCHEME_NAME=$(xcodebuild -list -json | jq -r '(.workspace.schemes // .package.schemes // .project.schemes)[0] // empty')
-          if [ -z "$SCHEME_NAME" ]; then
-            echo "ERROR: Scheme not found"
-            exit 1
-          fi
           mkdir -p build
           xcodebuild clean archive \
-            -scheme "$SCHEME_NAME" \
-            -archivePath build/App.xcarchive \
+            -project ColorWarAI.xcodeproj \
+            -scheme ColorWarAI \
+            -archivePath build/ColorWarAI.xcarchive \
             -destination 'generic/platform=iOS' \
-            -sdk iphoneos \
             -configuration Release \
-            TARGETED_DEVICE_FAMILY="1,2" \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
-
-      - name: Package Unsigned IPA
-        run: |
-          set -euo pipefail
+          APP_PATH="build/ColorWarAI.xcarchive/Products/Applications/ColorWarAI.app"
+          test -d "$APP_PATH"
+          test -d "$APP_PATH/PlugIns/ColorWarLiveActivity.appex"
           mkdir -p build/Payload
-          APP_DIR="build/Payload/ColorWarAI.app"
-          APP_PATH=$(find build/App.xcarchive -maxdepth 6 -name '*.app' -type d -print -quit || true)
-
-          if [ -n "$APP_PATH" ]; then
-            cp -R "$APP_PATH" "$APP_DIR"
-          else
-            mkdir -p "$APP_DIR"
-            cp -R build/App.xcarchive/Products/usr/local/bin/* "$APP_DIR/" 2>/dev/null || true
-            printf "APPL????" > "$APP_DIR/PkgInfo"
-          fi
-
-          PLIST_PATH="$APP_DIR/Info.plist"
-          if [ ! -f "$PLIST_PATH" ]; then
-            plutil -create xml1 "$PLIST_PATH"
-          fi
-
-          # 匹配并修复二进制文件名
-          OLD_EXEC=$(plutil -extract CFBundleExecutable raw "$PLIST_PATH" 2>/dev/null || echo "")
-          if [ -n "$OLD_EXEC" ] && [ -f "$APP_DIR/$OLD_EXEC" ]; then
-            mv "$APP_DIR/$OLD_EXEC" "$APP_DIR/ColorWarAI"
-          else
-            REAL_EXEC=$(find "$APP_DIR" -maxdepth 1 -type f ! -name "*.*" ! -name "PkgInfo" | head -n 1)
-            if [ -n "$REAL_EXEC" ]; then
-              mv "$REAL_EXEC" "$APP_DIR/ColorWarAI"
-            fi
-          fi
-
-          chmod +x "$APP_DIR/ColorWarAI"
-
-          # 基础配置
-          plutil -replace CFBundleDevelopmentRegion -string "en" "$PLIST_PATH"
-          plutil -replace CFBundleExecutable -string "ColorWarAI" "$PLIST_PATH"
-          plutil -replace CFBundleIdentifier -string "com.example.ColorWarAI" "$PLIST_PATH"
-          plutil -replace CFBundleInfoDictionaryVersion -string "6.0" "$PLIST_PATH"
-          plutil -replace CFBundleName -string "ColorWarAI" "$PLIST_PATH"
-          plutil -replace CFBundleDisplayName -string "ColorWarAI" "$PLIST_PATH"
-          plutil -replace CFBundlePackageType -string "APPL" "$PLIST_PATH"
-          plutil -replace CFBundleShortVersionString -string "1.0" "$PLIST_PATH"
-          plutil -replace CFBundleVersion -string "1" "$PLIST_PATH"
-          plutil -replace LSRequiresIPhoneOS -bool true "$PLIST_PATH"
-          plutil -replace MinimumOSVersion -string "15.0" "$PLIST_PATH"
-
-          # 核心修复：添加 P2P 局域网搜寻与 Bonjour 权限配置
-          plutil -replace NSLocalNetworkUsageDescription -string "ColorWar需要使用本地网络搜索并连接附近的玩家进行对决" "$PLIST_PATH"
-          plutil -replace NSBonjourServices -json '["_colorwar-p2p._tcp", "_colorwar-p2p._udp"]' "$PLIST_PATH"
-
-          # 核心修复：解锁 iPad 自由窗口大小 (Stage Manager / 台前调度 / 任意拉伸)
-          plutil -replace UIDeviceFamily -json '[1,2]' "$PLIST_PATH"
-          plutil -replace UIRequiresFullScreen -bool false "$PLIST_PATH"
-          plutil -replace UILaunchScreen -json '{}' "$PLIST_PATH"
-          plutil -replace UIApplicationSceneManifest -json '{"UIApplicationSupportsMultipleScenes": true, "UISceneConfigurations": {}}' "$PLIST_PATH"
-          plutil -replace UISupportedInterfaceOrientations -json '["UIInterfaceOrientationPortrait", "UIInterfaceOrientationLandscapeLeft", "UIInterfaceOrientationLandscapeRight"]' "$PLIST_PATH"
-          plutil -replace "UISupportedInterfaceOrientations~ipad" -json '["UIInterfaceOrientationPortrait", "UIInterfaceOrientationPortraitUpsideDown", "UIInterfaceOrientationLandscapeLeft", "UIInterfaceOrientationLandscapeRight"]' "$PLIST_PATH"
-
-          # 图标配置
-          plutil -replace CFBundleIconFile -string "AppIcon.png" "$PLIST_PATH"
-          plutil -replace CFBundleIconFiles -json '["AppIcon","AppIcon60x60","AppIcon76x76","AppIcon83.5x83.5"]' "$PLIST_PATH"
-
-          if [ -f "AppIcon.png" ]; then
-            cp AppIcon.png "$APP_DIR/AppIcon.png"
-            cp AppIcon.png "$APP_DIR/icon.png"
-            sips -z 120 120 AppIcon.png --out "$APP_DIR/AppIcon60x60@2x.png"
-            sips -z 180 180 AppIcon.png --out "$APP_DIR/AppIcon60x60@3x.png"
-            sips -z 152 152 AppIcon.png --out "$APP_DIR/AppIcon76x76@2x.png"
-            sips -z 167 167 AppIcon.png --out "$APP_DIR/AppIcon83.5x83.5@2x.png"
-            sips -z 1024 1024 AppIcon.png --out "$APP_DIR/iTunesArtwork@2x.png"
-          fi
-
+          cp -R "$APP_PATH" build/Payload/
           cd build
-          zip -r -y ColorWarAI.ipa Payload
+          zip -qr -y ColorWarAI.ipa Payload
+          unzip -l ColorWarAI.ipa | grep -q 'PlugIns/ColorWarLiveActivity.appex/'
 
       - name: Create Release
         uses: softprops/action-gh-release@v2

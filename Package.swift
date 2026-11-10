@@ -36,6 +36,7 @@ let package = Package(
         .executableTarget(
             name: "AppModule",
             path: ".",
+            exclude: ["LiveActivityExtension"],
             resources: [
                 .process("Resources")
             ],

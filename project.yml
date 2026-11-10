@@ -1,0 +1,65 @@
+name: ColorWarAI
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    TARGETED_DEVICE_FAMILY: "1,2"
+targets:
+  ColorWarAI:
+    type: application
+    platform: iOS
+    sources:
+      - path: ContentView.swift
+      - path: MyApp.swift
+      - path: ColorWarActivity.swift
+      - path: LiveActivityCoordinator.swift
+      - path: Resources
+        type: folder
+    dependencies:
+      - target: ColorWarLiveActivity
+        embed: true
+        codeSign: false
+    info:
+      properties:
+        CFBundleDisplayName: Color War
+        NSSupportsLiveActivities: true
+        NSLocalNetworkUsageDescription: Color War uses the local network to connect nearby players.
+        NSBonjourServices:
+          - _colorwar-p2p._tcp
+          - _colorwar-p2p._udp
+        UIRequiresFullScreen: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.ColorWarAI
+        PRODUCT_NAME: ColorWarAI
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_ENTITLEMENTS: ColorWarAI.entitlements
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGNING_ALLOWED: NO
+  ColorWarLiveActivity:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: LiveActivityExtension/ColorWarLiveActivity.swift
+      - path: ColorWarActivity.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.ColorWarAI.LiveActivity
+        PRODUCT_NAME: ColorWarLiveActivity
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: LiveActivityExtension/Info.plist
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGNING_ALLOWED: NO
+schemes:
+  ColorWarAI:
+    build:
+      targets:
+        ColorWarAI: all
