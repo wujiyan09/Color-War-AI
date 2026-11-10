@@ -41,6 +41,8 @@ jobs:
           /usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist" | grep -Fx 'ColorWarAI'
           /usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$APP_PATH/Info.plist" | grep -Fx 'ColorWarAI'
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Info.plist" | grep -Fx 'com.example.ColorWarAI'
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist" | grep -Fx '1'
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist" | grep -Fx '1.0'
           mkdir -p build/Payload
           cp -R "$APP_PATH" build/Payload/
           cd build
