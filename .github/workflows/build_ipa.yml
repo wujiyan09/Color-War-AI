@@ -37,6 +37,9 @@ jobs:
           APP_PATH="build/DerivedData/Build/Products/Release-iphoneos/ColorWarAI.app"
           test -d "$APP_PATH"
           test -d "$APP_PATH/PlugIns/ColorWarLiveActivity.appex"
+          test -s "$APP_PATH/Assets.car"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist" | grep -Fx 'ColorWarAI'
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$APP_PATH/Info.plist" | grep -Fx 'ColorWarAI'
           /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier com.example.ColorWarAI' "$APP_PATH/Info.plist" 2>/dev/null || \
             /usr/libexec/PlistBuddy -c 'Add :CFBundleIdentifier string com.example.ColorWarAI' "$APP_PATH/Info.plist"
           /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier com.example.ColorWarAI.LiveActivity' "$APP_PATH/PlugIns/ColorWarLiveActivity.appex/Info.plist" 2>/dev/null || \
@@ -48,6 +51,7 @@ jobs:
           cd build
           zip -qr -y ColorWarAI.ipa Payload
           unzip -l ColorWarAI.ipa | grep -q 'PlugIns/ColorWarLiveActivity.appex/'
+          unzip -l ColorWarAI.ipa | grep -q 'Assets.car'
 
       - name: Create Release
         uses: softprops/action-gh-release@v2

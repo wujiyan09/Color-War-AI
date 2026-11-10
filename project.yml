@@ -19,6 +19,7 @@ targets:
       - path: LiveActivityCoordinator.swift
       - path: Resources
         type: folder
+      - path: Assets.xcassets
     dependencies:
       - target: ColorWarLiveActivity
         embed: true
@@ -27,7 +28,8 @@ targets:
       path: ColorWarAI-Info.plist
       properties:
         CFBundleIdentifier: "$(PRODUCT_BUNDLE_IDENTIFIER)"
-        CFBundleDisplayName: Color War
+        CFBundleName: ColorWarAI
+        CFBundleDisplayName: ColorWarAI
         NSSupportsLiveActivities: true
         NSLocalNetworkUsageDescription: Color War uses the local network to connect nearby players.
         NSBonjourServices:
@@ -38,6 +40,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.ColorWarAI
         PRODUCT_NAME: ColorWarAI
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_ENTITLEMENTS: ColorWarAI.entitlements
         CODE_SIGN_IDENTITY: ""
