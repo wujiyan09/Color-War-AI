@@ -26,6 +26,7 @@ targets:
     info:
       path: ColorWarAI-Info.plist
       properties:
+        CFBundleIdentifier: "$(PRODUCT_BUNDLE_IDENTIFIER)"
         CFBundleDisplayName: Color War
         NSSupportsLiveActivities: true
         NSLocalNetworkUsageDescription: Color War uses the local network to connect nearby players.
