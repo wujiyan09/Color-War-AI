@@ -675,7 +675,6 @@ final class WebSocketNetworkManager: ObservableObject {
                             self.isHost = packet.isHost ?? self.isHost
                             self.playerIndex = packet.playerIndex ?? self.playerIndex
                             self.currentRoomCode = packet.roomCode ?? self.currentRoomCode
-                            LiveActivityCoordinator.shared.resendTokenIfAvailable()
                             if self.isHost, let token = packet.hostResumeToken {
                                 self.hostResumeToken = token
                                 Self.saveHostResumeToken(token, roomCode: self.currentRoomCode)
@@ -1853,11 +1852,7 @@ final class GameModel: ObservableObject {
         }
     }
     
-    @Published var board: [[Cell]] = [] {
-        didSet {
-            if !isProcessingCascade { updateLiveActivityIfNeeded() }
-        }
-    }
+    @Published var board: [[Cell]] = []
     
     @Published var playerNames: [String]
     @Published private(set) var localPlayerNames: [String]
@@ -1879,7 +1874,6 @@ final class GameModel: ObservableObject {
             if oldValue != currentPlayer, activeOnlineMode == .remoteWS, currentPlayer == myPlayerIndex {
                 Haptics.shared.lightImpact()
             }
-            updateLiveActivityIfNeeded()
         }
     }
     @Published var myPlayerIndex: Int = 0
@@ -1929,7 +1923,6 @@ final class GameModel: ObservableObject {
     
     func beginGame() {
         isGameInPlay = true
-        updateLiveActivityIfNeeded()
         checkAndRunAITurn()
     }
 
@@ -1946,36 +1939,8 @@ final class GameModel: ObservableObject {
     
     func endGame() {
         isGameInPlay = false
-        LiveActivityCoordinator.shared.end(roomCode: WebSocketNetworkManager.shared.currentRoomCode)
     }
 
-    private func updateLiveActivityIfNeeded() {
-        guard activeOnlineMode == .remoteWS, isGameInPlay,
-              !WebSocketNetworkManager.shared.currentRoomCode.isEmpty,
-              !board.isEmpty else { return }
-        let rows = board.map { row in
-            row.map { cell -> String in
-                guard let owner = cell.owner else { return "0" }
-                let encoded = max(1, owner * 4 + min(max(cell.count, 1), 3))
-                return String(encoded, radix: 36).uppercased()
-            }.joined()
-        }
-        let state = ColorWarActivityAttributes.ContentState(
-            boardRows: rows,
-            boardSize: boardSize,
-            currentPlayer: currentPlayer,
-            currentPlayerName: playerNames[safe: currentPlayer] ?? "玩家",
-            colors: colors.map { $0.toHex() },
-            isMyTurn: currentPlayer == myPlayerIndex,
-            status: currentPlayer == myPlayerIndex ? "轮到你了" : "等待对手落子"
-        )
-        LiveActivityCoordinator.shared.sync(
-            roomCode: WebSocketNetworkManager.shared.currentRoomCode,
-            seat: WebSocketNetworkManager.shared.playerIndex,
-            state: state
-        )
-    }
-    
     private func refreshActivePlayers() {
         self.activePlayerIndices = playerTypes.enumerated().compactMap { $1 != .disabled ? $0 : nil }
     }

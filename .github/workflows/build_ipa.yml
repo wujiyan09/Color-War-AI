@@ -1,12 +1,10 @@
-name: Build Unsigned IPA
+name: Build Diagnostic IPA (No Live Activity)
 
 on:
-  push:
-    branches: [ main, master ]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -21,7 +19,7 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate --spec project.yml
 
-      - name: Build unsigned app and Live Activity extension
+      - name: Build unsigned diagnostic app
         run: |
           set -euo pipefail
           mkdir -p build
@@ -36,30 +34,25 @@ jobs:
             CODE_SIGNING_ALLOWED=NO
           APP_PATH="build/DerivedData/Build/Products/Release-iphoneos/ColorWarAI.app"
           test -d "$APP_PATH"
-          test -d "$APP_PATH/PlugIns/ColorWarLiveActivity.appex"
           test -s "$APP_PATH/Assets.car"
+          test -s "$APP_PATH/AppIcon60x60@2x.png"
+          test ! -e "$APP_PATH/PlugIns/ColorWarLiveActivity.appex"
+          test ! -e "$APP_PATH/embedded.mobileprovision"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist" | grep -Fx 'ColorWarAI'
           /usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$APP_PATH/Info.plist" | grep -Fx 'ColorWarAI'
-          /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier com.example.ColorWarAI' "$APP_PATH/Info.plist" 2>/dev/null || \
-            /usr/libexec/PlistBuddy -c 'Add :CFBundleIdentifier string com.example.ColorWarAI' "$APP_PATH/Info.plist"
-          /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier com.example.ColorWarAI.LiveActivity' "$APP_PATH/PlugIns/ColorWarLiveActivity.appex/Info.plist" 2>/dev/null || \
-            /usr/libexec/PlistBuddy -c 'Add :CFBundleIdentifier string com.example.ColorWarAI.LiveActivity' "$APP_PATH/PlugIns/ColorWarLiveActivity.appex/Info.plist"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Info.plist" | grep -Fx 'com.example.ColorWarAI'
-          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/PlugIns/ColorWarLiveActivity.appex/Info.plist" | grep -Fx 'com.example.ColorWarAI.LiveActivity'
           mkdir -p build/Payload
           cp -R "$APP_PATH" build/Payload/
           cd build
-          zip -qr -y ColorWarAI.ipa Payload
-          unzip -l ColorWarAI.ipa | grep -q 'PlugIns/ColorWarLiveActivity.appex/'
-          unzip -l ColorWarAI.ipa | grep -q 'Assets.car'
+          zip -qr -y ColorWarAI-Diagnostic-NoLiveActivity.ipa Payload
+          unzip -l ColorWarAI-Diagnostic-NoLiveActivity.ipa > archive-list.txt
+          ! grep -q 'ColorWarLiveActivity.appex' archive-list.txt
+          grep -q 'Assets.car' archive-list.txt
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - name: Upload diagnostic IPA
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: build-${{ github.run_number }}
-          name: Build #${{ github.run_number }}
-          draft: false
-          prerelease: false
-          files: build/ColorWarAI.ipa
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: ColorWarAI-Diagnostic-NoLiveActivity
+          path: build/ColorWarAI-Diagnostic-NoLiveActivity.ipa
+          if-no-files-found: error
+          retention-days: 14
