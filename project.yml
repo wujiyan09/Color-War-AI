@@ -24,6 +24,7 @@ targets:
         embed: true
         codeSign: false
     info:
+      path: ColorWarAI-Info.plist
       properties:
         CFBundleDisplayName: Color War
         NSSupportsLiveActivities: true
