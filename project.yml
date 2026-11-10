@@ -52,7 +52,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.ColorWarAI.LiveActivity
         PRODUCT_NAME: ColorWarLiveActivity
-        GENERATE_INFOPLIST_FILE: NO
+        GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_FILE: LiveActivityExtension/Info.plist
         APPLICATION_EXTENSION_API_ONLY: YES
         SKIP_INSTALL: YES
