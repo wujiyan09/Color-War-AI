@@ -10,8 +10,10 @@ jobs:
   build:
     runs-on: macos-latest
     steps:
-      - name: Checkout code
+      - name: Checkout diagnostic branch
         uses: actions/checkout@v4
+        with:
+          ref: diagnostic/no-liveactivity
 
       - name: Install XcodeGen
         run: brew install xcodegen
