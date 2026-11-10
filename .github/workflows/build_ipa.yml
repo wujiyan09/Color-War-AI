@@ -25,18 +25,24 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p build
-          xcodebuild clean archive \
+          xcodebuild clean build \
             -project ColorWarAI.xcodeproj \
             -scheme ColorWarAI \
-            -archivePath build/ColorWarAI.xcarchive \
+            -derivedDataPath build/DerivedData \
             -destination 'generic/platform=iOS' \
             -configuration Release \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
-          APP_PATH="build/ColorWarAI.xcarchive/Products/Applications/ColorWarAI.app"
+          APP_PATH="build/DerivedData/Build/Products/Release-iphoneos/ColorWarAI.app"
           test -d "$APP_PATH"
           test -d "$APP_PATH/PlugIns/ColorWarLiveActivity.appex"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier com.example.ColorWarAI' "$APP_PATH/Info.plist" 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c 'Add :CFBundleIdentifier string com.example.ColorWarAI' "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier com.example.ColorWarAI.LiveActivity' "$APP_PATH/PlugIns/ColorWarLiveActivity.appex/Info.plist" 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c 'Add :CFBundleIdentifier string com.example.ColorWarAI.LiveActivity' "$APP_PATH/PlugIns/ColorWarLiveActivity.appex/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Info.plist" | grep -Fx 'com.example.ColorWarAI'
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/PlugIns/ColorWarLiveActivity.appex/Info.plist" | grep -Fx 'com.example.ColorWarAI.LiveActivity'
           mkdir -p build/Payload
           cp -R "$APP_PATH" build/Payload/
           cd build
