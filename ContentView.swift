@@ -724,7 +724,9 @@ final class WebSocketNetworkManager: ObservableObject {
         } else {
             lastError = "WebSocket 连接中断：\(error.localizedDescription)"
         }
-        if isResumeAttempt { scheduleForegroundResumeRetry() }
+        if isResumeAttempt {
+            Task { @MainActor [weak self] in self?.scheduleForegroundResumeRetry() }
+        }
     }
 
     @MainActor
