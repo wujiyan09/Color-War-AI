@@ -3372,14 +3372,14 @@ struct LocalGameSetupView: View {
             .padding(12)
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
-            ViewThatFits(in: .vertical) {
+            // Keep the player rows in one stable view hierarchy. ViewThatFits previously
+            // replaced this subtree with a second copy when the keyboard reduced the
+            // available height, which detached the focused TextField and dismissed the
+            // keyboard on both iPhone and iPad.
+            ScrollView(.vertical, showsIndicators: true) {
                 playerRowsContent
-                
-                ScrollView(.vertical, showsIndicators: true) {
-                    playerRowsContent
-                }
-                .frame(maxHeight: 220)
             }
+            .frame(maxHeight: 220)
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
             Button(action: {
