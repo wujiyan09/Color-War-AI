@@ -203,42 +203,6 @@ struct IdentifiableInt: Identifiable {
     let id: Int
 }
 
-enum ChessClockMode: String, Codable, CaseIterable, Identifiable {
-    case untimed, fixed, fischer, byoyomi, bronstein
-    var id: String { rawValue }
-    var title: String {
-        switch self {
-        case .untimed: return "不限时"
-        case .fixed: return "包干制"
-        case .fischer: return "Fischer 加时"
-        case .byoyomi: return "读秒制"
-        case .bronstein: return "Bronstein 延迟"
-        }
-    }
-}
-
-struct ChessClockConfig: Codable, Equatable {
-    var mode: ChessClockMode = .untimed
-    var initialSeconds: [Int] = Array(repeating: 600, count: PlayerPreset.maxPlayers)
-    var incrementSeconds: Int = 0
-    var delaySeconds: Int = 0
-    var byoPeriodSeconds: Int = 30
-    var byoPeriods: Int = 3
-}
-
-struct ChessClockState: Codable, Equatable {
-    var config = ChessClockConfig()
-    var remainingSeconds = Array(repeating: 600.0, count: PlayerPreset.maxPlayers)
-    var moveCounts = Array(repeating: 0, count: PlayerPreset.maxPlayers)
-    var periodsRemaining = Array(repeating: 3, count: PlayerPreset.maxPlayers)
-    var periodRemaining = Array(repeating: 30.0, count: PlayerPreset.maxPlayers)
-    var activePlayer = 0
-    var running = false
-    var paused = false
-    var startedAt = Date().timeIntervalSince1970 * 1000
-    var expiredPlayer: Int? = nil
-}
-
 // MARK: - 3. 局域网 P2P 网络管理器 (MultipeerConnectivity)
 
 enum P2PAction: String, Codable {
@@ -247,8 +211,6 @@ enum P2PAction: String, Codable {
     case syncRequest
     case startGame
     case stateSnapshot
-    case clockControl
-    case clockState
     case playerLeft
     case ping
     case ack
@@ -285,9 +247,6 @@ struct P2PPacket: Codable {
     var isHost: Bool? = nil
     var message: String? = nil
     var nickname: String? = nil
-    var clockConfig: ChessClockConfig? = nil
-    var clockState: ChessClockState? = nil
-    var command: String? = nil
 
     init(sequenceID: UInt64, action: P2PAction, senderID: String) {
         self.sequenceID = sequenceID
@@ -1789,9 +1748,6 @@ final class GameModel: ObservableObject {
         }
     }
     @Published private(set) var currentTurnStartedAt: Date = Date()
-    @Published var clockConfig = ChessClockConfig()
-    @Published var chessClockState = ChessClockState()
-    @Published var showClockSettingsSheet = false
     @Published var myPlayerIndex: Int = 0
     @Published var hasEntered: [Bool] = Array(repeating: false, count: PlayerPreset.maxPlayers)
     @Published var eliminated: [Bool] = Array(repeating: false, count: PlayerPreset.maxPlayers) {
@@ -1840,202 +1796,7 @@ final class GameModel: ObservableObject {
     func beginGame() {
         currentTurnStartedAt = Date()
         isGameInPlay = true
-        if !isOnlineMultiplayer || (P2PNetworkManager.shared.isConnected && P2PNetworkManager.shared.isHost) {
-            chessClockState = makeClockState(config: clockConfig, active: currentPlayer, running: clockConfig.mode != .untimed)
-            if P2PNetworkManager.shared.isConnected && P2PNetworkManager.shared.isHost { broadcastClockState() }
-        }
         checkAndRunAITurn()
-    }
-
-    private func makeClockState(config: ChessClockConfig, active: Int, running: Bool) -> ChessClockState {
-        var state = ChessClockState()
-        state.config = config
-        state.remainingSeconds = (0..<PlayerPreset.maxPlayers).map { Double(config.initialSeconds[safe: $0] ?? 600) }
-        state.moveCounts = Array(repeating: 0, count: PlayerPreset.maxPlayers)
-        state.periodsRemaining = Array(repeating: config.byoPeriods, count: PlayerPreset.maxPlayers)
-        state.periodRemaining = Array(repeating: Double(config.byoPeriodSeconds), count: PlayerPreset.maxPlayers)
-        state.activePlayer = active
-        state.running = running && config.mode != .untimed
-        state.paused = !state.running
-        state.startedAt = Date().timeIntervalSince1970 * 1000
-        state.expiredPlayer = nil
-        return state
-    }
-
-    private func clockReading(for player: Int, at date: Date = Date()) -> (main: Double, period: Double, periods: Int, expired: Bool) {
-        guard player >= 0, player < chessClockState.remainingSeconds.count else { return (0, 0, 0, true) }
-        var main = max(0, chessClockState.remainingSeconds[player])
-        var period = max(0, chessClockState.periodRemaining[safe: player] ?? Double(clockConfig.byoPeriodSeconds))
-        var periods = chessClockState.periodsRemaining[safe: player] ?? clockConfig.byoPeriods
-        if chessClockState.running && !chessClockState.paused && chessClockState.activePlayer == player && clockConfig.mode != .untimed {
-            let elapsed = max(0, date.timeIntervalSince1970 * 1000 - chessClockState.startedAt) / 1000
-            var charge = clockConfig.mode == .bronstein ? max(0, elapsed - Double(clockConfig.delaySeconds)) : elapsed
-            if main > 0 { let used = min(main, charge); main -= used; charge -= used }
-            if clockConfig.mode == .byoyomi && main <= 0 {
-                period -= charge
-                while period <= 0 && periods > 1 { periods -= 1; period += Double(clockConfig.byoPeriodSeconds) }
-                if period <= 0 { periods = 0; period = 0 }
-            }
-        }
-        let expired = chessClockState.expiredPlayer != nil || (clockConfig.mode == .byoyomi
-            ? main <= 0 && (period <= 0 || periods <= 0)
-            : clockConfig.mode != .untimed && main <= 0)
-        return (max(0, main), max(0, period), periods, expired)
-    }
-
-    func clockLabel(for player: Int, at date: Date = Date()) -> String {
-        guard clockConfig.mode != .untimed else { return "∞" }
-        let reading = clockReading(for: player, at: date)
-        if clockConfig.mode == .byoyomi && reading.main <= 0 {
-            return "\(Int(ceil(reading.period)))s · \(reading.periods)"
-        }
-        let whole = max(0, Int(ceil(reading.main)))
-        return String(format: "%02d:%02d", whole / 60, whole % 60)
-    }
-
-    private func handleClockExpiration(_ player: Int) {
-        guard winnerIndex == nil else { return }
-        winnerIndex = activePlayerIndices.first(where: { $0 != player && !eliminated[$0] }) ?? -1
-        endGame()
-    }
-
-    func refreshClockExpiry(at date: Date = Date()) {
-        let isAuthoritativeP2PHost = P2PNetworkManager.shared.isConnected && P2PNetworkManager.shared.isHost
-        guard (!isOnlineMultiplayer || isAuthoritativeP2PHost), chessClockState.running, !chessClockState.paused,
-              clockReading(for: chessClockState.activePlayer, at: date).expired else { return }
-        pauseClock(at: date)
-        handleClockExpiration(chessClockState.activePlayer)
-    }
-
-    private func pauseClock(at date: Date = Date()) {
-        let p = chessClockState.activePlayer
-        guard p >= 0 && p < chessClockState.remainingSeconds.count else { return }
-        let elapsed = max(0, date.timeIntervalSince1970 * 1000 - chessClockState.startedAt) / 1000
-        var charge = clockConfig.mode == .bronstein ? max(0, elapsed - Double(clockConfig.delaySeconds)) : elapsed
-        if chessClockState.remainingSeconds[p] > 0 {
-            let used = min(chessClockState.remainingSeconds[p], charge)
-            chessClockState.remainingSeconds[p] -= used
-            charge -= used
-        }
-        if clockConfig.mode == .byoyomi && chessClockState.remainingSeconds[p] <= 0 {
-            var period = chessClockState.periodRemaining[p] - charge
-            while period <= 0 && chessClockState.periodsRemaining[p] > 1 {
-                chessClockState.periodsRemaining[p] -= 1
-                period += Double(clockConfig.byoPeriodSeconds)
-            }
-            if period <= 0 {
-                chessClockState.periodRemaining[p] = 0
-                chessClockState.periodsRemaining[p] = 0
-                chessClockState.expiredPlayer = p
-            } else { chessClockState.periodRemaining[p] = period }
-        } else if chessClockState.remainingSeconds[p] <= 0 && clockConfig.mode != .untimed {
-            chessClockState.expiredPlayer = p
-        }
-        chessClockState.running = false
-        chessClockState.paused = true
-        chessClockState.startedAt = date.timeIntervalSince1970 * 1000
-    }
-
-    func openClockSettings() {
-        if chessClockState.running && !chessClockState.paused { sendClockControl("pause") }
-        if chessClockState.expiredPlayer != nil { return }
-        showClockSettingsSheet = true
-    }
-
-    func sendClockControl(_ command: String, config: ChessClockConfig? = nil) {
-        let isP2P = P2PNetworkManager.shared.isConnected
-        let isWS = WebSocketNetworkManager.shared.isConnected
-        let host = P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost
-        if isWS {
-            var packet = P2PPacket(sequenceID: UInt64.random(in: 1...999999), action: .clockControl, senderID: P2PNetworkManager.shared.myNickname)
-            packet.command = command
-            packet.clockConfig = config
-            WebSocketNetworkManager.shared.sendPacket(packet)
-        } else if isP2P && !host {
-            var packet = P2PPacket(sequenceID: P2PNetworkManager.shared.getNextSequenceID(), action: .clockControl, senderID: P2PNetworkManager.shared.myNickname)
-            packet.command = command
-            packet.clockConfig = config
-            P2PNetworkManager.shared.sendPacket(packet)
-        } else {
-            applyClockCommand(command, config: config)
-            if isP2P { broadcastClockState() }
-        }
-    }
-
-    private func applyClockCommand(_ command: String, config: ChessClockConfig? = nil) {
-        let now = Date().timeIntervalSince1970 * 1000
-        switch command {
-        case "configure":
-            clockConfig = config ?? clockConfig
-            chessClockState = makeClockState(config: clockConfig, active: currentPlayer, running: false)
-        case "pause":
-            if chessClockState.running && !chessClockState.paused {
-                pauseClock(at: Date(timeIntervalSince1970: now / 1000))
-                if let player = chessClockState.expiredPlayer { handleClockExpiration(player) }
-            }
-        case "resume":
-            if chessClockState.expiredPlayer == nil {
-                chessClockState.running = clockConfig.mode != .untimed
-                chessClockState.paused = false
-                chessClockState.startedAt = now
-            }
-        case "reset":
-            chessClockState = makeClockState(config: clockConfig, active: currentPlayer, running: false)
-        default: return
-        }
-    }
-
-    private func broadcastClockState() {
-        var packet = P2PPacket(sequenceID: P2PNetworkManager.shared.getNextSequenceID(), action: .clockState, senderID: P2PNetworkManager.shared.myNickname)
-        packet.clockState = chessClockState
-        packet.clockConfig = clockConfig
-        P2PNetworkManager.shared.sendPacket(packet)
-    }
-
-    private func applyClockState(_ state: ChessClockState) {
-        chessClockState = state
-        clockConfig = state.config
-        if let player = state.expiredPlayer { handleClockExpiration(player) }
-    }
-
-    private func settleLocalClock(nextPlayer: Int) {
-        let p = chessClockState.activePlayer
-        let now = Date().timeIntervalSince1970 * 1000
-        if clockConfig.mode == .untimed {
-            chessClockState.moveCounts[p] += 1
-            chessClockState.activePlayer = nextPlayer
-            chessClockState.startedAt = now
-            return
-        }
-        guard chessClockState.running && !chessClockState.paused else { return }
-        let elapsed = max(0, now - chessClockState.startedAt) / 1000
-        var charge = clockConfig.mode == .bronstein ? max(0, elapsed - Double(clockConfig.delaySeconds)) : elapsed
-        if chessClockState.remainingSeconds[p] > 0 {
-            let used = min(chessClockState.remainingSeconds[p], charge)
-            chessClockState.remainingSeconds[p] -= used; charge -= used
-        }
-        if clockConfig.mode == .byoyomi && chessClockState.remainingSeconds[p] <= 0 {
-            while charge >= chessClockState.periodRemaining[p] && chessClockState.periodsRemaining[p] > 0 {
-                charge -= chessClockState.periodRemaining[p]
-                chessClockState.periodsRemaining[p] -= 1
-                chessClockState.periodRemaining[p] = Double(clockConfig.byoPeriodSeconds)
-            }
-            if chessClockState.periodsRemaining[p] <= 0 { chessClockState.expiredPlayer = p; chessClockState.running = false; chessClockState.paused = true }
-            else { chessClockState.periodRemaining[p] = max(0, chessClockState.periodRemaining[p] - charge) }
-        } else if chessClockState.remainingSeconds[p] <= 0 {
-            chessClockState.expiredPlayer = p; chessClockState.running = false; chessClockState.paused = true
-        }
-        guard chessClockState.expiredPlayer == nil else {
-            handleClockExpiration(p)
-            if P2PNetworkManager.shared.isConnected && P2PNetworkManager.shared.isHost { broadcastClockState() }
-            return
-        }
-        chessClockState.moveCounts[p] += 1
-        if clockConfig.mode == .fischer { chessClockState.remainingSeconds[p] += Double(clockConfig.incrementSeconds) }
-        if clockConfig.mode == .byoyomi && chessClockState.remainingSeconds[p] <= 0 { chessClockState.periodRemaining[p] = Double(clockConfig.byoPeriodSeconds) }
-        chessClockState.activePlayer = nextPlayer
-        chessClockState.startedAt = now
-        if P2PNetworkManager.shared.isConnected && P2PNetworkManager.shared.isHost { broadcastClockState() }
     }
     
     func endGame() {
@@ -2373,15 +2134,6 @@ final class GameModel: ObservableObject {
         case .roomError:
             break
 
-        case .clockState:
-            if let state = packet.clockState { self.applyClockState(state) }
-            else if let config = packet.clockConfig { self.clockConfig = config }
-
-        case .clockControl:
-            guard P2PNetworkManager.shared.isHost else { break }
-            self.applyClockCommand(packet.command ?? "", config: packet.clockConfig)
-            self.broadcastClockState()
-
         case .playerMove:
             if let r = packet.row, let c = packet.col, let pIdx = packet.playerIndex,
                pIdx == self.currentPlayer,
@@ -2406,7 +2158,6 @@ final class GameModel: ObservableObject {
             isApplyingRoomConfiguration = true
             if let names = packet.playerNames { self.playerNames = names }
             if let types = packet.playerTypes { self.playerTypes = types }
-            if let config = packet.clockConfig { self.clockConfig = config }
             if WebSocketNetworkManager.shared.isConnected && !WebSocketNetworkManager.shared.isHost,
                self.myPlayerIndex >= 0, self.myPlayerIndex < self.playerTypes.count {
                 self.playerTypes[self.myPlayerIndex] = .human
@@ -2432,7 +2183,6 @@ final class GameModel: ObservableObject {
             if let names = packet.playerNames {
                 self.playerNames = names
             }
-            if let config = packet.clockConfig { self.clockConfig = config }
             if let types = packet.playerTypes {
                 self.playerTypes = types
             }
@@ -2451,7 +2201,6 @@ final class GameModel: ObservableObject {
             }
 
         case .stateSnapshot:
-            if let state = packet.clockState { self.applyClockState(state) }
             if packet.compactBoardSnapshot != nil && packet.currentTurnIndex != nil {
                 stopOnlineSnapshotRecovery()
             }
@@ -2539,7 +2288,6 @@ final class GameModel: ObservableObject {
         }
         if let names = packet.playerNames { self.playerNames = names }
         if let types = packet.playerTypes { self.playerTypes = types }
-        if let state = packet.clockState { applyClockState(state) }
         if WebSocketNetworkManager.shared.isConnected && !WebSocketNetworkManager.shared.isHost,
            self.myPlayerIndex >= 0, self.myPlayerIndex < self.playerTypes.count {
             self.playerTypes[self.myPlayerIndex] = .human
@@ -2577,7 +2325,6 @@ final class GameModel: ObservableObject {
         packet.colorsHex = colors.map { $0.toHex() }
         packet.emojis = emojis
         packet.aiLevelRaw = aiDifficultyLevel.rawValue
-        packet.clockConfig = clockConfig
         
         if P2PNetworkManager.shared.isConnected {
             P2PNetworkManager.shared.sendPacket(packet)
@@ -2607,8 +2354,6 @@ final class GameModel: ObservableObject {
         packet.playerTypes = playerTypes
         packet.compactBoardSnapshot = compactList
         packet.currentTurnIndex = currentPlayer
-        packet.clockState = chessClockState
-        packet.clockConfig = clockConfig
         packet.hasEnteredSnapshot = hasEntered
         packet.eliminatedSnapshot = eliminated
         
@@ -2704,7 +2449,6 @@ final class GameModel: ObservableObject {
             var startPacket = P2PPacket(sequenceID: seq, action: .startGame, senderID: P2PNetworkManager.shared.myNickname)
             startPacket.firstPlayerIndex = currentPlayer
             startPacket.boardSize = boardSize
-            startPacket.clockConfig = clockConfig
             if P2PNetworkManager.shared.isConnected {
                 P2PNetworkManager.shared.sendPacket(startPacket)
             } else if WebSocketNetworkManager.shared.isConnected {
@@ -2787,7 +2531,6 @@ final class GameModel: ObservableObject {
         let flatIdx = row * boardSize + column
         guard !isProcessingCascade,
               winnerIndex == nil,
-              clockConfig.mode == .untimed || (!chessClockState.paused && chessClockState.expiredPlayer == nil),
               playableCells.contains(flatIdx),
               playerTypes.indices.contains(currentPlayer) else { return }
         
@@ -3021,9 +2764,7 @@ final class GameModel: ObservableObject {
             loopCount += 1
         }
         
-        let nextPlayer = active[nextIdx]
-        settleLocalClock(nextPlayer: nextPlayer)
-        currentPlayer = nextPlayer
+        currentPlayer = active[nextIdx]
         checkAndRunAITurn()
     }
     
@@ -4476,28 +4217,6 @@ struct GamePlayView: View {
     
     @State private var calculatedBoardWidth: CGFloat = 320
     
-    private func clockButton(player: Int, at date: Date) -> some View {
-        Button(action: { game.openClockSettings() }) {
-            VStack(spacing: 1) {
-                Text(game.playerNames[safe: player] ?? "玩家\(player + 1)")
-                    .font(.system(size: 9, weight: .medium, design: .rounded)).lineLimit(1)
-                HStack(spacing: 3) {
-                    Image(systemName: "clock").font(.system(size: 10, weight: .semibold))
-                    Text(game.clockLabel(for: player, at: date))
-                        .font(.system(size: 12, weight: .bold, design: .monospaced))
-                }
-                Text("\(game.chessClockState.moveCounts[safe: player] ?? 0) 步")
-                    .font(.system(size: 8, weight: .regular, design: .rounded)).opacity(0.72)
-            }
-            .foregroundColor(.white).frame(minWidth: 54)
-            .padding(.horizontal, 5).padding(.vertical, 5)
-            .contentShape(Capsule())
-            .glassEffect(.regular.interactive(), in: Capsule())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("\(game.playerNames[safe: player] ?? "玩家\(player + 1)")棋钟，\(game.clockLabel(for: player, at: date))，\(game.chessClockState.moveCounts[safe: player] ?? 0)步。点按暂停并设置")
-    }
-
     var body: some View {
         ZStack {
             if let customImg = game.customBackgroundImage {
@@ -4561,11 +4280,19 @@ struct GamePlayView: View {
                         .glassEffect(.regular, in: Capsule())
                         
                         TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                            let elapsed = max(0, Int(timeline.date.timeIntervalSince(game.currentTurnStartedAt)))
                             HStack(spacing: 5) {
-                                clockButton(player: 0, at: timeline.date)
-                                clockButton(player: 1, at: timeline.date)
+                                Image(systemName: "clock")
+                                    .font(.system(size: 12, weight: .semibold))
+                                Text(String(format: "%02d:%02d", elapsed / 60, elapsed % 60))
+                                    .font(.system(size: 14, weight: .bold, design: .monospaced))
                             }
-                            .onChange(of: timeline.date) { _, date in game.refreshClockExpiry(at: date) }
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .glassEffect(.regular.interactive(), in: Capsule())
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel("本回合用时，\(elapsed / 60)分\(elapsed % 60)秒")
                         }
                     }
                     
@@ -4668,9 +4395,6 @@ struct GamePlayView: View {
         .sheet(isPresented: $game.showControlSheet) {
             PlayerTakeoverSheet(game: game)
         }
-        .sheet(isPresented: $game.showClockSettingsSheet) {
-            ChessClockSettingsSheet(game: game)
-        }
         .alert("连接断开", isPresented: $game.showDisconnectedAlert) {
             Button("确定", role: .cancel) {
                 withAnimation(.spring()) { isGameStarted = false }
@@ -4683,104 +4407,6 @@ struct GamePlayView: View {
         }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
-        }
-    }
-}
-
-struct ChessClockSettingsSheet: View {
-    @ObservedObject var game: GameModel
-    @Environment(\.dismiss) private var dismiss
-    @State private var mode: ChessClockMode
-    @State private var playerOneMinutes: Int
-    @State private var playerTwoMinutes: Int
-    @State private var incrementSeconds: Int
-    @State private var delaySeconds: Int
-    @State private var byoPeriodSeconds: Int
-    @State private var byoPeriods: Int
-
-    init(game: GameModel) {
-        self.game = game
-        _mode = State(initialValue: game.clockConfig.mode)
-        _playerOneMinutes = State(initialValue: max(1, (game.clockConfig.initialSeconds[safe: 0] ?? 600) / 60))
-        _playerTwoMinutes = State(initialValue: max(1, (game.clockConfig.initialSeconds[safe: 1] ?? 600) / 60))
-        _incrementSeconds = State(initialValue: game.clockConfig.incrementSeconds)
-        _delaySeconds = State(initialValue: game.clockConfig.delaySeconds)
-        _byoPeriodSeconds = State(initialValue: game.clockConfig.byoPeriodSeconds)
-        _byoPeriods = State(initialValue: game.clockConfig.byoPeriods)
-    }
-
-    private func applyConfiguration() {
-        var config = game.clockConfig
-        config.mode = mode
-        config.initialSeconds[0] = max(60, playerOneMinutes * 60)
-        config.initialSeconds[1] = max(60, playerTwoMinutes * 60)
-        config.incrementSeconds = incrementSeconds
-        config.delaySeconds = delaySeconds
-        config.byoPeriodSeconds = byoPeriodSeconds
-        config.byoPeriods = byoPeriods
-        game.sendClockControl("configure", config: config)
-    }
-
-    private func preset(_ minutes: Int, _ increment: Int, _ selectedMode: ChessClockMode) {
-        playerOneMinutes = minutes; playerTwoMinutes = minutes
-        incrementSeconds = increment; mode = selectedMode
-    }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("常用预设") {
-                    HStack {
-                        Button("超快棋 3+0") { preset(3, 0, .fixed) }
-                        Spacer()
-                        Button("快棋 5+3") { preset(5, 3, .fischer) }
-                        Spacer()
-                        Button("慢棋 10+5") { preset(10, 5, .fischer) }
-                    }.font(.caption)
-                    HStack {
-                        Button("读秒 10分/30秒×3") { preset(10, 0, .byoyomi); byoPeriodSeconds = 30; byoPeriods = 3 }
-                        Spacer()
-                        Button("延迟 5分+3秒") { preset(5, 0, .bronstein); delaySeconds = 3 }
-                    }.font(.caption)
-                }
-                Section("计时模式") {
-                    Picker("模式", selection: $mode) {
-                        ForEach(ChessClockMode.allCases) { Text($0.title).tag($0) }
-                    }
-                }
-                if mode != .untimed {
-                    Section("双方初始时间（独立设置）") {
-                        Stepper("玩家 1：\(playerOneMinutes) 分钟", value: $playerOneMinutes, in: 1...1440)
-                        Stepper("玩家 2：\(playerTwoMinutes) 分钟", value: $playerTwoMinutes, in: 1...1440)
-                    }
-                }
-                if mode == .fischer {
-                    Section("每步加时") { Stepper("\(incrementSeconds) 秒", value: $incrementSeconds, in: 0...3600) }
-                }
-                if mode == .bronstein {
-                    Section("每步延迟") { Stepper("\(delaySeconds) 秒", value: $delaySeconds, in: 0...3600) }
-                }
-                if mode == .byoyomi {
-                    Section("读秒") {
-                        Stepper("每个读秒时段：\(byoPeriodSeconds) 秒", value: $byoPeriodSeconds, in: 1...3600)
-                        Stepper("可用时段：\(byoPeriods)", value: $byoPeriods, in: 1...20)
-                    }
-                }
-                Section("对局控制") {
-                    Button(game.chessClockState.running && !game.chessClockState.paused ? "暂停" : "继续") {
-                        game.sendClockControl(game.chessClockState.running && !game.chessClockState.paused ? "pause" : "resume")
-                    }
-                    Button("重置棋钟", role: .destructive) { game.sendClockControl("reset") }
-                    Button("应用设置") { applyConfiguration() }
-                }
-                Section {
-                    Text("不限时为默认。双方剩余时间与已走步数会显示在当前回合旁；联机计时由房间服务器同步。")
-                        .font(.footnote).foregroundStyle(.secondary)
-                }
-            }
-            .navigationTitle("棋钟设置")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
         }
     }
 }
