@@ -1742,12 +1742,8 @@ final class GameModel: ObservableObject {
         didSet { debounceSave() }
     }
     @Published var currentPlayer: Int = 0 {
-        didSet {
-            updateCachedPlayableCells()
-            if oldValue != currentPlayer { currentTurnStartedAt = Date() }
-        }
+        didSet { updateCachedPlayableCells() }
     }
-    @Published private(set) var currentTurnStartedAt: Date = Date()
     @Published var myPlayerIndex: Int = 0
     @Published var hasEntered: [Bool] = Array(repeating: false, count: PlayerPreset.maxPlayers)
     @Published var eliminated: [Bool] = Array(repeating: false, count: PlayerPreset.maxPlayers) {
@@ -1794,7 +1790,6 @@ final class GameModel: ObservableObject {
     }
     
     func beginGame() {
-        currentTurnStartedAt = Date()
         isGameInPlay = true
         checkAndRunAITurn()
     }
@@ -4260,41 +4255,23 @@ struct GamePlayView: View {
                     Spacer()
                     
                     HStack(spacing: 8) {
-                        HStack(spacing: 8) {
-                            ZStack {
-                                Circle()
-                                    .fill(game.colors[safe: game.currentPlayer] ?? .blue)
-                                    .frame(width: 12, height: 12)
-
-                                if let em = game.emojis[safe: game.currentPlayer], let emoji = em, !emoji.isEmpty {
-                                    Text(emoji).font(.caption2)
-                                }
+                        ZStack {
+                            Circle()
+                                .fill(game.colors[safe: game.currentPlayer] ?? .blue)
+                                .frame(width: 12, height: 12)
+                            
+                            if let em = game.emojis[safe: game.currentPlayer], let emoji = em, !emoji.isEmpty {
+                                Text(emoji).font(.caption2)
                             }
-
-                            Text("\(game.playerNames[safe: game.currentPlayer] ?? "玩家") 回合")
-                                .font(.system(size: 15, weight: .bold, design: .rounded))
-                                .foregroundColor(.white)
                         }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .glassEffect(.regular, in: Capsule())
                         
-                        TimelineView(.periodic(from: .now, by: 1)) { timeline in
-                            let elapsed = max(0, Int(timeline.date.timeIntervalSince(game.currentTurnStartedAt)))
-                            HStack(spacing: 5) {
-                                Image(systemName: "clock")
-                                    .font(.system(size: 12, weight: .semibold))
-                                Text(String(format: "%02d:%02d", elapsed / 60, elapsed % 60))
-                                    .font(.system(size: 14, weight: .bold, design: .monospaced))
-                            }
+                        Text("\(game.playerNames[safe: game.currentPlayer] ?? "玩家") 回合")
+                            .font(.system(size: 15, weight: .bold, design: .rounded))
                             .foregroundColor(.white)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .glassEffect(.regular.interactive(), in: Capsule())
-                            .accessibilityElement(children: .ignore)
-                            .accessibilityLabel("本回合用时，\(elapsed / 60)分\(elapsed % 60)秒")
-                        }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .glassEffect(.regular, in: Capsule())
                     
                     Spacer()
                     
