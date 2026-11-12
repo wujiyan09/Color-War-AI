@@ -834,6 +834,7 @@ struct AISolver: Sendable {
     let currentPlayer: Int
     let playerType: PlayerControlType
     let aiLevel: AIDifficultyLevel
+    let openingSeed: String
     let board: Board
     let hasEntered: [Bool]
     let eliminated: [Bool]
@@ -846,12 +847,14 @@ struct AISolver: Sendable {
          aiLevel: AIDifficultyLevel,
          board: [[Cell]],
          hasEntered: [Bool],
-         eliminated: [Bool]) {
+         eliminated: [Bool],
+         openingSeed: String? = nil) {
         self.boardSize = boardSize
         self.activePlayers = activePlayers
         self.currentPlayer = currentPlayer
         self.playerType = playerType
         self.aiLevel = aiLevel
+        self.openingSeed = openingSeed ?? "color-war-\(boardSize)-\(activePlayers.map(String.init).joined(separator: "-"))"
         
         var flat = [SimCell]()
         flat.reserveCapacity(boardSize * boardSize)
@@ -884,17 +887,72 @@ struct AISolver: Sendable {
         
         let isMyFirstTurn = (currentPlayer < hasEntered.count) ? !hasEntered[currentPlayer] : true
         
-        if isMyFirstTurn {
-            return selectOptimalOpeningMove(validMoves: validMoves)
+        if isMyFirstTurn && aiLevel != .fast {
+            return driveOpeningMove(validMoves: validMoves) ?? selectOptimalOpeningMove(validMoves: validMoves)
         }
-        
+
+        let ordered = validMoves.sorted {
+            evaluateMoveTacticalPriority($0, on: board, player: currentPlayer)
+                > evaluateMoveTacticalPriority($1, on: board, player: currentPlayer)
+        }
+        // DOTS personality data: Easy is 25% random, 45% random from the top half,
+        // 30% best; Medium deliberately chooses the runner-up 25% of the time.
+        if aiLevel == .fast {
+            let roll = Double.random(in: 0..<1)
+            if roll < 0.25 { return validMoves.randomElement() }
+            if roll < 0.70 { return Array(ordered.prefix(max(1, (ordered.count + 1) / 2))).randomElement() }
+            return ordered.first
+        }
+        if aiLevel == .balanced, ordered.count > 1, Double.random(in: 0..<1) < 0.25 {
+            return ordered[1]
+        }
         if playerType == .enhancedNightmare {
-            if let strikeMove = findCriticalThreatMove(validMoves: validMoves) {
-                return strikeMove
-            }
+            if let strikeMove = findCriticalThreatMove(validMoves: validMoves) { return strikeMove }
         }
-        
         return calculateAspirationNightmareMove(validMoves: validMoves)
+    }
+
+    // The Drive clock bundle supplies 13 FNV-selected opening geometries. Adapt the
+    // geometry only; legal cells and the +3 first-entry rule remain Color War's.
+    private func driveOpeningMove(validMoves: [(Int, Int)]) -> (Int, Int)? {
+        let n = boardSize, e = n - 1
+        guard n >= 5 else { return nil }
+        let corners: [[(Int, Int)]] = [
+            [(0,0),(e,e),(e,0),(0,e),(1,0),(e-1,e),(e,1),(0,e-1),(1,1),(e-1,e-1),(e-1,1),(1,e-1)],
+            [(0,0),(1,0),(0,1),(1,1),(0,0),(1,1),(2,0),(0,2),(2,1),(1,2),(2,2),(1,0)],
+            [(e,0),(e-1,0),(e,1),(e-1,1),(e,0),(e-1,1),(e-2,0),(e,2),(e-2,1),(e-1,2),(e-2,2),(e-1,0)],
+            [(0,e),(1,e),(0,e-1),(1,e-1),(0,e),(1,e-1),(2,e),(0,e-2),(2,e-1),(1,e-2),(2,e-2),(1,e)],
+            [(e,e),(e-1,e),(e,e-1),(e-1,e-1),(e,e),(e-1,e-1),(e-2,e),(e,e-2),(e-2,e-1),(e-1,e-2),(e-2,e-2),(e-1,e)]
+        ]
+        var diagonal = [(Int,Int)](); var anti = [(Int,Int)]()
+        for i in 0..<n { diagonal.append((i,i)); anti.append((i,e-i)) }
+        func paired(_ points: [(Int,Int)]) -> [(Int,Int)] {
+            var out=[(Int,Int)]()
+            for i in 0..<((points.count+1)/2) { out.append(points[i]); if points.count-1-i != i { out.append(points[points.count-1-i]) } }
+            return Array((out+out).prefix(12))
+        }
+        func edge(_ side: Int) -> [(Int,Int)] {
+            let points=(0..<n).map { i -> (Int,Int) in
+                switch side { case 0:return (i,0);case 1:return(i,e);case 2:return(0,i);default:return(e,i) }
+            }
+            var out=[points[0],points[n-1]]
+            if n/2 > 1 { for i in 1..<max(1,n/2) { out += [points[i],points[n-1-i]] } }
+            if n%2==1 { out.append(points[n/2]) }
+            return Array((out+out).prefix(12))
+        }
+        let mid=n/2, lo=mid-1, hi=mid
+        let center=[(lo,lo),(hi,hi),(lo,hi),(hi,lo),(lo,lo),(hi,hi),(lo-1,lo),(hi+1,hi),(lo,lo-1),(hi,hi+1),(hi+1,lo),(lo-1,hi),(hi,lo),(lo,hi)]
+            .filter { $0.0 >= 0 && $0.1 >= 0 && $0.0 < n && $0.1 < n }
+        let cornersWithSide = corners
+        let patterns=[cornersWithSide[0],cornersWithSide[1],cornersWithSide[2],cornersWithSide[3],cornersWithSide[4],paired(diagonal),paired(anti),edge(0),edge(1),edge(2),edge(3),Array(center.prefix(12)),[(0,0),(e,e),(0,0),(e,e),(0,0),(e,e),(1,0),(e-1,e),(0,1),(e,e-1),(1,1),(e-1,e-1)]]
+        var hash: UInt32 = 2_166_136_261
+        for byte in openingSeed.utf8 { hash ^= UInt32(byte); hash = hash &* 16_777_619 }
+        let pattern=patterns[Int(hash % UInt32(patterns.count))]
+        let occupied=Set(validMoves.map { "\($0.1),\($0.0)" })
+        for (x,y) in pattern where x >= 0 && y >= 0 && x < n && y < n {
+            if occupied.contains("\(x),\(y)") { return (y,x) }
+        }
+        return nil
     }
     
     private func selectOptimalOpeningMove(validMoves: [(Int, Int)]) -> (Int, Int)? {
@@ -1101,23 +1159,29 @@ struct AISolver: Sendable {
         
         var bestMove = sortedMoves.first
         var lastGuess = 0
-        let windowDelta = 120
         
         for depth in 2...maxDepth {
             if Task.isCancelled { break }
             
-            let result: RootSearchResult
+            var result: RootSearchResult
             if depth == 2 {
                 result = searchRoot(boardState: board, hasEnteredState: hasEntered, eliminatedState: eliminated, depth: depth, alpha: Int.min + 1, beta: Int.max - 1, isTwoPlayer: isTwoPlayer, candidates: sortedMoves, tt: &tt, ordering: &ordering)
             } else {
-                let alpha = lastGuess - windowDelta
-                let beta = lastGuess + windowDelta
-                let tempResult = searchRoot(boardState: board, hasEnteredState: hasEntered, eliminatedState: eliminated, depth: depth, alpha: alpha, beta: beta, isTwoPlayer: isTwoPlayer, candidates: sortedMoves, tt: &tt, ordering: &ordering)
-                
-                if tempResult.score <= alpha || tempResult.score >= beta {
-                    result = searchRoot(boardState: board, hasEnteredState: hasEntered, eliminatedState: eliminated, depth: depth, alpha: Int.min + 1, beta: Int.max - 1, isTwoPlayer: isTwoPlayer, candidates: sortedMoves, tt: &tt, ordering: &ordering)
-                } else {
-                    result = tempResult
+                // Match DOTS's aspiration strategy: begin at ±50, widen exponentially,
+                // then fall back to a full window once the ±4000 ceiling is crossed.
+                var delta = 50
+                var alpha = lastGuess - delta
+                var beta = lastGuess + delta
+                while true {
+                    result = searchRoot(boardState: board, hasEnteredState: hasEntered, eliminatedState: eliminated, depth: depth, alpha: alpha, beta: beta, isTwoPlayer: isTwoPlayer, candidates: sortedMoves, tt: &tt, ordering: &ordering)
+                    if Task.isCancelled || (result.score > alpha && result.score < beta) { break }
+                    delta *= 2
+                    if delta > 4000 {
+                        result = searchRoot(boardState: board, hasEnteredState: hasEntered, eliminatedState: eliminated, depth: depth, alpha: Int.min + 1, beta: Int.max - 1, isTwoPlayer: isTwoPlayer, candidates: sortedMoves, tt: &tt, ordering: &ordering)
+                        break
+                    }
+                    alpha = lastGuess - delta
+                    beta = lastGuess + delta
                 }
             }
             
@@ -1148,9 +1212,13 @@ struct AISolver: Sendable {
         
         var a = alpha
         var bVal = beta
-        
-        let hash = boardState.zobristHash
+        let originalAlpha = alpha
+        let originalBeta = beta
+        let hash = searchStateHash(boardState: boardState, hasEnteredState: hasEnteredState,
+                                  eliminatedState: eliminatedState, turnPlayer: turnPlayer)
+        var transpositionMove: (Int, Int)? = nil
         if let res = tt.lookup(hash: hash, depth: depth, alpha: a, beta: bVal) {
+            transpositionMove = res.move
             a = res.newAlpha
             bVal = res.newBeta
             if res.hitCutoff { return res.score }
@@ -1211,8 +1279,10 @@ struct AISolver: Sendable {
         }
         
         let sorted = validMoves.sorted { m1, m2 in
-            let p1 = evaluateMoveTacticalPriority(m1, on: boardState, player: turnPlayer) + ordering.getOrderingScore(move: m1, depth: depth)
-            let p2 = evaluateMoveTacticalPriority(m2, on: boardState, player: turnPlayer) + ordering.getOrderingScore(move: m2, depth: depth)
+            let tt1 = transpositionMove.map { $0.0 == m1.0 && $0.1 == m1.1 } == true ? 1_000_000 : 0
+            let tt2 = transpositionMove.map { $0.0 == m2.0 && $0.1 == m2.1 } == true ? 1_000_000 : 0
+            let p1 = tt1 + evaluateMoveTacticalPriority(m1, on: boardState, player: turnPlayer, hasEntered: hasEnteredState) + ordering.getOrderingScore(move: m1, depth: depth)
+            let p2 = tt2 + evaluateMoveTacticalPriority(m2, on: boardState, player: turnPlayer, hasEntered: hasEnteredState) + ordering.getOrderingScore(move: m2, depth: depth)
             return p1 > p2
         }
         
@@ -1253,8 +1323,39 @@ struct AISolver: Sendable {
             }
         }
         
-        tt.store(hash: hash, depth: depth, score: maxEval, type: maxEval >= beta ? .lowerBound : .exact, move: bestMoveLocal)
+        let bound: TranspositionTable.EntryType
+        if maxEval <= originalAlpha {
+            bound = .upperBound
+        } else if maxEval >= originalBeta {
+            bound = .lowerBound
+        } else {
+            bound = .exact
+        }
+        tt.store(hash: hash, depth: depth, score: maxEval, type: bound, move: bestMoveLocal)
         return maxEval
+    }
+
+    // A board-only key is insufficient: the same cells can have different legal first
+    // placements (+3), eliminated players, and side-to-move. Include all search state.
+    private func searchStateHash(boardState: Board, hasEnteredState: [Bool],
+                                 eliminatedState: [Bool], turnPlayer: Int) -> UInt64 {
+        var key = boardState.zobristHash
+        key ^= Self.mixSearchHash(UInt64(turnPlayer + 1) &+ 0x9E3779B97F4A7C15)
+        let stateCount = max(hasEnteredState.count, eliminatedState.count)
+        for index in 0..<stateCount {
+            let entered = index < hasEnteredState.count && hasEnteredState[index] ? 1 : 0
+            let isEliminated = index < eliminatedState.count && eliminatedState[index] ? 2 : 0
+            let flags = UInt64(entered | isEliminated)
+            key ^= Self.mixSearchHash(UInt64(index + 1) &* 0xD6E8FEB86659FD93 ^ flags)
+        }
+        return key
+    }
+
+    private static func mixSearchHash(_ input: UInt64) -> UInt64 {
+        var value = input
+        value = (value ^ (value >> 30)) &* 0xBF58476D1CE4E5B9
+        value = (value ^ (value >> 27)) &* 0x94D049BB133111EB
+        return value ^ (value >> 31)
     }
     
     private func quiescenceSearch(boardState: Board,
@@ -1266,11 +1367,11 @@ struct AISolver: Sendable {
                                   qsDepth: Int,
                                   tt: inout TranspositionTable) -> Int {
         if Task.isCancelled || qsDepth <= 0 {
-            return evaluateAdvancedBoard(boardState, forPlayer: currentPlayer, eliminated: eliminatedState, currentTurn: turnPlayer, lastCascadeWaves: 0)
+            return evaluateAdvancedBoard(boardState, forPlayer: currentPlayer, eliminated: eliminatedState, hasEntered: hasEnteredState, currentTurn: turnPlayer, lastCascadeWaves: 0)
         }
         
         var a = alpha
-        let standPat = evaluateAdvancedBoard(boardState, forPlayer: currentPlayer, eliminated: eliminatedState, currentTurn: turnPlayer, lastCascadeWaves: 0)
+        let standPat = evaluateAdvancedBoard(boardState, forPlayer: currentPlayer, eliminated: eliminatedState, hasEntered: hasEnteredState, currentTurn: turnPlayer, lastCascadeWaves: 0)
         if standPat >= beta { return beta }
         if standPat > a { a = standPat }
         
@@ -1335,7 +1436,7 @@ struct AISolver: Sendable {
                                        turnPlayer: Int,
                                        beamWidth: Int) -> [Int: Int] {
         if Task.isCancelled || depth <= 0 || isGameOverSimulated(eliminated: eliminatedState) {
-            return evaluateMultiPlayerVector(boardState, eliminated: eliminatedState)
+            return evaluateMultiPlayerVector(boardState, hasEntered: hasEnteredState, eliminated: eliminatedState, currentTurn: turnPlayer)
         }
         
         let moves = getPlayableCells(for: turnPlayer, on: boardState)
@@ -1345,8 +1446,8 @@ struct AISolver: Sendable {
         }
         
         let sorted = moves.sorted {
-            evaluateMoveTacticalPriority($0, on: boardState, player: turnPlayer)
-            > evaluateMoveTacticalPriority($1, on: boardState, player: turnPlayer)
+            evaluateMoveTacticalPriority($0, on: boardState, player: turnPlayer, hasEntered: hasEnteredState)
+            > evaluateMoveTacticalPriority($1, on: boardState, player: turnPlayer, hasEntered: hasEnteredState)
         }
         let candidates = Array(sorted.prefix(beamWidth))
         
@@ -1359,7 +1460,7 @@ struct AISolver: Sendable {
             var b = boardState
             var h = hasEnteredState
             var e = eliminatedState
-            
+
             _ = simulateMoveBFSWithWaveDepthTracking(on: &b, move: m, player: turnPlayer, hasEntered: &h)
             updateEliminatedStatus(board: b, hasEntered: h, eliminated: &e)
             
@@ -1376,133 +1477,95 @@ struct AISolver: Sendable {
         return bestVector
     }
     
-    private func evaluateMultiPlayerVector(_ b: Board, eliminated: [Bool]) -> [Int: Int] {
-        var orbCounts = [Int](repeating: 0, count: PlayerPreset.maxPlayers)
-        var scores = [Int](repeating: 0, count: PlayerPreset.maxPlayers)
-        
-        for idx in 0..<(boardSize * boardSize) {
-            guard idx < b.cells.count else { continue }
-            let cell = b.cells[idx]
-            guard let owner = cell.owner, owner >= 0 && owner < PlayerPreset.maxPlayers else { continue }
-            
-            let neighbors = idx < neighborsMap.count ? neighborsMap[idx] : []
-            var val = cell.count * 15 + neighbors.count * 5
-            
-            if cell.count == 3 {
-                val += 35
-                for nIdx in neighbors {
-                    let nCell = b.cells[nIdx]
-                    if let nOwner = nCell.owner, nOwner != owner {
-                        if nCell.count == 3 {
-                            val -= 1500
-                        }
-                    }
-                }
-            }
-            
-            orbCounts[owner] += cell.count
-            scores[owner] += val
+    private func evaluateMultiPlayerVector(_ b: Board, hasEntered: [Bool], eliminated: [Bool], currentTurn: Int) -> [Int: Int] {
+        var vector=[Int:Int]()
+        let alive=activePlayers.filter{!isPlayerEliminated($0,in:eliminated)}
+        for player in activePlayers {
+            if isPlayerEliminated(player,in:eliminated) { vector[player] = -999_999; continue }
+            let rivals=alive.filter{$0 != player}
+            let strongest=rivals.max{ownerFeatureSummary(b,player:$0).charge < ownerFeatureSummary(b,player:$1).charge}
+            if let strongest {
+                let mine=ownerFeatureSummary(b,player:player), enemy=ownerFeatureSummary(b,player:strongest)
+                let (best,second)=driveCaptureValues(b,player:player,hasEntered:hasEntered)
+                let (enemyBest,enemySecond)=driveCaptureValues(b,player:strongest,hasEntered:hasEntered)
+                var value=(mine.charge-enemy.charge)*4+(mine.critical-enemy.critical)*18+(mine.oneAway-enemy.oneAway)*6
+                    + Int(((mine.potential-enemy.potential)*100).rounded())+(mine.largestComponent-enemy.largestComponent)*3
+                value *= 100
+                value += (currentTurn == player ? best*100-enemyBest*1200 : best*1200-enemyBest*1800)+(second-enemySecond)*400
+                value += currentTurn == player ? 500 : -500
+                vector[player]=value
+            } else { vector[player]=999_999 }
         }
-        
-        let maxOrbCount = orbCounts.max() ?? 0
-        let leaderIndex = orbCounts.firstIndex(of: maxOrbCount)
-        
-        var vectorResult: [Int: Int] = [:]
-        for p in activePlayers {
-            if isPlayerEliminated(p, in: eliminated) {
-                vectorResult[p] = -999_999
-            } else {
-                var finalScore = scores[p]
-                if let leader = leaderIndex, leader != p && maxOrbCount > 5 {
-                    let leaderOrbDiff = orbCounts[leader] - orbCounts[p]
-                    finalScore -= Int(Double(leaderOrbDiff) * 35.0)
-                }
-                vectorResult[p] = finalScore
-            }
-        }
-        return vectorResult
+        return vector
     }
-    
-    private func evaluateAdvancedBoard(_ b: Board, forPlayer player: Int, eliminated: [Bool], currentTurn: Int, lastCascadeWaves: Int) -> Int {
+
+    private func evaluateAdvancedBoard(_ b: Board, forPlayer player: Int, eliminated: [Bool], hasEntered: [Bool], currentTurn: Int, lastCascadeWaves: Int) -> Int {
         if isPlayerEliminated(player, in: eliminated) { return -999_999 }
-        
-        var score = 0
-        var myOrbs = 0
-        var maxEnemyOrbs = 0
-        var enemyThreat3Count = 0
-        let totalCells = min(b.cells.count, boardSize * boardSize)
-        
-        var enemyOrbsMap = [Int: Int]()
-        
-        for idx in 0..<totalCells {
-            let cell = b.cells[idx]
-            guard let owner = cell.owner else { continue }
-            
-            let neighbors = idx < neighborsMap.count ? neighborsMap[idx] : []
-            let neighborCount = neighbors.count
-            
-            var cellVal = cell.count * 15 + neighborCount * 5
-            
-            if cell.count == 3 {
-                cellVal += 35
-                
-                for nIdx in neighbors {
-                    let nCell = b.cells[nIdx]
-                    if let nOwner = nCell.owner, nOwner != owner {
-                        if nCell.count == 3 {
-                            if owner == player { enemyThreat3Count += 1 }
-                            if currentTurn == owner {
-                                cellVal += (owner == player) ? 3000 : -3000
-                            } else {
-                                cellVal -= (owner == player) ? 3500 : -3500
-                            }
-                        } else if nCell.count == 2 {
-                            cellVal += (owner == player) ? 400 : -400
-                        }
-                    }
-                }
-            } else if cell.count <= 2 {
-                for nIdx in neighbors {
-                    let nCell = b.cells[nIdx]
-                    if let nOwner = nCell.owner, nOwner != owner, nCell.count == 3 {
-                        cellVal -= (owner == player) ? 800 : -800
-                    }
-                }
-            }
-            
-            if owner == player {
-                myOrbs += cell.count
-                score += cellVal
-            } else {
-                enemyOrbsMap[owner, default: 0] += cell.count
-                score -= Int(Double(cellVal) * 1.25)
-            }
-        }
-        
-        maxEnemyOrbs = enemyOrbsMap.values.max() ?? 0
-        
-        let chainScore = computeChainGraphPotentials(on: b, player: player)
-        score += chainScore
-        
-        let ratio = Double(myOrbs) / Double(max(1, maxEnemyOrbs))
-        let riskMode: TacticalRiskMode = ratio >= 1.35 ? .dominant : (ratio <= 0.65 ? .desperate : .balanced)
-        
-        switch riskMode {
-        case .dominant:
-            score -= enemyThreat3Count * 1200
-            score += lastCascadeWaves * 30
-        case .desperate:
-            score -= enemyThreat3Count * 200
-            score += lastCascadeWaves * 250
-        case .balanced:
-            score -= enemyThreat3Count * 600
-            score += lastCascadeWaves * 80
-        }
-        
-        let eliminatedEnemies = activePlayers.filter { $0 != player && isPlayerEliminated($0, in: eliminated) }.count
-        return score + eliminatedEnemies * 2000 + (myOrbs - maxEnemyOrbs) * 25
+        let rivals = activePlayers.filter { $0 != player && !isPlayerEliminated($0, in: eliminated) }
+        if rivals.isEmpty { return 999_999 }
+        let rival = rivals.max { ownerFeatureSummary(b, player: $0).charge < ownerFeatureSummary(b, player: $1).charge } ?? player
+        let mine = ownerFeatureSummary(b, player: player)
+        let theirs = ownerFeatureSummary(b, player: rival)
+        let (best, second) = driveCaptureValues(b, player: player, hasEntered: hasEntered)
+        let (enemyBest, enemySecond) = driveCaptureValues(b, player: rival, hasEntered: hasEntered)
+
+        // Drive's manually tuned static terms, mapped to Color War's four-neighbour
+        // threshold-4 board. Keep integer centi-points so the 1.5 potential term survives.
+        var value = (mine.charge - theirs.charge) * 4
+            + (mine.critical - theirs.critical) * 18
+            + (mine.oneAway - theirs.oneAway) * 6
+            + Int(((mine.potential - theirs.potential) * 100).rounded())
+            + (mine.largestComponent - theirs.largestComponent) * 3
+        value *= 100
+        value += (currentTurn == player ? best * 100 - enemyBest * 1200 : best * 1200 - enemyBest * 1800)
+        value += (second - enemySecond) * 400
+        value += currentTurn == player ? 500 : -500
+
+        // Color War-specific persistence: the DOTS report's two-player score is adapted
+        // against the strongest live rival; eliminated seats stay terminal and cannot be farmed.
+        let eliminatedEnemies = rivals.count == 0 ? 0 : activePlayers.filter { $0 != player && isPlayerEliminated($0, in: eliminated) }.count
+        value += eliminatedEnemies * 2_000
+        value += lastCascadeWaves * 8
+        return value
     }
-    
+
+    private func ownerFeatureSummary(_ b: Board, player: Int) -> (charge: Int, critical: Int, oneAway: Int, potential: Double, largestComponent: Int) {
+        var charge=0, critical=0, oneAway=0, potential=0.0
+        for cell in b.cells where cell.owner == player {
+            charge += cell.count
+            if cell.count >= 3 { critical += 1 } else if cell.count == 2 { oneAway += 1 }
+            potential += Double(max(0, 4-cell.count)) * 1.5
+        }
+        var seen=Set<Int>(), largest=0
+        for i in b.cells.indices where b.cells[i].owner == player && !seen.contains(i) {
+            var queue=[i]; seen.insert(i); var count=0
+            while !queue.isEmpty { let at=queue.removeLast(); count += 1
+                if at < neighborsMap.count { for next in neighborsMap[at] where !seen.contains(next) && b.cells[next].owner == player { seen.insert(next); queue.append(next) } }
+            }
+            largest=max(largest,count)
+        }
+        return (charge,critical,oneAway,potential,largest)
+    }
+
+    private func driveCaptureValues(_ b: Board, player: Int, hasEntered: [Bool]) -> (Int, Int) {
+        var values=[Double]()
+        let beforeOwn=b.cells.filter{$0.owner == player}.count
+        let beforeEnemy=b.cells.filter{$0.owner != nil && $0.owner != player}.count
+        for idx in b.cells.indices where b.cells[idx].owner == player && b.cells[idx].count >= 3 {
+            var simulated=b, entered=hasEntered
+            let coordinate=(idx / boardSize, idx % boardSize)
+            _ = simulateMoveBFSWithWaveDepthTracking(on: &simulated, move: coordinate, player: player, hasEntered: &entered)
+            var eliminatedCopy=Array(repeating:false,count:PlayerPreset.maxPlayers)
+            updateEliminatedStatus(board:simulated,hasEntered:entered,eliminated:&eliminatedCopy)
+            let afterOwn=simulated.cells.filter{$0.owner == player}.count
+            let afterEnemy=simulated.cells.filter{$0.owner != nil && $0.owner != player}.count
+            let won=activePlayers.filter{$0 != player && !isPlayerEliminated($0,in: eliminatedCopy)}.isEmpty
+            values.append(won ? 1_000_000 : Double(afterOwn-beforeOwn)+Double(beforeEnemy-afterEnemy)*1.4)
+        }
+        values.sort(by: >)
+        return (Int((values.first ?? 0).rounded()), Int((values.dropFirst().first ?? 0).rounded()))
+    }
+
     private func computeChainGraphPotentials(on b: Board, player: Int) -> Int {
         var visited = Array(repeating: false, count: b.cells.count)
         var score = 0
@@ -1568,37 +1631,47 @@ struct AISolver: Sendable {
         return score
     }
     
-    private func evaluateMoveTacticalPriority(_ move: (Int, Int), on b: Board, player: Int) -> Int {
-        let (r, c) = move
-        let idx = r * boardSize + c
+    private func evaluateMoveTacticalPriority(_ move: (Int, Int), on b: Board, player: Int, hasEntered enteredState: [Bool]? = nil) -> Int {
+        let idx=move.0*boardSize+move.1
         guard idx < b.cells.count else { return 0 }
-        let cell = b[r, c]
-        
-        var priority = 0
-        let neighbors = idx < neighborsMap.count ? neighborsMap[idx] : []
-        
-        if cell.count == 3 || cell.owner == nil {
-            for nIdx in neighbors {
-                let nCell = b.cells[nIdx]
-                if let nOwner = nCell.owner, nOwner != player, nCell.count == 3 {
-                    priority += 4000
-                }
-            }
+        let cell=b.cells[idx], entryState=enteredState ?? hasEntered, first=player < entryState.count && !entryState[player]
+        let nextCharge=cell.count+(first ? 3 : 1), willExplode=nextCharge >= 4
+        let neighbors=idx < neighborsMap.count ? neighborsMap[idx] : []
+        var ownCritical=0, enemyCritical=0, enemyMax=0, enemyTwo=0, enemyCount=0, ownCharge=0, enemyCharge=0, ownAdj=0, emptyAdj=0
+        for n in neighbors {
+            let c=b.cells[n]
+            if c.owner == player { ownAdj += 1; if c.count >= 3 { ownCritical += 1; ownCharge += c.count } }
+            else if c.owner == nil { emptyAdj += 1 }
+            else { enemyCount += 1; enemyMax=max(enemyMax,c.count); enemyCharge += c.count; if c.count >= 3 { enemyCritical += 1 }; if c.count == 2 { enemyTwo += 1 } }
         }
-        
-        if cell.count < 3 {
-            for nIdx in neighbors {
-                let nCell = b.cells[nIdx]
-                if let nOwner = nCell.owner, nOwner != player, nCell.count == 3 {
-                    priority -= 2000
-                }
+        var score=0.0
+        if willExplode {
+            var simulated=b, entered=entryState
+            let beforeOwn=b.cells.filter{$0.owner == player}.count
+            let beforeEnemy=b.cells.filter{$0.owner != nil && $0.owner != player}.count
+            _ = simulateMoveBFSWithWaveDepthTracking(on:&simulated,move:move,player:player,hasEntered:&entered)
+            var elim=Array(repeating:false,count:PlayerPreset.maxPlayers); updateEliminatedStatus(board:simulated,hasEntered:entered,eliminated:&elim)
+            let afterOwn=simulated.cells.filter{$0.owner == player}.count
+            let afterEnemy=simulated.cells.filter{$0.owner != nil && $0.owner != player}.count
+            score += Double(afterOwn-beforeOwn)*18 + Double(beforeEnemy-afterEnemy)*26
+            if activePlayers.filter({!isPlayerEliminated($0,in:elim)}).count <= 1 { score += 500_000 }
+            score += Double(enemyCount)*30 + Double(enemyCritical)*90 + Double(emptyAdj)*0.4
+            if ownCritical > 0 { score += 280 + Double(ownCharge)*14 }
+        } else {
+            if enemyCritical > 0 {
+                score -= 95 + 24*Double(nextCharge) + 18*Double(enemyMax)
+                if nextCharge == 3 { score += 250 + 95*Double(ownCritical) }
             }
+            if nextCharge == 3 && enemyTwo > 0 { score -= 105*Double(enemyTwo) }
+            if nextCharge == 3 && enemyCount > 0 { score -= 30*Double(enemyCount) }
+            if nextCharge == 3 && enemyCount == 0 { score += 22 + 4*Double(ownCritical) }
+            if ownCritical > 0 { score -= 290 + 12*Double(ownCharge) }
+            score += Double(nextCharge)*0.5 + Double(4-nextCharge)*2.5 + Double(ownAdj) + Double(emptyAdj)*0.25 - Double(enemyCount)*2
+            let total=b.cells.filter{$0.owner != nil}.count
+            if total <= 8 { let center=Double(boardSize-1)/2; score += max(0,Double(boardSize)-abs(Double(move.0)-center)-abs(Double(move.1)-center))*2.5 }
+            if total >= 30 && nextCharge == 3 { score -= 8 }
         }
-        
-        priority += neighbors.count * 10
-        if cell.count == 3 { priority += 500 }
-        
-        return priority
+        return Int((score*100).rounded())
     }
     
     private func simulateMoveBFSWithWaveDepthTracking(on simBoard: inout Board, move: (Int, Int), player: Int, hasEntered: inout [Bool]) -> (Int, Set<Int>) {
