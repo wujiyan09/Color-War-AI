@@ -57,5 +57,35 @@ class OpeningPolicyTests(unittest.TestCase):
         self.assertIn("column == 0 || column == boardSize - 1", corner)
 
 
+class DriveParitySearchTests(unittest.TestCase):
+    def test_ios_drive_ordering_and_scaled_aspiration_constants(self):
+        ordering = function_body("func getOrderingScore(move: (Int, Int), depth: Int) -> Int")
+        self.assertIn("if isTwoPlayer {", ordering)
+        self.assertIn("score += 80_000_000", ordering)
+        self.assertIn("score += 70_000_000", ordering)
+        self.assertIn("score += 10_000", ordering)
+        self.assertIn("score += 5_000", ordering)
+        node = function_body("private func enhancedAlphaBetaNode(")
+        self.assertIn("isTwoPlayerGame ? 1_000_000_000 : 1_000_000", node)
+        self.assertIn("return nextCharge >= 4 ? 100_000_000 : 0", SOURCE)
+        search = function_body("private func calculateAspirationNightmareMove(")
+        self.assertIn("let scale = isTwoPlayer ? 100 : 1", search)
+        self.assertIn("var delta = 50 * scale", search)
+        self.assertIn("if delta > 4_000 * scale", search)
+        self.assertIn("if isTwoPlayer {", search)
+        self.assertIn("alpha = result.score - delta", search)
+        self.assertIn("beta = result.score + scale", search)
+        self.assertIn("alpha = result.score - scale", search)
+        self.assertIn("beta = result.score + delta", search)
+        self.assertIn("alpha = lastGuess - delta", search)
+        self.assertIn("beta = lastGuess + delta", search)
+
+    def test_multiplayer_policy_remains_outside_two_player_priority(self):
+        bonus = function_body("private func twoPlayerTacticalOrderingBonus(")
+        self.assertIn("guard activePlayers.count == 2 else { return 0 }", bonus)
+        body = function_body("func calculateBestMove() async -> (Int, Int)?")
+        self.assertIn("if isMyFirstTurn && !isTwoPlayerGame", body)
+
+
 if __name__ == "__main__":
     unittest.main()

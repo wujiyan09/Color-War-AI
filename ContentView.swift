@@ -708,8 +708,10 @@ struct TranspositionTable: Sendable {
 struct MoveOrderingTable: Sendable {
     private var killerMoves: [[(Int, Int)?]]
     private var historyTable: [[Int]]
+    private let isTwoPlayer: Bool
     
-    init(maxDepth: Int = 16) {
+    init(maxDepth: Int = 16, isTwoPlayer: Bool = false) {
+        self.isTwoPlayer = isTwoPlayer
         self.killerMoves = Array(repeating: [nil, nil], count: maxDepth + 1)
         self.historyTable = Array(repeating: Array(repeating: 0, count: 12), count: 12)
     }
@@ -732,8 +734,15 @@ struct MoveOrderingTable: Sendable {
         var score = historyTable[r][c]
         
         let validDepth = min(depth, killerMoves.count - 1)
-        if let k1 = killerMoves[validDepth][0], k1 == move { score += 10_000 }
-        if let k2 = killerMoves[validDepth][1], k2 == move { score += 5_000 }
+        if isTwoPlayer {
+            // Move-evaluation values are scaled ×100; scale Drive's 800k/700k priorities.
+            if let k1 = killerMoves[validDepth][0], k1 == move { score += 80_000_000 }
+            if let k2 = killerMoves[validDepth][1], k2 == move { score += 70_000_000 }
+        } else {
+            // Preserve the existing multiplayer ordering scale.
+            if let k1 = killerMoves[validDepth][0], k1 == move { score += 10_000 }
+            if let k2 = killerMoves[validDepth][1], k2 == move { score += 5_000 }
+        }
         
         return score
     }
@@ -1167,17 +1176,30 @@ struct AISolver: Sendable {
         )
     }
     
+    private func twoPlayerTacticalOrderingBonus(_ move: (Int, Int), on state: Board, player: Int, hasEntered entered: [Bool]) -> Int {
+        guard activePlayers.count == 2 else { return 0 }
+        let index = move.0 * boardSize + move.1
+        guard index >= 0, index < state.cells.count else { return 0 }
+        let first = player < entered.count && !entered[player]
+        let nextCharge = state.cells[index].count + (first ? 3 : 1)
+        // Drive adds +1e6 for a move that explodes; the iOS heuristic scale is ×100.
+        return nextCharge >= 4 ? 100_000_000 : 0
+    }
+
     private func calculateAspirationNightmareMove(validMoves: [(Int, Int)]) -> (Int, Int)? {
         let maxDepth = aiLevel.maxSearchDepth(for: boardSize)
         
         let isTwoPlayer = (activePlayers.count == 2)
         
         var tt = TranspositionTable()
-        var ordering = MoveOrderingTable(maxDepth: maxDepth)
+        var ordering = MoveOrderingTable(maxDepth: maxDepth, isTwoPlayer: isTwoPlayer)
         
         var sortedMoves = validMoves.sorted {
-            evaluateMoveTacticalPriority($0, on: board, player: currentPlayer)
-            > evaluateMoveTacticalPriority($1, on: board, player: currentPlayer)
+            let s0 = evaluateMoveTacticalPriority($0, on: board, player: currentPlayer, hasEntered: hasEntered)
+                + twoPlayerTacticalOrderingBonus($0, on: board, player: currentPlayer, hasEntered: hasEntered)
+            let s1 = evaluateMoveTacticalPriority($1, on: board, player: currentPlayer, hasEntered: hasEntered)
+                + twoPlayerTacticalOrderingBonus($1, on: board, player: currentPlayer, hasEntered: hasEntered)
+            return s0 > s1
         }
         
         var bestMove = sortedMoves.first
@@ -1191,21 +1213,33 @@ struct AISolver: Sendable {
             if depth <= 2 {
                 result = searchRoot(boardState: board, hasEnteredState: hasEntered, eliminatedState: eliminated, depth: depth, alpha: Int.min + 1, beta: Int.max - 1, isTwoPlayer: isTwoPlayer, candidates: sortedMoves, tt: &tt, ordering: &ordering)
             } else {
-                // Match DOTS's aspiration strategy: begin at ±50, widen exponentially,
-                // then fall back to a full window once the ±4000 ceiling is crossed.
-                var delta = 50
+                // Drive's score-based ±50/±4000 windows scaled to the ×100 two-player evaluator.
+                let scale = isTwoPlayer ? 100 : 1
+                var delta = 50 * scale
                 var alpha = lastGuess - delta
                 var beta = lastGuess + delta
                 while true {
                     result = searchRoot(boardState: board, hasEnteredState: hasEntered, eliminatedState: eliminated, depth: depth, alpha: alpha, beta: beta, isTwoPlayer: isTwoPlayer, candidates: sortedMoves, tt: &tt, ordering: &ordering)
                     if Task.isCancelled || (result.score > alpha && result.score < beta) { break }
                     delta *= 2
-                    if delta > 4000 {
+                    if delta > 4_000 * scale {
                         result = searchRoot(boardState: board, hasEnteredState: hasEntered, eliminatedState: eliminated, depth: depth, alpha: Int.min + 1, beta: Int.max - 1, isTwoPlayer: isTwoPlayer, candidates: sortedMoves, tt: &tt, ordering: &ordering)
                         break
                     }
-                    alpha = lastGuess - delta
-                    beta = lastGuess + delta
+                    if isTwoPlayer {
+                        // Drive widens asymmetrically after a two-player fail-low/fail-high.
+                        if result.score <= alpha {
+                            alpha = result.score - delta
+                            beta = result.score + scale
+                        } else {
+                            alpha = result.score - scale
+                            beta = result.score + delta
+                        }
+                    } else {
+                        // Keep the pre-existing multiplayer aspiration behavior unchanged.
+                        alpha = lastGuess - delta
+                        beta = lastGuess + delta
+                    }
                 }
             }
             
@@ -1322,10 +1356,14 @@ struct AISolver: Sendable {
         }
         
         let sorted = validMoves.sorted { m1, m2 in
-            let tt1 = transpositionMove.map { $0.0 == m1.0 && $0.1 == m1.1 } == true ? 1_000_000 : 0
-            let tt2 = transpositionMove.map { $0.0 == m2.0 && $0.1 == m2.1 } == true ? 1_000_000 : 0
-            let p1 = tt1 + evaluateMoveTacticalPriority(m1, on: boardState, player: turnPlayer, hasEntered: hasEnteredState) + ordering.getOrderingScore(move: m1, depth: depth)
-            let p2 = tt2 + evaluateMoveTacticalPriority(m2, on: boardState, player: turnPlayer, hasEntered: hasEnteredState) + ordering.getOrderingScore(move: m2, depth: depth)
+            let tt1 = transpositionMove.map { $0.0 == m1.0 && $0.1 == m1.1 } == true ? (isTwoPlayerGame ? 1_000_000_000 : 1_000_000) : 0
+            let tt2 = transpositionMove.map { $0.0 == m2.0 && $0.1 == m2.1 } == true ? (isTwoPlayerGame ? 1_000_000_000 : 1_000_000) : 0
+            let p1 = tt1 + twoPlayerTacticalOrderingBonus(m1, on: boardState, player: turnPlayer, hasEntered: hasEnteredState)
+                + evaluateMoveTacticalPriority(m1, on: boardState, player: turnPlayer, hasEntered: hasEnteredState)
+                + ordering.getOrderingScore(move: m1, depth: depth)
+            let p2 = tt2 + twoPlayerTacticalOrderingBonus(m2, on: boardState, player: turnPlayer, hasEntered: hasEnteredState)
+                + evaluateMoveTacticalPriority(m2, on: boardState, player: turnPlayer, hasEntered: hasEnteredState)
+                + ordering.getOrderingScore(move: m2, depth: depth)
             return p1 > p2
         }
         
