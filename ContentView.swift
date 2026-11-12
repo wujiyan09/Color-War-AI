@@ -886,7 +886,14 @@ struct AISolver: Sendable {
         guard !validMoves.isEmpty else { return nil }
         
         let isMyFirstTurn = (currentPlayer < hasEntered.count) ? !hasEntered[currentPlayer] : true
-        
+        let alivePlayerCount = activePlayers.filter { !isPlayerEliminated($0, in: eliminated) }.count
+
+        if isMyFirstTurn && alivePlayerCount > 2 {
+            let nonCornerMoves = validMoves.filter { !isCornerOpeningMove($0) }
+            return selectOptimalOpeningMove(validMoves: nonCornerMoves.isEmpty ? validMoves : nonCornerMoves)
+                ?? validMoves.first
+        }
+
         if isMyFirstTurn && aiLevel != .fast {
             return driveOpeningMove(validMoves: validMoves) ?? selectOptimalOpeningMove(validMoves: validMoves)
         }
@@ -955,6 +962,11 @@ struct AISolver: Sendable {
         return nil
     }
     
+    private func isCornerOpeningMove(_ move: (Int, Int)) -> Bool {
+        let (row, column) = move
+        return (row == 0 || row == boardSize - 1) && (column == 0 || column == boardSize - 1)
+    }
+
     private func selectOptimalOpeningMove(validMoves: [(Int, Int)]) -> (Int, Int)? {
         var occupiedIndices = Set<Int>()
         for idx in 0..<board.cells.count {
