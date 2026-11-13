@@ -64,6 +64,17 @@ class OpeningPolicyTests(unittest.TestCase):
 
 
 class DriveParitySearchTests(unittest.TestCase):
+    def test_ios_search_has_difficulty_time_budgets_and_cooperative_deadline(self):
+        self.assertIn("case .fast: return 0.08", SOURCE)
+        self.assertIn("case .balanced: return 0.25", SOURCE)
+        self.assertIn("case .deep: return 1.2", SOURCE)
+        self.assertIn("case .extreme: return 6.0", SOURCE)
+        self.assertIn("ProcessInfo.processInfo.systemUptime + aiLevel.searchTimeBudget", SOURCE)
+        self.assertIn("Task.isCancelled || ProcessInfo.processInfo.systemUptime >= searchDeadline", SOURCE)
+        search = function_body("private func calculateAspirationNightmareMove(")
+        self.assertIn("if searchStopped", search)
+        self.assertLess(search.index("if searchStopped { break }"), search.index("bestMove = result.move"))
+
     def test_ios_drive_ordering_and_scaled_aspiration_constants(self):
         ordering = function_body("func getOrderingScore(move: (Int, Int), depth: Int) -> Int")
         self.assertIn("if isTwoPlayer {", ordering)

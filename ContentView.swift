@@ -92,6 +92,17 @@ enum AIDifficultyLevel: Int, CaseIterable, Identifiable, Codable {
         }
     }
 
+    // Keep move search bounded like the documented DOTS difficulty budgets, rather
+    // than allowing a high branching factor to monopolize the iOS process.
+    var searchTimeBudget: TimeInterval {
+        switch self {
+        case .fast: return 0.08
+        case .balanced: return 0.25
+        case .deep: return 1.2
+        case .extreme: return 6.0
+        }
+    }
+
     var beamWidth: Int {
         switch self {
         case .fast: return 2
@@ -845,6 +856,7 @@ struct AISolver: Sendable {
     let currentPlayer: Int
     let playerType: PlayerControlType
     let aiLevel: AIDifficultyLevel
+    private let searchDeadline: TimeInterval
     let openingSeed: String
     let board: Board
     let hasEntered: [Bool]
@@ -867,6 +879,7 @@ struct AISolver: Sendable {
         self.currentPlayer = currentPlayer
         self.playerType = playerType
         self.aiLevel = aiLevel
+        self.searchDeadline = ProcessInfo.processInfo.systemUptime + aiLevel.searchTimeBudget
         self.openingSeed = openingSeed ?? "color-war-\(boardSize)-\(activePlayers.map(String.init).joined(separator: "-"))"
         self.moveCounts = moveCounts.count == PlayerPreset.maxPlayers ? moveCounts : hasEntered.map { $0 ? 1 : 0 }
         
@@ -884,6 +897,11 @@ struct AISolver: Sendable {
     }
     
     @inline(__always)
+    private var searchStopped: Bool {
+        Task.isCancelled || ProcessInfo.processInfo.systemUptime >= searchDeadline
+    }
+
+    @inline(__always)
     private func getNextPlayerFast(current: Int, eliminated: [Bool]) -> Int {
         let alive = activePlayers.filter { !isPlayerEliminated($0, in: eliminated) }
         guard !alive.isEmpty else { return current }
@@ -894,7 +912,7 @@ struct AISolver: Sendable {
     }
     
     func calculateBestMove() async -> (Int, Int)? {
-        if Task.isCancelled { return nil }
+        if searchStopped { return nil }
         
         var validMoves = getPlayableCells(for: currentPlayer, on: board)
         guard !validMoves.isEmpty else { return nil }
@@ -1148,7 +1166,7 @@ struct AISolver: Sendable {
         var currentAlpha = alpha
         
         for move in candidates {
-            if Task.isCancelled { break }
+            if searchStopped { break }
             
             var b = boardState
             var h = hasEnteredState
@@ -1236,7 +1254,7 @@ struct AISolver: Sendable {
         
         let firstDepth = activePlayers.count == 2 ? 1 : 2
         for depth in firstDepth...maxDepth {
-            if Task.isCancelled { break }
+            if searchStopped { break }
             
             var result: RootSearchResult
             if depth <= 2 {
@@ -1249,7 +1267,7 @@ struct AISolver: Sendable {
                 var beta = lastGuess + delta
                 while true {
                     result = searchRoot(boardState: board, hasEnteredState: hasEntered, eliminatedState: eliminated, depth: depth, alpha: alpha, beta: beta, isTwoPlayer: isTwoPlayer, candidates: sortedMoves, tt: &tt, ordering: &ordering)
-                    if Task.isCancelled || (result.score > alpha && result.score < beta) { break }
+                    if searchStopped || (result.score > alpha && result.score < beta) { break }
                     delta *= 2
                     if delta > 4_000 * scale {
                         result = searchRoot(boardState: board, hasEnteredState: hasEntered, eliminatedState: eliminated, depth: depth, alpha: Int.min + 1, beta: Int.max - 1, isTwoPlayer: isTwoPlayer, candidates: sortedMoves, tt: &tt, ordering: &ordering)
@@ -1272,6 +1290,9 @@ struct AISolver: Sendable {
                 }
             }
             
+            // If the deadline expires mid-iteration, keep the last fully searched
+            // move instead of replacing it with a partial-window result.
+            if searchStopped { break }
             bestMove = result.move
             lastGuess = result.score
             
@@ -1295,7 +1316,7 @@ struct AISolver: Sendable {
                                        allowNullMove: Bool,
                                        nmpCooldown: Int,
                                        lastWaveCount: Int = 0) -> Int {
-        if Task.isCancelled { return 0 }
+        if searchStopped { return 0 }
         
         var a = alpha
         var bVal = beta
@@ -1401,7 +1422,7 @@ struct AISolver: Sendable {
         let nextCooldown = max(0, nmpCooldown - 1)
         
         for (index, move) in sorted.enumerated() {
-            if Task.isCancelled { break }
+            if searchStopped { break }
             
             var b = boardState
             var h = hasEnteredState
@@ -1488,7 +1509,7 @@ struct AISolver: Sendable {
                                   turnPlayer: Int,
                                   qsDepth: Int,
                                   tt: inout TranspositionTable) -> Int {
-        if Task.isCancelled || qsDepth <= 0 {
+        if searchStopped || qsDepth <= 0 {
             return evaluateAdvancedBoard(boardState, forPlayer: currentPlayer, eliminated: eliminatedState, hasEntered: hasEnteredState, currentTurn: turnPlayer, lastCascadeWaves: 0)
         }
         
@@ -1557,7 +1578,7 @@ struct AISolver: Sendable {
                                        depth: Int,
                                        turnPlayer: Int,
                                        beamWidth: Int) -> [Int: Int] {
-        if Task.isCancelled || depth <= 0 || isGameOverSimulated(eliminated: eliminatedState) {
+        if searchStopped || depth <= 0 || isGameOverSimulated(eliminated: eliminatedState) {
             return evaluateMultiPlayerVector(boardState, hasEntered: hasEnteredState, eliminated: eliminatedState, currentTurn: turnPlayer)
         }
         
@@ -1577,7 +1598,7 @@ struct AISolver: Sendable {
         var maxPlayerVal = -Int.max
         
         for m in candidates {
-            if Task.isCancelled { break }
+            if searchStopped { break }
             
             var b = boardState
             var h = hasEnteredState
