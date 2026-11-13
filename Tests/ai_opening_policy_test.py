@@ -43,6 +43,7 @@ class OpeningPolicyTests(unittest.TestCase):
         self.assertNotIn("value *= 100", function_body("private func evaluateAdvancedBoard("))
         self.assertIn("if isTwoPlayerPosition && hasCriticalLink", SOURCE)
         self.assertIn("if boardSize == 5 {", SOURCE)
+        self.assertIn("aiLevel != .fast || (boardSize == 5 && currentPlayer < moveCounts.count && moveCounts[currentPlayer] == 0)", body)
         diagonal_opening = function_body("private func fiveByFiveDiagonalOpeningMove(")
         self.assertIn("moveCount == 0", diagonal_opening)
         self.assertIn("distanceA > distanceB", diagonal_opening)

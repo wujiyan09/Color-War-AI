@@ -910,8 +910,9 @@ struct AISolver: Sendable {
         }
 
         let totalMovesPlayed = moveCounts.reduce(0, +)
-        if isTwoPlayerGame, alivePlayerCount == 2, aiLevel != .fast, totalMovesPlayed < 30,
-           currentPlayer < moveCounts.count, moveCounts[currentPlayer] < 12,
+        if isTwoPlayerGame, alivePlayerCount == 2,
+           (aiLevel != .fast || (boardSize == 5 && currentPlayer < moveCounts.count && moveCounts[currentPlayer] == 0)),
+           totalMovesPlayed < 30, currentPlayer < moveCounts.count, moveCounts[currentPlayer] < 12,
            let bookMove = driveOpeningMove(validMoves: validMoves, moveCount: moveCounts[currentPlayer]) {
             return bookMove
         }
