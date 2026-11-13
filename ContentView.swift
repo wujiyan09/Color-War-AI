@@ -940,6 +940,9 @@ struct AISolver: Sendable {
     // The Drive clock bundle supplies 13 FNV-selected opening geometries. Adapt the
     // geometry only; legal cells and the +3 first-entry rule remain Color War's.
     private func driveOpeningMove(validMoves: [(Int, Int)], moveCount: Int) -> (Int, Int)? {
+        if boardSize == 5 {
+            return fiveByFiveDiagonalOpeningMove(validMoves: validMoves, moveCount: moveCount)
+        }
         let n = boardSize, e = n - 1
         guard [6, 9, 12].contains(n) else { return nil }
         let corners: [[(Int, Int)]] = [
@@ -980,6 +983,31 @@ struct AISolver: Sendable {
             if occupied.contains("\(x),\(y)") { return (y,x) }
         }
         return nil
+    }
+
+    // The Drive opening bundle has no 5×5 geometry. On this board, answer the
+    // opponent's first placement with a farthest legal corner, giving the intended
+    // diagonal start instead of falling through to tactical search beside them.
+    private func fiveByFiveDiagonalOpeningMove(validMoves: [(Int, Int)], moveCount: Int) -> (Int, Int)? {
+        guard boardSize == 5, moveCount == 0, !validMoves.isEmpty else { return nil }
+        var hash: UInt32 = 2_166_136_261
+        for byte in openingSeed.utf8 { hash ^= UInt32(byte); hash = hash &* 16_777_619 }
+        let tieOffset = Int(hash % 25)
+        let opponents = board.cells.enumerated().compactMap { index, cell -> (Int, Int)? in
+            guard let owner = cell.owner, owner != currentPlayer else { return nil }
+            return (index / boardSize, index % boardSize)
+        }
+        let candidates = validMoves.sorted { a, b in
+            let distanceA = opponents.map { abs(a.0 - $0.0) + abs(a.1 - $0.1) }.min() ?? boardSize
+            let distanceB = opponents.map { abs(b.0 - $0.0) + abs(b.1 - $0.1) }.min() ?? boardSize
+            if distanceA != distanceB { return distanceA > distanceB }
+            let cornerA = isCornerOpeningMove(a), cornerB = isCornerOpeningMove(b)
+            if cornerA != cornerB { return cornerA }
+            let rankA = (a.0 * boardSize + a.1 + tieOffset) % 25
+            let rankB = (b.0 * boardSize + b.1 + tieOffset) % 25
+            return rankA < rankB
+        }
+        return candidates.first
     }
     
     private func isCornerOpeningMove(_ move: (Int, Int)) -> Bool {
