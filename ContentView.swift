@@ -3432,6 +3432,78 @@ struct LocalGameSetupView: View {
     }
 }
 
+
+struct DualPlayerSetupView: View {
+    @ObservedObject var game: GameModel
+    @Binding var playerOneIsBot: Bool
+    @Binding var playerTwoIsBot: Bool
+    let onStartGame: () -> Void
+
+    private func playerCard(title: String, isBot: Binding<Bool>, color: Color, icon: String) -> some View {
+        Button {
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.72)) {
+                isBot.wrappedValue.toggle()
+            }
+        } label: {
+            VStack(spacing: 10) {
+                Image(systemName: isBot.wrappedValue ? "cpu" : icon)
+                    .font(.system(size: 30, weight: .semibold))
+                    .foregroundStyle(color)
+                Text(title)
+                    .font(.headline.bold())
+                    .foregroundStyle(.white)
+                Text(isBot.wrappedValue ? "BOT · 点击切换真人" : "真人 · 点击切换 BOT")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.72))
+            }
+            .frame(maxWidth: .infinity, minHeight: 150)
+            .contentShape(RoundedRectangle(cornerRadius: PlayerPreset.cardCornerRadius))
+            .glassEffect(.regular.interactive().tint(color.opacity(0.18)), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(title)，\(isBot.wrappedValue ? "BOT" : "真人")，点按切换")
+    }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            VStack(spacing: 10) {
+                HStack {
+                    Text("棋盘大小：\(game.boardSize) × \(game.boardSize)")
+                        .font(.subheadline.bold())
+                        .foregroundColor(.white)
+                    Spacer()
+                }
+                Slider(
+                    value: Binding<Double>(get: { Double(game.boardSize) }, set: { game.boardSize = Int($0) }),
+                    in: 5...12,
+                    step: 1
+                )
+                .tint(Color.darkNavyBlue)
+            }
+            .padding(12)
+            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+
+            HStack(spacing: 12) {
+                playerCard(title: "玩家 1", isBot: $playerOneIsBot, color: .red, icon: "person.fill")
+                playerCard(title: "玩家 2", isBot: $playerTwoIsBot, color: .cyan, icon: "person.fill")
+            }
+
+            Button(action: onStartGame) {
+                HStack {
+                    Image(systemName: "play.fill")
+                    Text("开始对决").font(.title3.bold())
+                }
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .contentShape(Capsule())
+                .glassEffect(.regular.tint(.darkNavyBlue).interactive(), in: .capsule)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+}
+
 // MARK: - 16. Tab 1: 局域网 P2P Setup View
 
 struct LocalDeviceBrowserInlineView: View {
@@ -4004,6 +4076,8 @@ struct StartMenuView: View {
     @ObservedObject var game: GameModel
     @Binding var selectedTab: Int
     @Binding var isSpinningRandomWheel: Bool
+    @State private var duelPlayerOneIsBot = false
+    @State private var duelPlayerTwoIsBot = false
     @State private var showPhotoPicker: Bool = false
     @State private var selectedPhotosItem: PhotosPickerItem? = nil
 
@@ -4015,6 +4089,14 @@ struct StartMenuView: View {
             game.beginGame()
             game.shouldNavigateToGame = true
         }
+    }
+
+    private func startDuelGame() {
+        let first: PlayerControlType = duelPlayerOneIsBot ? .mathNightmare : .human
+        let second: PlayerControlType = duelPlayerTwoIsBot ? .mathNightmare : .human
+        game.playerTypes = [first, second] + Array(repeating: .disabled, count: max(0, PlayerPreset.maxPlayers - 2))
+        game.prepareLocalPlayerNamesForGame()
+        startGame()
     }
 
     var body: some View {
@@ -4032,7 +4114,7 @@ struct StartMenuView: View {
                         .overlay(Color.black.opacity(0.35))
                 }
 
-                if selectedTab == 0 {
+                if selectedTab < 2 {
                     VStack(spacing: 0) {
                         Spacer()
 
@@ -4041,11 +4123,21 @@ struct StartMenuView: View {
                                 .font(.system(size: 36, weight: .black, design: .rounded))
                                 .foregroundColor(.white)
 
-                            LocalGameSetupView(game: game) {
-                                game.prepareLocalPlayerNamesForGame()
-                                startGame()
+                            if selectedTab == 0 {
+                                DualPlayerSetupView(
+                                    game: game,
+                                    playerOneIsBot: $duelPlayerOneIsBot,
+                                    playerTwoIsBot: $duelPlayerTwoIsBot,
+                                    onStartGame: startDuelGame
+                                )
+                                .transition(.opacity)
+                            } else {
+                                LocalGameSetupView(game: game) {
+                                    game.prepareLocalPlayerNamesForGame()
+                                    startGame()
+                                }
+                                .transition(.opacity)
                             }
-                            .transition(.opacity)
                         }
                         .frame(maxWidth: 440)
 
@@ -4084,14 +4176,15 @@ struct StartMenuView: View {
 
                 ToolbarItem(placement: .principal) {
                     Picker("Game Mode", selection: $selectedTab) {
-                        Text("单机模式").tag(0)
-                        Text("云端联机").tag(1)
+                        Text("双人模式").tag(0)
+                        Text("多人模式").tag(1)
+                        Text("联机模式").tag(2)
                     }
                     .pickerStyle(.segmented)
-                    .frame(width: 220)
+                    .frame(width: 300)
                 }
 
-                if selectedTab == 0 {
+                if selectedTab < 2 {
                     ToolbarItem(placement: .topBarTrailing) {
                         Menu {
                             Button {
