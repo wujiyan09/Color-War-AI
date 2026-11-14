@@ -995,7 +995,7 @@ private struct DriveDuelSearch {
     }
     private static func search(_ cells: [UInt8], _ side: Int, _ enteredMask: Int, _ depth: Int, _ alphaIn: Int, _ beta: Int, _ ply: Int, _ context: inout Context, _ size: Int) -> Result {
         context.nodes += 1
-        if context.nodes & 255 == 0 && ProcessInfo.processInfo.systemUptime >= context.deadline { context.stopped = true }
+        if context.nodes & 4095 == 0 && ProcessInfo.processInfo.systemUptime >= context.deadline { context.stopped = true }
         if context.stopped || ply >= maxPly { return Result(score: evaluate(cells, side, enteredMask), move: -1) }
         if let result = terminal(cells, side, enteredMask, depth) { return Result(score: result, move: -1) }
         let hash = key(cells, side, enteredMask), cached = context.table[hash]
