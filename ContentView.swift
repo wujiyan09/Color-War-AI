@@ -185,6 +185,7 @@ struct GameSaveArchive: Codable, Identifiable {
     let board: [[Cell]]
     let hasEntered: [Bool]
     let eliminated: [Bool]
+    let localDuelMoveCount: Int?
     
     var displaySummary: String {
         let activeCount = playerTypes.filter { $0.isEnabled }.count
@@ -775,14 +776,40 @@ private struct DriveDuelSearch {
     private static let maxPly = 48
     private static let infinity = 1_000_000_000
 
-    // Drive's duel difficulty table: board-size independent, with Easy using
-    // its heuristic/random branch rather than entering the timed search loop.
-    static func timeBudget(level: Int) -> TimeInterval {
+    // Drive's difficulty budgets and local-phase scheduler are independent
+    // constraints. Use the stricter time/depth cap and preserve phase soft limits.
+    private struct SearchParameters {
+        let timeMs: Double
+        let softTimeMs: Double
+        let minTimeMs: Double
+        let maxDepth: Int
+        let randomize: Bool
+    }
+    private static func parameters(level: Int, movesPlayed: Int) -> SearchParameters {
+        let difficulty: (timeMs: Double, maxDepth: Int, randomize: Bool)
         switch level {
-        case 1: return 0.08
-        case 2: return 1.2
-        default: return 6.0
+        case 1: difficulty = (80, 1, true)
+        case 2: difficulty = (1200, 8, false)
+        default: difficulty = (6000, 32, false)
         }
+        let phase: (timeMs: Double, softTimeMs: Double, minTimeMs: Double, maxDepth: Int)
+        if movesPlayed < 30 {
+            phase = (400, 120, 40, 8)
+        } else {
+            phase = (5000, 600, 80, 32)
+        }
+        let timeMs = min(difficulty.timeMs, phase.timeMs)
+        let softTimeMs = min(phase.softTimeMs, timeMs)
+        return SearchParameters(
+            timeMs: timeMs,
+            softTimeMs: softTimeMs,
+            minTimeMs: min(phase.minTimeMs, softTimeMs),
+            maxDepth: min(difficulty.maxDepth, phase.maxDepth),
+            randomize: difficulty.randomize
+        )
+    }
+    static func timeBudget(level: Int, movesPlayed: Int = 0) -> TimeInterval {
+        parameters(level: level, movesPlayed: movesPlayed).timeMs / 1000
     }
 
     private struct Entry {
@@ -942,7 +969,8 @@ private struct DriveDuelSearch {
             var score = Double((after[side] - before[side]) * 18 + (before[enemy] - after[enemy]) * 26)
             if after[enemy] == 0 && before[enemy] > 0 { score += 500_000 }
             score += Double(enemyCount * 30 + enemy3 * 90) + Double(empty) * 0.4
-            if exposedThreat(cells, side, size).count > 0 { score += 280 + Double(enemyCharge) * 12 }
+            let readyThreat = exposedThreat(cells, side, size)
+            if readyThreat.count > 0 { score += 280 + Double(readyThreat.charge) * 12 }
             return score
         }
         var score = 0.0
@@ -967,7 +995,7 @@ private struct DriveDuelSearch {
     }
     private static func search(_ cells: [UInt8], _ side: Int, _ enteredMask: Int, _ depth: Int, _ alphaIn: Int, _ beta: Int, _ ply: Int, _ context: inout Context, _ size: Int) -> Result {
         context.nodes += 1
-        if context.nodes & 4095 == 0 && ProcessInfo.processInfo.systemUptime >= context.deadline { context.stopped = true }
+        if context.nodes & 255 == 0 && ProcessInfo.processInfo.systemUptime >= context.deadline { context.stopped = true }
         if context.stopped || ply >= maxPly { return Result(score: evaluate(cells, side, enteredMask), move: -1) }
         if let result = terminal(cells, side, enteredMask, depth) { return Result(score: result, move: -1) }
         let hash = key(cells, side, enteredMask), cached = context.table[hash]
@@ -1009,7 +1037,7 @@ private struct DriveDuelSearch {
         return Result(score: best, move: bestMove)
     }
 
-    static func bestMove(board: AISolver.Board, activePlayers: [Int], currentPlayer: Int, hasEntered: [Bool], level: Int) -> (Int, Int)? {
+    static func bestMove(board: AISolver.Board, activePlayers: [Int], currentPlayer: Int, hasEntered: [Bool], level: Int, movesPlayed: Int) -> (Int, Int)? {
         guard (2...12).contains(board.size), activePlayers.count == 2, let side = activePlayers.firstIndex(of: currentPlayer) else { return nil }
         let size = board.size
         var cells = [UInt8](repeating: 0, count: size * size)
@@ -1026,24 +1054,35 @@ private struct DriveDuelSearch {
         let moves = legalMoves(cells, side, enteredMask, size)
         guard let first = moves.first else { return nil }
         if terminal(cells, side, enteredMask, 0) != nil { return nil }
-        if level == 1 {
+        let search = parameters(level: level, movesPlayed: movesPlayed)
+        if search.randomize {
             let ranked = moves.map { ($0, quietHeuristic(cells, $0, side, enteredMask, size)) }.sorted { $0.1 > $1.1 }
             let candidates = Array(ranked.prefix(3))
             let selected = Double.random(in: 0..<1) < 0.3 ? candidates.randomElement()!.0 : candidates[0].0
             return (selected / size, selected % size)
         }
         if moves.count == 1 { return (first / size, first % size) }
-        let (time, maxDepth): (Double, Int) = level == 2 ? (timeBudget(level: level), 8) : (timeBudget(level: level), 32)
-        var context = Context(deadline: ProcessInfo.processInfo.systemUptime + time)
+        let maxDepth = search.maxDepth
+        let startTime = ProcessInfo.processInfo.systemUptime
+        var context = Context(deadline: startTime + search.timeMs / 1000)
         let ordered = moves.sorted { moveOrderScore(cells, $0, side, enteredMask, size, 0, -1, context) > moveOrderScore(cells, $1, side, enteredMask, size, 0, -1, context) }
         var best = ordered[0], depthCompleted = 0
+        var completedMoves: [Int] = [], completedScores: [Int] = []
         for depth in 1...maxDepth {
             if ProcessInfo.processInfo.systemUptime >= context.deadline || Task.isCancelled { break }
             context.stopped = false
             let result = search(cells, side, enteredMask, depth, -infinity, infinity, 0, &context, size)
             if context.stopped || Task.isCancelled || result.move < 0 { break }
             best = result.move; depthCompleted = depth
+            completedMoves.append(result.move); completedScores.append(result.score)
             if abs(result.score) >= winScore - 1000 { break }
+            let elapsedMs = (ProcessInfo.processInfo.systemUptime - startTime) * 1000
+            if depth >= 6 && elapsedMs >= search.softTimeMs && elapsedMs >= search.minTimeMs && completedMoves.count >= 3 {
+                let recentMoves = completedMoves.suffix(3)
+                let scoreDelta = abs(result.score - completedScores[completedScores.count - 3])
+                if let stableMove = recentMoves.first,
+                   recentMoves.allSatisfy({ $0 == stableMove }), scoreDelta <= 8 { break }
+            }
         }
         _ = depthCompleted
         return (best / size, best % size)
@@ -1143,6 +1182,7 @@ struct AISolver: Sendable {
     let playerType: PlayerControlType
     let aiLevel: AIDifficultyLevel
     let isLocalDuelMode: Bool
+    let localDuelMovesPlayed: Int
     private let searchDeadline: TimeInterval
     let board: Board
     let hasEntered: [Bool]
@@ -1157,14 +1197,16 @@ struct AISolver: Sendable {
          board: [[Cell]],
          hasEntered: [Bool],
          eliminated: [Bool],
-         isLocalDuelMode: Bool = false) {
+         isLocalDuelMode: Bool = false,
+         localDuelMovesPlayed: Int = 0) {
         self.boardSize = boardSize
         self.activePlayers = activePlayers
         self.currentPlayer = currentPlayer
         self.playerType = playerType
         self.aiLevel = aiLevel
         self.isLocalDuelMode = isLocalDuelMode
-        self.searchDeadline = ProcessInfo.processInfo.systemUptime + (isLocalDuelMode ? DriveDuelSearch.timeBudget(level: aiLevel.rawValue) : aiLevel.searchTimeBudget)
+        self.localDuelMovesPlayed = localDuelMovesPlayed
+        self.searchDeadline = ProcessInfo.processInfo.systemUptime + (isLocalDuelMode ? DriveDuelSearch.timeBudget(level: aiLevel.rawValue, movesPlayed: localDuelMovesPlayed) : aiLevel.searchTimeBudget)
         
         var flat = [SimCell]()
         flat.reserveCapacity(boardSize * boardSize)
@@ -1196,7 +1238,7 @@ struct AISolver: Sendable {
     func calculateBestMove() async -> (Int, Int)? {
         if searchStopped { return nil }
         if isLocalDuelMode {
-            return DriveDuelSearch.bestMove(board: board, activePlayers: activePlayers, currentPlayer: currentPlayer, hasEntered: hasEntered, level: aiLevel.rawValue)
+            return DriveDuelSearch.bestMove(board: board, activePlayers: activePlayers, currentPlayer: currentPlayer, hasEntered: hasEntered, level: aiLevel.rawValue, movesPlayed: localDuelMovesPlayed)
         }
         
         var validMoves = getPlayableCells(for: currentPlayer, on: board)
@@ -2090,6 +2132,7 @@ final class GameModel: ObservableObject {
     @Published var disconnectedMessage: String = "房主已断开连接，对局已自动结束。"
     @Published var activeOnlineMode: ActiveOnlineMode = .none
     var isLocalDuelMode = false
+    private(set) var localDuelMoveCount = 0
     
     @Published var customBackgroundImage: UIImage? = nil
     @Published var shouldNavigateToGame: Bool = false
@@ -2311,7 +2354,8 @@ final class GameModel: ObservableObject {
             emojis: emojis,
             board: board,
             hasEntered: hasEntered,
-            eliminated: eliminated
+            eliminated: eliminated,
+            localDuelMoveCount: isLocalDuelMode ? localDuelMoveCount : nil
         )
         var list = loadAllArchives()
         list.insert(archive, at: 0)
@@ -2338,6 +2382,7 @@ final class GameModel: ObservableObject {
         self.board = archive.board
         self.hasEntered = archive.hasEntered
         self.eliminated = archive.eliminated
+        self.localDuelMoveCount = archive.localDuelMoveCount ?? 0
         self.recalculateOrbCounts()
         self.refreshActivePlayers()
         self.updateCachedPlayableCells()
@@ -2756,6 +2801,7 @@ final class GameModel: ObservableObject {
         eliminated = Array(repeating: false, count: PlayerPreset.maxPlayers)
         winnerIndex = nil
         isProcessingCascade = false
+        localDuelMoveCount = 0
         recalculateOrbCounts()
         
         let active = activePlayerIndices
@@ -3026,6 +3072,10 @@ final class GameModel: ObservableObject {
             recalculateOrbCounts()
             
             isProcessingCascade = false
+            if isLocalDuelMode && activePlayerIndices.count == 2
+                && !P2PNetworkManager.shared.isConnected && !WebSocketNetworkManager.shared.isConnected {
+                localDuelMoveCount += 1
+            }
             
             if checkGameOver() {
                 endGame()
@@ -3135,7 +3185,8 @@ final class GameModel: ObservableObject {
                 board: board,
                 hasEntered: hasEntered,
                 eliminated: eliminated,
-                isLocalDuelMode: self.isLocalDuelMode && !isP2P && !isWS && activePlayerIndices.count == 2
+                isLocalDuelMode: self.isLocalDuelMode && !isP2P && !isWS && activePlayerIndices.count == 2,
+                localDuelMovesPlayed: self.localDuelMoveCount
             )
             
             if let bestMove = await solver.calculateBestMove() {
