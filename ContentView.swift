@@ -2802,18 +2802,26 @@ final class GameModel: ObservableObject {
         winnerIndex = nil
         isProcessingCascade = false
         localDuelMoveCount = 0
-        recalculateOrbCounts()
         
         let active = activePlayerIndices
         guard !active.isEmpty else { return }
-        
-        if let chosen = chosenFirstPlayer, active.contains(chosen) {
+        let isLocalTwoPlayerDuel = isLocalDuelMode && active.count == 2 && !isOnlineMultiplayer
+        if isLocalTwoPlayerDuel {
+            let first = active[0]
+            let second = active[1]
+            board[0][0] = Cell(owner: first, count: 1)
+            board[boardSize - 1][boardSize - 1] = Cell(owner: second, count: 1)
+            hasEntered[first] = true
+            hasEntered[second] = true
+            currentPlayer = first
+        } else if let chosen = chosenFirstPlayer, active.contains(chosen) {
             currentPlayer = chosen
         } else if isRandomFirstPlayer {
             currentPlayer = active.randomElement() ?? active[0]
         } else {
             currentPlayer = active[0]
         }
+        recalculateOrbCounts()
         
         let isHost = P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost
         let isConn = P2PNetworkManager.shared.isConnected || WebSocketNetworkManager.shared.isConnected
@@ -4440,7 +4448,7 @@ struct StartMenuView: View {
 
     private func startGame(isLocalDuel: Bool = false) {
         game.isLocalDuelMode = isLocalDuel
-        if game.isRandomFirstPlayer {
+        if !isLocalDuel && game.isRandomFirstPlayer {
             isSpinningRandomWheel = true
         } else {
             game.resetGame()
@@ -4926,53 +4934,55 @@ struct PlayerTakeoverSheet: View {
                     }
                 }
                 
-                Section(header: Text("AI 思考算力/档位调整")) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text(game.aiDifficultyLevel.title)
-                                .font(.subheadline)
-                                .bold()
-                            Spacer()
+                if !(game.isLocalDuelMode && game.activePlayerIndices.count == 2 && !game.isOnlineMultiplayer) {
+                    Section(header: Text("AI 思考算力/档位调整")) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text(game.aiDifficultyLevel.title)
+                                    .font(.subheadline)
+                                    .bold()
+                                Spacer()
+                            }
+                        
+                            Slider(
+                                value: Binding<Double>(
+                                    get: { Double(game.aiDifficultyLevel.rawValue) },
+                                    set: { game.aiDifficultyLevel = AIDifficultyLevel(rawValue: Int($0)) ?? .balanced }
+                                ),
+                                in: 1...4,
+                                step: 1
+                            )
+                            .tint(Color.darkNavyBlue)
+                        
+                            Text(game.aiDifficultyLevel.description)
+                                .font(.caption)
+                                .foregroundColor(.gray)
                         }
-                        
-                        Slider(
-                            value: Binding<Double>(
-                                get: { Double(game.aiDifficultyLevel.rawValue) },
-                                set: { game.aiDifficultyLevel = AIDifficultyLevel(rawValue: Int($0)) ?? .balanced }
-                            ),
-                            in: 1...4,
-                            step: 1
-                        )
-                        .tint(Color.darkNavyBlue)
-                        
-                        Text(game.aiDifficultyLevel.description)
-                            .font(.caption)
-                            .foregroundColor(.gray)
+                        .padding(.vertical, 4)
                     }
-                    .padding(.vertical, 4)
-                }
                 
-                Section(header: Text("实时接管控制（AI / 人类代打）")) {
-                    ForEach(game.activePlayerIndices, id: \.self) { idx in
-                        HStack {
-                            Circle().fill(game.colors[safe: idx] ?? .gray).frame(width: 16, height: 16)
-                            Text(game.playerNames[safe: idx] ?? "玩家\(idx+1)").font(.body)
-                            Spacer()
+                    Section(header: Text("实时接管控制（AI / 人类代打）")) {
+                        ForEach(game.activePlayerIndices, id: \.self) { idx in
+                            HStack {
+                                Circle().fill(game.colors[safe: idx] ?? .gray).frame(width: 16, height: 16)
+                                Text(game.playerNames[safe: idx] ?? "玩家\(idx+1)").font(.body)
+                                Spacer()
                             
-                            if game.isOnlineMultiplayer {
-                                Text(game.playerTypes[safe: idx]?.rawValue ?? "未加入")
-                                    .font(.caption)
-                                    .foregroundColor(.white.opacity(0.65))
-                            } else {
-                                Picker("", selection: Binding(
-                                    get: { game.playerTypes[safe: idx] ?? .disabled },
-                                    set: { game.updatePlayerType(at: idx, to: $0) }
-                                )) {
-                                    ForEach(game.validSelectableTypes(forPlayerIndex: idx, isInLobby: false)) { type in
-                                        Text(type.rawValue).tag(type)
+                                if game.isOnlineMultiplayer {
+                                    Text(game.playerTypes[safe: idx]?.rawValue ?? "未加入")
+                                        .font(.caption)
+                                        .foregroundColor(.white.opacity(0.65))
+                                } else {
+                                    Picker("", selection: Binding(
+                                        get: { game.playerTypes[safe: idx] ?? .disabled },
+                                        set: { game.updatePlayerType(at: idx, to: $0) }
+                                    )) {
+                                        ForEach(game.validSelectableTypes(forPlayerIndex: idx, isInLobby: false)) { type in
+                                            Text(type.rawValue).tag(type)
+                                        }
                                     }
+                                    .pickerStyle(.menu)
                                 }
-                                .pickerStyle(.menu)
                             }
                         }
                     }
