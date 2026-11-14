@@ -11,13 +11,18 @@ class LegacyAIBaselineTests(unittest.TestCase):
         self.assertNotIn("driveCaptureValuesPrecise", TEXT)
         self.assertNotIn("Drive/PVS", TEXT)
 
-    def test_two_player_first_placement_uses_legacy_opening_selector(self):
+    def test_all_difficulties_and_ai_variants_share_legacy_two_player_path(self):
+        for level in ("fast", "balanced", "deep", "extreme"):
+            self.assertIn(f"case {level} =", TEXT)
+        self.assertIn("case mathNightmare", TEXT)
+        self.assertIn("case enhancedNightmare", TEXT)
         start = TEXT.index("func calculateBestMove() async")
         end = TEXT.index("private func selectOptimalOpeningMove", start)
         section = TEXT[start:end]
         self.assertIn("if isMyFirstTurn {", section)
         self.assertIn("return selectOptimalOpeningMove(validMoves: validMoves)", section)
         self.assertIn("alivePlayerCount > 2", section)
+        self.assertLess(section.index("if isMyFirstTurn {"), section.index("if playerType == .enhancedNightmare"))
 
     def test_multiplayer_opening_avoids_corners_when_possible(self):
         start = TEXT.index("private func isCornerOpeningMove")
