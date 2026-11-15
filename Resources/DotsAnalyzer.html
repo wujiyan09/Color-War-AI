@@ -1,0 +1,1301 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#07090e">
+<meta name="format-detection" content="telephone=no">
+<title>Dots 局面分析器</title>
+<style>
+  :root{
+    --bg:#07090e; --card:#0e121b; --card2:#111725; --line:#202838;
+    --text:#e9edf7; --muted:#8d98ad; --faint:#5d687c;
+    --red:#ff6262; --red-soft:rgba(255,98,98,.16);
+    --blue:#6f97ff; --blue-soft:rgba(111,151,255,.16);
+    --gold:#ffd479; --green:#5fe0a0;
+    --r:16px; --n:6;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html{background:var(--bg);color-scheme:dark}
+  html,body{margin:0;padding:0}
+  body{
+    min-height:100vh; min-height:100dvh;
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,"Helvetica Neue",Arial,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    background:
+      radial-gradient(900px 520px at 8% -12%, rgba(111,151,255,.13), transparent 62%),
+      radial-gradient(720px 520px at 108% 4%, rgba(255,98,98,.10), transparent 58%),
+      var(--bg);
+    color:var(--text);
+    overscroll-behavior:none;
+    -webkit-text-size-adjust:100%;
+    user-select:none; -webkit-user-select:none;
+    padding:
+      max(10px, env(safe-area-inset-top))
+      max(12px, env(safe-area-inset-right))
+      max(18px, env(safe-area-inset-bottom))
+      max(12px, env(safe-area-inset-left));
+  }
+  button{font:inherit;color:inherit}
+  .app{max-width:1180px;margin:0 auto}
+  header{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin:0 2px 12px}
+  h1{font-size:clamp(19px,2.2vw,25px);line-height:1.1;margin:0;letter-spacing:-.02em;font-weight:800}
+  .sub{font-size:12px;line-height:1.5;color:var(--muted);margin-top:5px;letter-spacing:.02em}
+  .badge{
+    flex:0 0 auto;font-size:10px;font-weight:750;letter-spacing:.13em;text-transform:uppercase;
+    color:#bfe3ff;border:1px solid rgba(111,151,255,.35);background:rgba(111,151,255,.09);
+    padding:6px 9px;border-radius:999px;white-space:nowrap
+  }
+  .layout{display:grid;grid-template-columns:1fr;gap:14px;align-items:start}
+  @media (min-width:900px){
+    .layout{grid-template-columns:minmax(0,1.35fr) minmax(330px,.82fr)}
+    .board-card{position:sticky;top:10px}
+  }
+  .card{
+    background:linear-gradient(180deg,rgba(255,255,255,.022),rgba(255,255,255,0) 38%),var(--card);
+    border:1px solid var(--line);border-radius:var(--r);padding:13px;
+    box-shadow:0 16px 44px rgba(0,0,0,.30)
+  }
+  .board-card{padding:12px}
+  .board-top{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+  .counts{display:flex;gap:7px}
+  .chip{
+    display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:650;color:var(--muted);
+    background:#0a0e16;border:1px solid var(--line);border-radius:999px;padding:5px 9px
+  }
+  .chip b{font-size:13px;color:var(--text);font-variant-numeric:tabular-nums}
+  .chip i{width:8px;height:8px;border-radius:50%;display:block}
+  .chip.red i{background:var(--red);box-shadow:0 0 8px rgba(255,98,98,.75)}
+  .chip.blue i{background:var(--blue);box-shadow:0 0 8px rgba(111,151,255,.75)}
+  .seg{
+    display:inline-flex;align-items:center;gap:3px;padding:3px;
+    background:#090d15;border:1px solid var(--line);border-radius:12px
+  }
+  .seg button{
+    min-height:42px;padding:0 12px;border:0;border-radius:9px;background:transparent;
+    color:var(--muted);font-size:12.5px;font-weight:700;letter-spacing:.01em;cursor:pointer;
+    touch-action:manipulation;transition:background .15s,color .15s,box-shadow .15s
+  }
+  .seg button.on{background:#1a2233;color:var(--text);box-shadow:inset 0 0 0 1px #2b3850}
+  .seg button[data-turn="red"].on{background:var(--red-soft);color:#ffb9b9;box-shadow:inset 0 0 0 1px rgba(255,98,98,.42)}
+  .seg button[data-turn="blue"].on{background:var(--blue-soft);color:#bcd0ff;box-shadow:inset 0 0 0 1px rgba(111,151,255,.42)}
+
+  .board-shell{
+    display:grid;grid-template-columns:16px minmax(0,1fr);grid-template-rows:16px minmax(0,1fr);
+    gap:4px;width:100%;max-width:min(100%, 640px, 64vh);margin:0 auto
+  }
+  .coords{
+    display:grid;gap:1px;color:var(--faint);
+    font:650 9px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.04em
+  }
+  .coords.cols{grid-column:2;grid-row:1;align-items:end;text-align:center}
+  .coords.rows{grid-column:1;grid-row:2;align-items:center;text-align:center}
+  .board{
+    grid-column:2;grid-row:2;display:grid;grid-template-columns:repeat(var(--n),minmax(0,1fr));
+    gap:clamp(2px,.42vw,5px);aspect-ratio:1;padding:clamp(3px,.55vw,7px);
+    background:#090d15;border:1px solid #1b2333;border-radius:14px;
+    box-shadow:inset 0 0 46px rgba(0,0,0,.5),0 12px 30px rgba(0,0,0,.25);
+    touch-action:manipulation
+  }
+  .cell{
+    position:relative;min-width:0;min-height:0;padding:0;border:1px solid #1a2231;
+    border-radius:clamp(5px,1vw,9px);background:radial-gradient(circle at 50% 45%,#121927,#0b0f18 72%);
+    display:grid;place-items:center;cursor:pointer;touch-action:manipulation;aspect-ratio:1;
+    transition:transform .07s ease,box-shadow .15s ease,border-color .15s ease
+  }
+  .cell:active{transform:scale(.94)}
+  .cell.red{
+    border-color:rgba(255,98,98,.40);
+    background:radial-gradient(circle at 50% 40%,rgba(255,98,98,.20),rgba(255,98,98,.035) 66%,#0b0f18 100%)
+  }
+  .cell.blue{
+    border-color:rgba(111,151,255,.40);
+    background:radial-gradient(circle at 50% 40%,rgba(111,151,255,.20),rgba(111,151,255,.035) 66%,#0b0f18 100%)
+  }
+  .cell .pips{width:84%;height:84%;overflow:visible;pointer-events:none}
+  .cell.red .pips circle{fill:var(--red);filter:drop-shadow(0 0 3px rgba(255,98,98,.65))}
+  .cell.blue .pips circle{fill:var(--blue);filter:drop-shadow(0 0 3px rgba(111,151,255,.65))}
+  .cell.last{box-shadow:inset 0 0 0 1px rgba(255,255,255,.35)}
+  .cell.suggest{
+    border-color:var(--gold);
+    box-shadow:0 0 0 2px rgba(255,212,121,.8),0 0 24px rgba(255,212,121,.35);
+    z-index:2
+  }
+  .cell.suggest::after{
+    content:"";position:absolute;right:3px;bottom:3px;width:6px;height:6px;border-radius:50%;
+    background:var(--gold);box-shadow:0 0 9px var(--gold)
+  }
+  .cell.flash{animation:cellFlash .55s ease}
+  @keyframes cellFlash{0%{filter:brightness(2.2) saturate(1.3)}100%{filter:none}}
+  .board.locked .cell{cursor:default}
+  .board.locked .cell:active{transform:none}
+  .board.locked{box-shadow:inset 0 0 46px rgba(0,0,0,.5),0 0 0 1px rgba(255,212,121,.18),0 12px 30px rgba(0,0,0,.25)}
+  #btn-lock.on{color:var(--gold);border-color:rgba(255,212,121,.5);background:rgba(255,212,121,.08)}
+
+  .palette{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:12px}
+  .palette .label{font-size:10px;font-weight:750;letter-spacing:.13em;text-transform:uppercase;color:var(--faint);margin-right:2px}
+  .pbtn{
+    min-height:44px;padding:0 10px;border-radius:10px;border:1px solid var(--line);
+    background:#0a0e16;color:var(--muted);font-size:12.5px;font-weight:700;
+    display:inline-flex;align-items:center;gap:6px;cursor:pointer;touch-action:manipulation
+  }
+  .pbtn .sw{width:9px;height:9px;border-radius:50%;display:block;background:#39445a}
+  .pbtn.red{color:#ffb9b9}
+  .pbtn.red .sw{background:var(--red);box-shadow:0 0 7px rgba(255,98,98,.6)}
+  .pbtn.blue{color:#bcd0ff}
+  .pbtn.blue .sw{background:var(--blue);box-shadow:0 0 7px rgba(111,151,255,.6)}
+  .pbtn.on{border-color:rgba(255,255,255,.5);background:#1a2233;color:var(--text);box-shadow:inset 0 0 0 1px rgba(255,255,255,.12)}
+  .pbtn.red.on{border-color:rgba(255,98,98,.75);background:rgba(255,98,98,.14);color:#ffd0d0}
+  .pbtn.blue.on{border-color:rgba(111,151,255,.75);background:rgba(111,151,255,.14);color:#d6e2ff}
+
+  .actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:10px}
+  .size-seg{margin-left:auto}
+  .size-seg button{min-height:36px;padding:0 9px;font-size:11.5px}
+  .btn{
+    min-height:46px;padding:0 13px;border-radius:11px;border:1px solid var(--line);
+    background:#121927;color:var(--text);font-size:12.5px;font-weight:700;cursor:pointer;
+    touch-action:manipulation;transition:transform .07s,background .15s,border-color .15s
+  }
+  .btn:active{transform:scale(.98)}
+  .btn.ghost{background:transparent;color:var(--muted)}
+  .btn.ghost:hover{border-color:#354159;color:var(--text)}
+  .btn.primary{
+    background:linear-gradient(180deg,#82a7ff,#4f7df0);border-color:#91afff;color:#061021;
+    font-weight:850;box-shadow:0 9px 26px rgba(79,125,240,.35)
+  }
+  .btn.primary:disabled{opacity:.55;box-shadow:none;cursor:default}
+  .btn.wide{width:100%;margin-top:10px}
+  .btn[hidden]{display:none}
+
+  .panel{display:flex;flex-direction:column;gap:14px}
+  .card h2{
+    margin:0 0 10px;font-size:10px;font-weight:800;letter-spacing:.15em;
+    text-transform:uppercase;color:var(--faint)
+  }
+  .budget{display:grid;grid-template-columns:repeat(4,1fr);width:100%}
+  .budget button{padding:0;min-height:44px}
+  #status{margin-top:9px;font-size:11.5px;line-height:1.5;color:var(--faint);min-height:17px}
+  #status.err{color:#ff9d9d}
+  #status.ok{color:#9fe9c6}
+
+  .hint{font-size:12.5px;line-height:1.65;color:var(--muted)}
+  .hint b{color:var(--text)}
+  .thinking{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:13px;padding:4px 0}
+  .spinner{
+    width:17px;height:17px;border-radius:50%;border:2px solid #2a3448;border-top-color:var(--gold);
+    animation:spin .8s linear infinite;flex:0 0 auto
+  }
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .best{display:flex;align-items:center;gap:14px}
+  .best .coord{
+    font:850 clamp(35px,6vw,46px)/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    color:var(--gold);letter-spacing:.01em;text-shadow:0 0 24px rgba(255,212,121,.35)
+  }
+  .best .meta{display:flex;flex-direction:column;gap:3px;min-width:0}
+  .best .title{font-size:13px;font-weight:700;color:var(--text)}
+  .best .sub{font-size:11.5px;color:var(--muted)}
+  .metrics{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin-top:12px}
+  .metric{background:#090d15;border:1px solid var(--line);border-radius:10px;padding:7px 9px}
+  .metric b{display:block;font-size:14px;line-height:1.2;color:var(--text);font-variant-numeric:tabular-nums}
+  .metric span{display:block;margin-top:2px;font-size:9.5px;letter-spacing:.06em;color:var(--faint)}
+  .note{margin-top:9px;font-size:10.5px;line-height:1.5;color:var(--faint)}
+  .winner{
+    display:flex;align-items:center;gap:9px;padding:11px 12px;border-radius:12px;
+    background:rgba(95,224,160,.10);border:1px solid rgba(95,224,160,.32);
+    color:#c7ffe4;font-size:14px;font-weight:800
+  }
+  .winner .dot{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 10px var(--green)}
+  .log-list{display:flex;flex-direction:column;gap:5px;max-height:190px;overflow:auto;overscroll-behavior:contain}
+  .log-item{
+    display:flex;align-items:center;justify-content:space-between;gap:8px;
+    font-size:11.5px;color:var(--muted);background:#090d15;border:1px solid #171f2d;
+    border-radius:9px;padding:7px 9px
+  }
+  .log-item b{color:var(--text);font-weight:750}
+  .log-item .r{color:#ffb9b9}
+  .log-item .b{color:#bcd0ff}
+
+  .modal{
+    position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;
+    padding:18px;background:rgba(3,5,9,.74);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)
+  }
+  .modal[hidden]{display:none}
+  .modal-card{
+    width:min(560px,100%);max-height:calc(100dvh - 36px);overflow:auto;
+    background:var(--card);border:1px solid var(--line);border-radius:18px;padding:16px;
+    box-shadow:0 30px 80px rgba(0,0,0,.55)
+  }
+  .modal-card h3{margin:0 0 6px;font-size:17px;letter-spacing:-.01em}
+  .modal-card p{margin:0 0 12px;font-size:12px;line-height:1.6;color:var(--muted)}
+  .howto{
+    margin:0 0 12px;padding:10px 11px;border-radius:11px;border:1px solid rgba(255,212,121,.22);
+    background:rgba(255,212,121,.055);color:#d9c9a2;font-size:11.5px;line-height:1.65
+  }
+  .howto b{color:#ffe1a3}
+  .howto a{color:#ffd479}
+  .modal-card textarea{
+    width:100%;min-height:132px;resize:vertical;padding:10px 11px;border-radius:11px;
+    border:1px solid var(--line);background:#090d15;color:var(--text);
+    font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    user-select:text;-webkit-user-select:text;outline:none
+  }
+  .modal-card textarea:focus{border-color:rgba(111,151,255,.6);box-shadow:0 0 0 3px rgba(111,151,255,.14)}
+  .modal-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  .modal-actions .btn{flex:1 1 auto}
+  .modal-actions .btn.primary{flex:1.4 1 auto}
+
+  @media (max-width:520px){
+    .badge{display:none}
+    .board-top{gap:6px}
+    .seg button{padding:0 9px;font-size:12px}
+    .pbtn{min-height:38px;padding:0 8px}
+    .actions .btn{padding:0 10px}
+    .size-seg{margin-left:0}
+  }
+  @media (prefers-reduced-motion:reduce){
+    *{animation-duration:.01ms !important;transition-duration:.01ms !important}
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div>
+      <h1>Dots 局面分析器</h1>
+      <div class="sub">Chain Reaction · 同一套本地引擎 · 可编辑双方局面</div>
+    </div>
+    <div class="badge">iPad ready</div>
+  </header>
+
+  <div class="layout">
+    <section class="card board-card">
+      <div class="board-top">
+        <div class="seg" id="turn-seg" role="group" aria-label="轮到谁走">
+          <button type="button" data-turn="red" class="on">红方走</button>
+          <button type="button" data-turn="blue">蓝方走</button>
+        </div>
+        <div class="counts">
+          <span class="chip red"><i></i>红 <b id="count-red">1</b></span>
+          <span class="chip blue"><i></i>蓝 <b id="count-blue">1</b></span>
+        </div>
+      </div>
+
+      <div class="board-shell">
+        <div class="coords cols" id="cols" aria-hidden="true"></div>
+        <div class="coords rows" id="rows" aria-hidden="true"></div>
+        <div class="board" id="board" role="grid" aria-label="棋盘"></div>
+      </div>
+
+      <div class="palette" id="palette" role="group" aria-label="画笔">
+        <span class="label">画笔</span>
+      </div>
+      <div class="actions">
+        <button class="btn ghost" id="btn-initial" type="button">初始局面</button>
+        <button class="btn ghost" id="btn-demo" type="button">示例</button>
+        <button class="btn ghost" id="btn-import" type="button">导入</button>
+        <button class="btn ghost" id="btn-clear" type="button">清空</button>
+        <button class="btn ghost" id="btn-undo" type="button">撤销</button>
+        <button class="btn ghost" id="btn-lock" type="button">锁定</button>
+        <div class="seg size-seg" id="size-seg" role="group" aria-label="棋盘尺寸">
+          <button type="button" data-size="6" class="on">6×6</button>
+          <button type="button" data-size="9">9×9</button>
+          <button type="button" data-size="12">12×12</button>
+        </div>
+      </div>
+    </section>
+
+    <aside class="panel">
+      <section class="card">
+        <h2>搜索预算</h2>
+        <div class="seg budget" id="budget-seg" role="group" aria-label="搜索时间">
+          <button type="button" data-budget="500">0.5s</button>
+          <button type="button" data-budget="1000">1s</button>
+          <button type="button" data-budget="2000" class="on">2s</button>
+          <button type="button" data-budget="5000">5s</button>
+        </div>
+        <button class="btn primary wide" id="btn-compute" type="button">计算最优解</button>
+        <div id="status">引擎在本地运行，棋盘不会上传。</div>
+      </section>
+
+      <section class="card">
+        <h2>引擎推荐</h2>
+        <div id="result-body"></div>
+        <button class="btn wide" id="btn-apply" type="button" hidden>应用此手</button>
+      </section>
+
+      <section class="card">
+        <h2>操作记录</h2>
+        <div class="log-list" id="log-list">
+          <div class="hint">还没有应用过走法。</div>
+        </div>
+      </section>
+    </aside>
+  </div>
+</div>
+
+<div class="modal" id="import-modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="import-title">
+    <h3 id="import-title">导入局面</h3>
+    <div class="howto">
+      当前对局会由 iOS 自动传入此离线分析器。此页中的编辑和“应用此手”仅作用于分析副本，不会改动原对局。
+    </div>
+    <p>也可以手动导入局面代码。格式：<code>DOTS1|尺寸|行棋方|坐标…</code></p>
+    <textarea id="import-text" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="DOTS1|6|red|0,0,r,1;1,0,r,3;…"></textarea>
+    <div class="modal-actions">
+      <button class="btn ghost" type="button" id="import-clip">读剪贴板</button>
+      <button class="btn ghost" type="button" id="import-cancel">取消</button>
+      <button class="btn primary" type="button" id="import-ok">导入局面</button>
+    </div>
+  </div>
+</div>
+
+<script>
+window.__dotsEngine = (function(){
+  var __out = null;
+  var self = { postMessage: function(m){ __out = m; } };
+(function(){"use strict";const Ce=[[1,0],[-1,0],[0,1],[0,-1]];function te(e,t){return 4}function pe(e,t,n=12){return e>=0&&e<n&&t>=0&&t<n}function dt(e){const t=e.length,n=new Array(t);for(let o=0;o<t;o++){const s=new Array(t);for(let r=0;r<t;r++){const c=e[o][r];s[r]=c?{color:c.color,charge:c.charge}:null}n[o]=s}return n}function mt(e){const t=e.length,n=[];for(let o=0;o<t;o++)for(let s=0;s<t;s++){const r=e[o][s];r&&r.charge>=te()&&n.push({x:s,y:o})}return n}function V(e){const t=e.length;let n=0,o=0;for(let s=0;s<t;s++)for(let r=0;r<t;r++){const c=e[s][r];c&&(c.color==="red"?n++:o++)}return{red:n,blue:o}}function Mt(e,t,n){const o=e.length,s=e[n][t];if(!s)return;const r=s.color;e[n][t]=null;for(const[c,M]of Ce){const d=t+c,i=n+M;if(!pe(d,i,o))continue;const h=e[i][d];h?h.color===r?h.charge+=1:e[i][d]={color:r,charge:h.charge+1}:e[i][d]={color:r,charge:1}}}function gt(e,t,n,o){const s=dt(e),r=s[n]?.[t];r?(r.charge+=1,r.color=o):s[n]&&(s[n][t]={color:o,charge:1});const c=[];let M=5e3;for(;M-- >0;){const d=mt(s);if(d.length===0)break;const i=[];let h=!1;for(const{x:g,y:u}of d){Mt(s,g,u),i.push({x:g,y:u});const{red:y,blue:x}=V(s);if(y===0||x===0){h=!0;break}}if(c.push(i),h)break}return{finalBoard:s,waves:c}}function wt(e,t,n,o){return gt(e,t,n,o).finalBoard}const q=4,S=12,F=0,ve=0,De=128,$=128,qe=15,de=8,T=0,L=1;function bt(e){return(e&$)===0?T:L}function N(e){return e&qe}function xt(e){return e===L?De:ve}const me=0xffffffffffffffffn;function Ze(e){return e=e+0x9e3779b97f4a7c15n&me,e=(e^e>>30n)*0xbf58476d1ce4e5b9n&me,e=(e^e>>27n)*0x94d049bb133111ebn&me,(e^e>>31n)&me}let Se=null,ce=0n;function kt(e=0xc0ffeen){const t=S*S*2*de,n=new BigUint64Array(t);let o=e;for(let s=0;s<t;s++)o=Ze(o+BigInt(s)),n[s]=o;Se=n,ce=Ze(o+0xabcdefn)}function At(e,t,n){return(e*2+t)*de+(n-1)}function Ee(e,t){if(t===F)return 0n;const n=N(t);if(n<1)return 0n;const o=n>de?de:n;return Se[At(e,bt(t),o)]}let D=0;const P=new Uint8Array(S*S);let U=0,H=0,O=T,ne=0,oe=0,_=-1,Z=0n;const W=new Int16Array(S*S*4),Me=new Int8Array(S*S);let Ge=-1;function It(e){if(e!==Ge){for(let t=0;t<e;t++)for(let n=0;n<e;n++){const o=t*e+n;let s=0;const r=o*4;n+1<e&&(W[r+s++]=o+1),n-1>=0&&(W[r+s++]=o-1),t+1<e&&(W[r+s++]=o+e),t-1>=0&&(W[r+s++]=o-e),Me[o]=s}Ge=e}}const Ke=65536,$e=new Int16Array(Ke),je=new Uint8Array(Ke);let j=0;const X=256,We=new Int32Array(X),Xe=new Int8Array(X),Ye=new Int32Array(X),Ve=new Int32Array(X),Qe=new Int8Array(X),Je=new BigInt64Array(X);let B=0;const et=new Int16Array(S*S*4);let ge=0,we=0;function Ct(){ge=0,we=0}function pt(e){et[we++]=e}function vt(){return et[ge++]}function Dt(){return ge===we}const _e=S*S,Be=64,G=new Int16Array(_e*Be),se=new Int32Array(_e*Be),Pe=2,Q=new Int16Array(Be*Pe),Te=new Int32Array(2*S*S);function tt(){Q.fill(-1),Te.fill(0)}function St(e,t,n,o){const s=e*Pe;Q[s]!==n&&(Q[s+1]=Q[s],Q[s]=n),Te[t*S*S+n]+=o*o}function Re(e,t){const n=P[e];n!==t&&($e[j]=e,je[j]=n,j++,n!==F&&((n&$)!==0?H--:U--,Z^=Ee(e,n)),t!==F&&((t&$)!==0?H++:U++,Z^=Ee(e,t)),P[e]=t)}function Et(e){We[B]=j,Xe[B]=O,Ye[B]=ne,Ve[B]=oe,Qe[B]=_,Je[B]=Z,B++;const t=O,n=xt(t),o=P[e],s=N(o)+1;Re(e,n|s);let r=!1,c=D*D*8;for(;c-- >0;){Ct();const M=D*D;for(let i=0;i<M;i++){const h=P[i];h!==F&&N(h)>=q&&pt(i)}if(Dt())break;const d=we;for(;ge<d;){const i=vt(),h=P[i];if(h===F||N(h)<q)continue;const u=((h&$)!==0?L:T)===L?De:ve;Re(i,F);const y=Me[i],x=i*4;for(let f=0;f<y;f++){const l=W[x+f],m=P[l],w=m===F?u|1:u|N(m)+1;Re(l,w)}if(U===0||H===0){r=!0;break}}if(r)break}t===T?ne++:oe++,ne>=1&&oe>=1&&(U===0&&H>0?_=1:H===0&&U>0&&(_=0)),_===-1&&(O=t===T?L:T,Z^=ce)}function _t(){B--;const e=We[B];for(;j>e;){j--;const t=$e[j],n=je[j];P[t]=n}O=Xe[B],ne=Ye[B],oe=Ve[B],_=Qe[B],Z=Je[B]}const nt=new Int32Array(X),ot=new Int32Array(X),Bt=Et,Pt=_t;function st(e){nt[B]=U,ot[B]=H,Bt(e)}function Le(){const e=B-1;Pt(),U=nt[e],H=ot[e]}function be(e){if(_!==-1)return 0;const t=D*D,n=O===L;let o=0;for(let s=0;s<t;s++){const r=P[s];if(r===F)continue;(r&$)!==0===n&&(G[e+o++]=s)}return o}function Tt(e,t,n,o){if(e===t)return 1e9;const s=P[e],c=N(s)+1,M=Me[e],d=e*4;let i=0;if(c>=q){i+=1e6;for(let h=0;h<M;h++){const g=W[d+h],u=P[g];if(u===F)continue;if(((u&$)!==0?L:T)!==o){const x=N(u);i+=10*x,x===q-1&&(i+=200)}}}else{const h=n*Pe;Q[h]===e?i+=8e5:Q[h+1]===e&&(i+=7e5),i+=Te[o*S*S+e],c===q-1&&(i+=100),i+=c*2;for(let g=0;g<M;g++){const u=W[d+g],y=P[u];if(y===F)continue;((y&$)!==0?L:T)!==o&&N(y)===q-1&&(i-=c===q-1?300:80)}}return i}function rt(){if(_!==-1)return _===O?1e6:-1e6;const e=D*D,t=O;let n=0,o=0,s=0,r=0,c=0,M=0;for(let y=0;y<e;y++){const x=P[y];if(x===F)continue;const f=(x&$)!==0?L:T,l=N(x);f===t?(n++,s+=l,l===q-1&&c++):(o++,r+=l,l===q-1&&M++)}let d=0,i=0,h=0,g=0;for(let y=0;y<e;y++){const x=P[y];if(x===F||N(x)!==q-1)continue;const f=(x&$)!==0?L:T,l=Me[y],m=y*4;let w=0;for(let A=0;A<l;A++){const I=W[m+A],v=P[I];if(v===F)continue;((v&$)!==0?L:T)!==f&&(w+=N(v))}w>0&&(f===t?(d++,h+=w):(i++,g+=w))}let u=0;return u+=(n-o)*35,u+=(s-r)*4,u+=(c-M)*8,u+=(d-i)*60,u+=(h-g)*12,u}let xe=new Map,Y=!1,fe=0,re=0;function ke(e,t,n,o,s){if(re++,(re&4095)===0&&Date.now()>=fe&&(Y=!0),Y)return{score:0,bestMove:-1};if(_!==-1)return{score:_===O?1e6+e:-1e6-e,bestMove:-1};const r=Z,c=xe.get(r);let M=-1;if(c!==void 0&&(M=c.bestMove,c.depth>=e)){if(c.flag===0)return{score:c.score,bestMove:c.bestMove};if(c.flag===1&&c.score>=n)return{score:c.score,bestMove:c.bestMove};if(c.flag===2&&c.score<=t)return{score:c.score,bestMove:c.bestMove}}if(e<=0)return{score:rt(),bestMove:-1};const d=O;if(s&&e>=3&&n-t===1&&(d===T?U:H)>=3){O=d===T?L:T,Z^=ce;const l=e>=6?3:2,m=ke(e-1-l,-n,-n+1,o+1,!1);if(O=d,Z^=ce,Y)return{score:0,bestMove:-1};const w=-m.score;if(w>=n)return{score:w,bestMove:-1}}const i=o*_e,h=be(i);if(h===0)return{score:rt(),bestMove:-1};for(let f=0;f<h;f++)se[i+f]=Tt(G[i+f],M,o,d);for(let f=1;f<h;f++){const l=G[i+f],m=se[i+f];let w=f-1;for(;w>=0&&se[i+w]<m;)G[i+w+1]=G[i+w],se[i+w+1]=se[i+w],w--;G[i+w+1]=l,se[i+w+1]=m}const g=t;let u=-1/0,y=G[i];for(let f=0;f<h;f++){const l=G[i+f],m=P[l],w=N(m)+1<q;st(l);let A;if(_!==-1)A=_===O?1e6+e:-1e6-e;else{const I=ke(e-1,-n,-t,o+1,!0);if(Y)return Le(),{score:0,bestMove:-1};A=-I.score}if(Le(),A>u&&(u=A,y=l),A>t&&(t=A),t>=n){w&&St(o,d,l,e);break}}let x;return u<=g?x=2:u>=n?x=1:x=0,xe.set(r,{depth:e,flag:x,bestMove:y,score:u}),{score:u,bestMove:y}}function it(e,t,n,o){D=e.length,It(D),Se===null&&kt(),P.fill(0,0,D*D),U=0,H=0,Z=0n;for(let s=0;s<D;s++){const r=e[s];for(let c=0;c<D;c++){const M=r[c];if(!M)continue;const d=M.color==="red"?ve:De,i=M.charge&qe,h=d|i,g=s*D+c;P[g]=h,M.color==="red"?U++:H++,Z^=Ee(g,h)}}O=t==="red"?T:L,O===L&&(Z^=ce),ne=n,oe=o,_=-1,ne>=1&&oe>=1&&(U===0&&H>0?_=1:H===0&&U>0&&(_=0)),j=0,B=0}function Rt(e,t,n,o,s={}){const r=s.timeMs??800,c=s.maxDepth??24,M=s.clearTT??!0,d=e.length;if(d<2||d>S)throw new Error(`unsupported board size ${d}`);for(let C=0;C<d;C++)if(e[C].length!==d)throw new Error("board must be square");if(it(e,t,n,o),_!==-1)throw new Error("game already over");M&&(xe=new Map),tt();const i=Date.now();Y=!1,re=0,fe=i+r;const h=s.onDepth;let g=-1,u=0,y=0;const x=i+r,f=s.softTimeMs,l=s.minTimeMs??60,m=f!==void 0,w=m?i+Math.min(f,r):x,A=m?i+Math.min(l,f):i,I=3,v=8,p=6,a=[],b=[];if(be(0)===1)g=G[0],u=0,y=1,h&&h({depth:1,score:0,nodes:0,elapsedMs:0,bestMove:{x:g%D,y:g/D|0}});else for(let C=1;C<=c&&!(Date.now()>=x);C++){const R=ke(C,-1/0,1/0,0,!0);if(Y||(g=R.bestMove,u=R.score,y=C,a.push(g),b.push(u),h&&h({depth:C,score:u,nodes:re,elapsedMs:Date.now()-i,bestMove:{x:g%D,y:g/D|0}}),u>9e5||u<-9e5))break;if(m&&C>=p){const E=Date.now();if(E>=A&&E>=w&&a.length>=I){const ee=a.slice(-I),ue=ee.every(K=>K===ee[0]),ae=b[b.length-I],he=Math.abs(u-ae)<=v;if(ue&&he)break}}}if(g<0){if(be(0)===0)throw new Error("no legal moves");g=G[0]}return{x:g%D,y:g/D|0,depth:y,score:u,nodes:re,elapsedMs:Date.now()-i}}function Lt(e,t,n,o,s,r={}){const c=e.length;if(c<2||c>S||(it(e,n,o,s),_!==-1))return null;const M=Math.max(20,r.timeMs??600),d=r.maxDepth??4,i=n==="red"?T:L,h=be(0);if(h===0)return null;const g=new Int16Array(h);for(let a=0;a<h;a++)g[a]=G[a];const u=(a,b)=>{st(a);let k;return _!==-1?k=_===i?1e6+b:-1e6-b:k=-ke(b-1,-1/0,1/0,1,!0).score,Le(),Y?null:k},y=new Float64Array(h);let x=Array.from({length:h},(a,b)=>b),f=0;fe=Date.now()+M,xe=new Map,tt(),Y=!1,re=0;for(let a=1;a<=d;a++){const b=new Float64Array(h);let k=!1;for(const C of x){if(a>1&&Date.now()>=fe){k=!0;break}const R=u(g[C],a);if(R===null){k=!0;break}b[C]=R}if(k)break;for(let C=0;C<h;C++)y[C]=b[C];if(f=a,x=x.slice().sort((C,R)=>y[R]-y[C]),y[x[0]]>=9e5||y[x[x.length-1]]<=-9e5||Date.now()>=fe)break}if(f===0){for(let a=0;a<h;a++){const b=u(g[a],1);y[a]=b??0}f=1}let m=-1/0,w=-1/0,A=1/0,I=0,v=null;for(let a=0;a<h;a++){const b=y[a];b>m?(w=m,m=b,I=a):b>w&&(w=b),b<A&&(A=b);const k=g[a];k%c===t.x&&(k/c|0)===t.y&&(v=b)}if(v===null)return null;w===-1/0&&(w=m),A===1/0&&(A=m);const p=g[I];return{playedScore:v,bestScore:m,worstScore:A,secondScore:w,bestMove:{x:p%c,y:p/c|0},depth:f,legalCount:h}}function ct(e,t,n){const o=[];for(const[s,r]of Ce){const c=e+s,M=t+r;pe(c,M,n)&&o.push([c,M])}return o}const Ae=(e,t,n)=>!!e&&e.charge>=te()-1,Ot=(e,t,n)=>!!e&&e.charge>=te()-2;function Oe(e,t,n={}){const o=n.jitter!==!1,s=e.length,r=t==="red"?"blue":"red",c=[];let M=0,d=0;for(let l=0;l<s;l++)for(let m=0;m<s;m++){const w=e[l][m];w&&(w.color===t?(c.push([m,l]),M++):d++)}if(c.length===0)return[];const i=M+d,h=i<=8,g=i>=30;let u=0,y=0;for(const[l,m]of c){const w=e[m][l];if(Ae(w))for(const[A,I]of ct(l,m,s)){const v=e[I][A];v&&v.color===r&&Ae(v)&&(u++,y+=v.charge)}}const x=u>0,f=[];for(const[l,m]of c){const w=e[m][l],A=te(),I=w.charge+1,v=I>=A,p=!v&&I>=A-1;let a=0,b=0,k=0,C=0,R=0,E=0,ee=0,ue=0,ae=0,he=0;for(const[K,ye]of ct(l,m,s)){const z=e[ye][K];if(!z){C++;continue}z.color===t?(k++,Ae(z)&&ae++):(b++,R+=z.charge,z.charge>he&&(he=z.charge),Ae(z)?(E++,ee+=z.charge):Ot(z)&&ue++)}if(v){const K=Ie(e,l,m,t),ye=V(e),z=V(K),Xt=z[t]-ye[t],Yt=ye[r]-z[r];a+=Xt*18+Yt*26,z[r]===0&&ye[r]>0&&(a+=5e5),a+=b*30,a+=E*90,a+=C*.4,x&&(a+=280+y*12)}else{if(E>0){let K=95+I*24+he*18;p&&(K+=250+ae*95),a-=K}if(p&&ue>0&&(a-=105*ue),p&&b>0&&(a-=30*b),p&&b===0&&(a+=22,a+=ae*4),x&&(a-=290+y*12),a+=I*.5,a+=(4-A)*2.5,a+=k*1,a+=C*.25,a-=b*2,h){const K=Math.floor(s/2);t==="red"?a+=Math.max(0,K-(l+m))*2.5:a+=Math.max(0,K-(2*(s-1)-l-m))*2.5}g&&p&&(a-=8)}f.push({move:{x:l,y:m},score:a})}if(o)for(const l of f)l.score+=(Math.random()-.5)*.01;return f.sort((l,m)=>m.score-l.score),f}function Ft(e,t,n,o={}){const s=Lt(e,t,n,1,1,{timeMs:o.timeMs??600,maxDepth:o.maxDepth??4});if(!s)return null;const{playedScore:r,bestScore:c,worstScore:M,secondScore:d,bestMove:i,depth:h,legalCount:g}=s,u=r-c,y=r<=-9e5,x=c>=9e5;let f;if(g<=1||c-M<4?f="book":y&&!x?f="blunder":u>=-3?f="best":u>=-12?f="good":u>=-35?f="inaccuracy":u>=-90?f="mistake":f="blunder",f==="best"){const l=c-d;x&&r>=9e5||l>=80&&c>=40?f="brilliant":l>=25&&c>=15&&(f="great")}return{label:f,delta:u,score:r,bestScore:c,secondScore:d,worstScore:M,bestMove:i,depth:h}}function Ie(e,t,n,o){return wt(e,t,n,o)}function ft(e,t,n,o){const s=V(e),r=Ie(e,t,n,o),c=V(r),M=o==="red"?"blue":"red",d=c[o]-s[o],i=s[M]-c[M];return c[M]===0&&s[M]>0?1e6:d+i*1.4}function lt(e,t){const n=e.length,o=new Array(n*n).fill(!1);let s=0;for(let r=0;r<n;r++)for(let c=0;c<n;c++){if(o[r*n+c])continue;const M=e[r][c];if(!M||M.color!==t)continue;let d=0;const i=[[c,r]];for(;i.length;){const[h,g]=i.pop(),u=g*n+h;if(o[u])continue;const y=e[g][h];if(!(!y||y.color!==t)){o[u]=!0,d++;for(const[x,f]of Ce){const l=h+x,m=g+f;pe(l,m,n)&&(o[m*n+l]||i.push([l,m]))}}}d>s&&(s=d)}return s}function ie(e,t,n){const o=e.length,s=t==="red"?"blue":"red";let r=0,c=0,M=0,d=0,i=0,h=0,g=0,u=0;const y=[],x=[];for(let a=0;a<o;a++)for(let b=0;b<o;b++){const k=e[a][b];if(!k)continue;const C=te(),R=(4-C)*1.5,E=k.charge>=C-1,ee=!E&&k.charge>=C-2;k.color===t?(r+=k.charge,M+=R,E?(i++,y.push([b,a])):ee&&g++):(c+=k.charge,d+=R,E?(h++,x.push([b,a])):ee&&u++)}if(c===0&&r>0)return 1e6;if(r===0&&c>0)return-1e6;let f=0,l=0;for(const[a,b]of y){const k=ft(e,a,b,t);k>f?(l=f,f=k):k>l&&(l=k)}let m=0,w=0;for(const[a,b]of x){const k=ft(e,a,b,s);k>m?(w=m,m=k):k>w&&(w=k)}let A;n===t?A=f*18-m*12:A=f*12-m*18,A+=l*4-w*4;const I=lt(e,t),v=lt(e,s),p=n===t?5:-5;return(r-c)*4+(i-h)*18+(g-u)*6+(M-d)*1+(I-v)*3+A+p}function ut(e,t){const n=e.length,o=[];for(let s=0;s<n;s++)for(let r=0;r<n;r++)e[s][r]?.color===t&&o.push({x:r,y:s});return o}const Fe=16,ze=16;let Ne=null,at=0,ht=0;function Ue(){return Math.random()*4294967296>>>0}function zt(){if(Ne)return Ne;const e=Fe*Fe,t=new Uint32Array(e*2*ze*2);for(let n=0;n<t.length;n++)t[n]=Ue();return Ne=t,at=Ue(),ht=Ue(),t}function Nt(e,t,n){const o=Math.min(n,ze-1),s=t==="red"?0:1;return((e*2+s)*ze+o)*2}function Ut(e,t){const n=zt(),o=e.length;let s=0,r=0;for(let c=0;c<o;c++)for(let M=0;M<o;M++){const d=e[c][M];if(!d)continue;const i=Nt(c*Fe+M,d.color,d.charge);s^=n[i],r^=n[i+1]}return t==="blue"&&(s^=at,r^=ht),{lo:s>>>0,hi:r>>>0}}function Ht(e){return e.lo.toString(36)+":"+e.hi.toString(36)}const qt={easy:{timeMs:80,maxDepth:1,randomize:!0},medium:{timeMs:1200,maxDepth:8,randomize:!1},hard:{timeMs:6e3,maxDepth:32,randomize:!1}},He=48,le=1e6;function Zt(e){const t=[];for(let n=0;n<He+4;n++)t.push([null,null]);return{killers:t,history:new Map,tt:new Map,deadline:e,nodes:0,abort:!1}}function yt(e,t,n){return(e==="red"?"r":"b")+t+","+n}function Gt(e,t,n,o,s){const r=e.killers[t];(!r[0]||r[0].x!==o.x||r[0].y!==o.y)&&(r[1]=r[0],r[0]=o);const c=yt(n,o.x,o.y);e.history.set(c,(e.history.get(c)??0)+s*s)}function Kt(e,t,n){const o=e.killers[t];return o[0]?.x===n.x&&o[0]?.y===n.y||o[1]?.x===n.x&&o[1]?.y===n.y}function $t(e,t,n,o,s){const r=ut(e,t);if(!r.length)return[];const c=Oe(e,t,{jitter:!1}),M=new Map;for(const i of c)M.set(`${i.move.x},${i.move.y}`,i.score);const d=r.map(i=>{const h=`${i.x},${i.y}`,u=e[i.y][i.x].charge+1>=te(i.x,i.y);let y=M.get(h)??0;return s&&s.x===i.x&&s.y===i.y?y+=1e9:u?y+=1e6:Kt(n,o,i)?y+=5e5:y+=n.history.get(yt(t,i.x,i.y))??0,{move:i,tactical:u,score:y}});return d.sort((i,h)=>h.score-i.score),d.map(i=>({move:i.move,tactical:i.tactical}))}function jt(e,t){const{red:n,blue:o}=V(e);if(t==="red"){if(o===0&&n>0)return le;if(n===0&&o>0)return-le}else{if(n===0&&o>0)return le;if(o===0&&n>0)return-le}return null}function J(e,t,n,o,s,r,c,M){if(r.nodes++,(r.nodes&255)===0&&Date.now()>r.deadline&&(r.abort=!0),r.abort||c>=He)return ie(e,t,t);const d=t==="red"?"blue":"red",i=jt(e,t);if(i!==null)return i;const h=Ut(e,t),g=Ht(h),u=r.tt.get(g);let y;if(u&&u.depth>=n&&(u.flag==="exact"||u.flag==="lower"&&u.score>=s||u.flag==="upper"&&u.score<=o))return u.score;if(u&&(y=u.best),n<=0)return ie(e,t,t);if(M&&n>=3&&s-o===1){const{red:I,blue:v}=V(e);if((t==="red"?I:v)>=4){const a=n>=6?3:2,b=-J(e,d,n-1-a,-s,-s+1,r,c+1,!1);if(r.abort)return ie(e,t,t);if(b>=s)return b}}const x=$t(e,t,r,c,y);if(x.length===0)return ie(e,t,t);const f=o;let l=-1/0,m,w=0;for(const{move:I,tactical:v}of x){const p=Ie(e,I.x,I.y,t),a=v&&n<=3&&c<He-4?1:0;let b;if(w===0)b=-J(p,d,n-1+a,-s,-o,r,c+1,!0);else{let k=0;!v&&a===0&&n>=3&&w>=3&&(k=w>=6?2:1,k>=n-1&&(k=n-2),k<0&&(k=0)),b=-J(p,d,n-1+a-k,-o-1,-o,r,c+1,!0),!r.abort&&b>o&&(k>0||s-o>1)&&(b=-J(p,d,n-1+a,-s,-o,r,c+1,!0))}if(r.abort)return l===-1/0?ie(e,t,t):l;if(b>l&&(l=b,m=I),l>o&&(o=l),o>=s){v||Gt(r,c,t,I,n);break}w++}let A;return l<=f?A="upper":l>=s?A="lower":A="exact",r.tt.set(g,{depth:n,score:l,flag:A,best:m}),l}function Wt(e,t,n={}){const o=qt[n.difficulty??"medium"],s=n.timeMs??o.timeMs,r=n.maxDepth??o.maxDepth,c=ut(e,t);if(!c.length)return null;if(o.randomize&&r<=1){const f=Oe(e,t);if(!f.length)return null;const l=f.slice(0,Math.min(3,f.length)),m=Math.random()<.3?l[Math.floor(Math.random()*l.length)]:l[0];return{move:m.move,score:m.score,depth:1}}const M=Date.now()+Math.max(40,s),d=t==="red"?"blue":"red",i=Zt(M);let h=c[0],g=0,u=0,y=Oe(e,t,{jitter:!1}).map(f=>f.move);y.length===0&&(y=c);const x=50;for(let f=1;f<=r&&!(Date.now()>M);f++){let l=f>=4?g-x:-1/0,m=f>=4?g+x:1/0,w=x,A=y[0],I=-1/0,v=!1;for(;;){I=-1/0,A=y[0];let p=l;const a=m;let b=!0,k=!1;for(const C of y){if(Date.now()>M){i.abort=!0;break}const R=Ie(e,C.x,C.y,t);let E;if(b?(E=-J(R,d,f-1,-a,-p,i,1,!0),b=!1):(E=-J(R,d,f-1,-p-1,-p,i,1,!0),!i.abort&&E>p&&E<a&&(E=-J(R,d,f-1,-a,-p,i,1,!0))),i.abort)break;E>I&&(I=E,A=C),E>p&&(p=E)}if(i.abort)break;if(I<=l?(w*=2,l=I-w,m=I+1,w>4e3&&(l=-1/0,m=1/0),k=!0):I>=m&&(w*=2,l=I-1,m=I+w,w>4e3&&(l=-1/0,m=1/0),k=!0),!k){v=!0;break}}if(v){if(h=A,g=I,u=f,y=[A,...y.filter(p=>!(p.x===A.x&&p.y===A.y))],g>=le-1e3)break}else break}return{move:h,score:g,depth:u}}self.onmessage=e=>{const t=e.data;try{if(t.kind==="search"){const s=Wt(t.board,t.mover,{difficulty:t.difficulty,timeMs:t.timeMs,maxDepth:t.maxDepth}),r={kind:"search",id:t.id,result:s};self.postMessage(r);return}if(t.kind==="botpick"){const s=Rt(t.board,t.mover,t.movesRed,t.movesBlue,{timeMs:t.timeMs,softTimeMs:t.softTimeMs,minTimeMs:t.minTimeMs,maxDepth:t.maxDepth}),r={kind:"botpick",id:t.id,result:s};self.postMessage(r);return}const n=Ft(t.board,t.move,t.mover,{timeMs:t.timeMs,maxDepth:t.maxDepth}),o={id:t.id,annotation:n};self.postMessage(o)}catch{if(t.kind==="search"){const o={kind:"search",id:t.id,result:null};self.postMessage(o)}else if(t.kind==="botpick"){const o={kind:"botpick",id:t.id,result:null};self.postMessage(o)}else{const o={id:t.id,annotation:null};self.postMessage(o)}}}})();
+
+  return {
+    onmessage: function(msg){
+      __out = null;
+      self.onmessage({ data: msg });
+      return __out;
+    }
+  };
+})();
+</script>
+<script>
+(function(){
+  'use strict';
+
+  var $ = function(sel, root){ return (root || document).querySelector(sel); };
+  var SIZES = [6, 9, 12];
+  var STORE_KEY = 'dots-analyzer-v1';
+  var DEMO_6 = [
+    'r1 r3 r1 .. .. ..',
+    '.. r1 r1 .. .. ..',
+    'r1 r3 .. .. .. ..',
+    'r2 .. .. .. b2 b3',
+    '.. .. .. b3 .. b3',
+    '.. .. .. b1 b3 ..'
+  ];
+  var PAINTS = {
+    erase: null,
+    red1: { color:'red', charge:1 },
+    red2: { color:'red', charge:2 },
+    red3: { color:'red', charge:3 },
+    blue1:{ color:'blue', charge:1 },
+    blue2:{ color:'blue', charge:2 },
+    blue3:{ color:'blue', charge:3 }
+  };
+  var PAINT_DEFS = [
+    ['erase','空',null],
+    ['red1','红 1','red'],
+    ['red2','红 2','red'],
+    ['red3','红 3','red'],
+    ['blue1','蓝 1','blue'],
+    ['blue2','蓝 2','blue'],
+    ['blue3','蓝 3','blue']
+  ];
+  var PIPS = {
+    1: [[15,15]],
+    2: [[10.5,10.5],[19.5,19.5]],
+    3: [[15,8.5],[9.5,20.5],[20.5,20.5]]
+  };
+
+  function emptyBoard(n){
+    var b = [];
+    for (var y=0; y<n; y++){
+      var row = [];
+      for (var x=0; x<n; x++) row.push(null);
+      b.push(row);
+    }
+    return b;
+  }
+  function initialBoard(n){
+    var b = emptyBoard(n);
+    b[0][0] = { color:'red', charge:1 };
+    b[n-1][n-1] = { color:'blue', charge:1 };
+    return b;
+  }
+  function cloneBoard(b){
+    return b.map(function(row){
+      return row.map(function(c){ return c ? { color:c.color, charge:c.charge } : null; });
+    });
+  }
+  function countColors(b){
+    var red=0, blue=0;
+    for (var y=0; y<b.length; y++) for (var x=0; x<b.length; x++){
+      var c=b[y][x];
+      if (!c) continue;
+      if (c.color==='red') red++; else blue++;
+    }
+    return { red:red, blue:blue };
+  }
+  function parsePreset(rows){
+    var n = rows.length;
+    var b = emptyBoard(n);
+    for (var y=0; y<n; y++){
+      var toks = rows[y].trim().split(/\s+/);
+      for (var x=0; x<n; x++){
+        var t = toks[x];
+        if (!t || t==='..') continue;
+        b[y][x] = { color: t.charAt(0)==='r' ? 'red' : 'blue', charge: Number(t.charAt(1)) };
+      }
+    }
+    return b;
+  }
+
+  var state = {
+    size: 6,
+    board: initialBoard(6),
+    turn: 'red',
+    paint: 'red1',
+    budget: 2000,
+    result: null,
+    thinking: false,
+    winner: null,
+    lastMove: null,
+    flash: new Set(),
+    log: [],
+    moveNo: 0,
+    history: [],
+    locked: false,
+    _coordSize: 0
+  };
+
+  var reqId = 0;
+  var statusTimer = null;
+
+  function coord(x, y){ return String.fromCharCode(65 + x) + (state.size - y); }
+  function keyOf(x, y){ return x + ',' + y; }
+  function fmtScore(s){
+    if (s >= 900000) return '必胜';
+    if (s <= -900000) return '危险';
+    return (s > 0 ? '+' : '') + s;
+  }
+  function fmtNodes(n){
+    if (!n) return '0';
+    if (n >= 1000000) return (n/1000000).toFixed(1) + 'M';
+    if (n >= 1000) return (n/1000).toFixed(1) + 'k';
+    return String(n);
+  }
+  function pipSvg(color, charge){
+    var pts = PIPS[Math.max(1, Math.min(3, charge))] || PIPS[1];
+    var circles = pts.map(function(p){
+      return '<circle cx="' + p[0] + '" cy="' + p[1] + '" r="3.7"></circle>';
+    }).join('');
+    return '<svg class="pips" viewBox="0 0 30 30" aria-hidden="true">' + circles + '</svg>';
+  }
+
+  function toast(msg, isErr){
+    var el = $('#status');
+    el.textContent = msg;
+    el.className = isErr ? 'err' : 'ok';
+    if (statusTimer) clearTimeout(statusTimer);
+    statusTimer = setTimeout(function(){
+      el.className = '';
+      el.textContent = '引擎在本地运行，棋盘不会上传。';
+    }, 3600);
+  }
+
+  function pushHistory(){
+    state.history.push({
+      size: state.size,
+      board: cloneBoard(state.board),
+      turn: state.turn,
+      winner: state.winner,
+      lastMove: state.lastMove,
+      log: state.log.slice(),
+      moveNo: state.moveNo
+    });
+    if (state.history.length > 80) state.history.shift();
+  }
+
+  function undo(){
+    if (!state.history.length){ toast('没有可撤销的操作', true); return; }
+    var h = state.history.pop();
+    state.size = h.size;
+    state.board = h.board;
+    state.turn = h.turn;
+    state.winner = h.winner;
+    state.lastMove = h.lastMove;
+    state.log = h.log;
+    state.moveNo = h.moveNo;
+    state.result = null;
+    state.thinking = false;
+    state.flash.clear();
+    state._coordSize = 0;
+    save();
+    render();
+  }
+
+  function paintCell(x, y){
+    if (state.locked){ toast('棋盘已锁定，点“解锁”后可编辑', true); return; }
+    var spec = PAINTS[state.paint];
+    var cur = state.board[y] && state.board[y][x];
+    if (!spec && !cur) return;
+    pushHistory();
+    if (spec) state.board[y][x] = { color: spec.color, charge: spec.charge };
+    else state.board[y][x] = null;
+    state.result = null;
+    state.winner = null;
+    state.lastMove = null;
+    state.flash.clear();
+    save();
+    render();
+  }
+
+  function applyMove(board, x, y, color){
+    var b = cloneBoard(board);
+    var cell = b[y] && b[y][x];
+    if (!cell || cell.color !== color) throw new Error('该格不属于行棋方');
+    cell.charge += 1;
+    var changed = new Set([keyOf(x, y)]);
+    var waves = 0;
+    var winner = null;
+    for (var guard=0; guard<5000; guard++){
+      var crit = [];
+      for (var yy=0; yy<b.length; yy++) for (var xx=0; xx<b.length; xx++){
+        var c = b[yy][xx];
+        if (c && c.charge >= 4) crit.push([xx, yy]);
+      }
+      if (!crit.length) break;
+      waves++;
+      for (var i=0; i<crit.length; i++){
+        var cx = crit[i][0], cy = crit[i][1];
+        var firing = b[cy][cx];
+        if (!firing) continue;
+        var col = firing.color;
+        b[cy][cx] = null;
+        changed.add(keyOf(cx, cy));
+        for (var d=0; d<4; d++){
+          var nx = cx + (d===0?1:d===1?-1:0);
+          var ny = cy + (d===2?1:d===3?-1:0);
+          if (nx<0 || ny<0 || nx>=b.length || ny>=b.length) continue;
+          var t = b[ny][nx];
+          changed.add(keyOf(nx, ny));
+          if (!t){ b[ny][nx] = { color: col, charge: 1 }; }
+          else if (t.color === col){ t.charge += 1; }
+          else { b[ny][nx] = { color: col, charge: t.charge + 1 }; }
+        }
+        var cc = countColors(b);
+        if (cc.red === 0 || cc.blue === 0){
+          winner = cc.red === 0 ? 'blue' : 'red';
+          return { board:b, waves:waves, counts:cc, winner:winner, changed:changed };
+        }
+      }
+    }
+    var finalCounts = countColors(b);
+    if (finalCounts.red === 0 || finalCounts.blue === 0) winner = finalCounts.red === 0 ? 'blue' : 'red';
+    return { board:b, waves:waves, counts:finalCounts, winner:winner, changed:changed };
+  }
+
+  function validate(){
+    var c = countColors(state.board);
+    if (!c.red) return '请至少放置一个红子';
+    if (!c.blue) return '请至少放置一个蓝子';
+    if (c[state.turn] === 0) return '轮到的一方没有棋子';
+    for (var y=0; y<state.size; y++) for (var x=0; x<state.size; x++){
+      var cell = state.board[y][x];
+      if (cell && (cell.charge < 1 || cell.charge > 3)) return '电荷只能是 1–3；4 级会立刻爆炸';
+    }
+    return null;
+  }
+
+  function encodeState(){
+    var parts = [];
+    for (var y=0; y<state.size; y++) for (var x=0; x<state.size; x++){
+      var c = state.board[y][x];
+      if (c) parts.push(x + ',' + y + ',' + (c.color === 'red' ? 'r' : 'b') + ',' + c.charge);
+    }
+    return 'DOTS1|' + state.size + '|' + state.turn + '|' + parts.join(';');
+  }
+
+  function parseStateCode(raw){
+    raw = String(raw || '').trim();
+    var m = /^DOTS1\|(\d+)\|(red|blue)\|(.*)$/.exec(raw);
+    if (!m) throw new Error('局面代码格式不正确');
+    var n = Number(m[1]);
+    if (!SIZES.includes(n)) throw new Error('只支持 6、9、12 三种尺寸');
+    var board = emptyBoard(n);
+    var body = m[3].trim();
+    if (body){
+      var parts = body.split(';');
+      for (var i=0; i<parts.length; i++){
+        var p = parts[i].split(',');
+        if (p.length !== 4) throw new Error('第 ' + (i+1) + ' 个格子格式错误');
+        var x = Number(p[0]), y = Number(p[1]), ch = Number(p[3]);
+        if (!(x >= 0 && y >= 0 && x < n && y < n)) throw new Error('坐标越界：' + parts[i]);
+        if (p[2] !== 'r' && p[2] !== 'b') throw new Error('颜色错误：' + parts[i]);
+        if (!(ch >= 1 && ch <= 3)) throw new Error('电荷只能是 1–3：' + parts[i]);
+        if (board[y][x]) throw new Error('坐标重复：' + parts[i]);
+        board[y][x] = { color: p[2] === 'r' ? 'red' : 'blue', charge: ch };
+      }
+    }
+    return { size:n, turn:m[2], board:board };
+  }
+
+  function applyImported(parsed, quiet){
+    pushHistory();
+    state.size = parsed.size;
+    state.board = parsed.board;
+    state.turn = parsed.turn;
+    state.result = null;
+    state.winner = null;
+    state.lastMove = null;
+    state.log = [];
+    state.moveNo = 0;
+    state.locked = false;
+    state.flash.clear();
+    state._coordSize = 0;
+    save();
+    render();
+    if (!quiet){
+      var c = countColors(parsed.board);
+      toast('已导入 ' + parsed.size + '×' + parsed.size + ' 局面（红 ' + c.red + ' / 蓝 ' + c.blue + '），轮到' + (parsed.turn === 'red' ? '红' : '蓝') + '方');
+    }
+  }
+
+  function importStateCode(code, quiet){
+    applyImported(parseStateCode(code), quiet);
+  }
+
+  function openImport(){
+    var modal = $('#import-modal');
+    modal.hidden = false;
+    var ta = $('#import-text');
+    ta.value = '';
+    setTimeout(function(){ ta.focus(); }, 40);
+    if (navigator.clipboard && navigator.clipboard.readText){
+      navigator.clipboard.readText().then(function(t){
+        if (t && /^DOTS1\|/.test(t.trim())) ta.value = t.trim();
+      }).catch(function(){});
+    }
+  }
+
+  function closeImport(){
+    $('#import-modal').hidden = true;
+  }
+
+  function readClipboard(){
+    if (!(navigator.clipboard && navigator.clipboard.readText)){
+      toast('此浏览器不支持直接读剪贴板，请长按输入框粘贴', true);
+      return;
+    }
+    navigator.clipboard.readText().then(function(t){
+      if (t && t.trim()) $('#import-text').value = t.trim();
+      else toast('剪贴板是空的', true);
+    }).catch(function(){ toast('读取剪贴板被拒绝，请手动粘贴', true); });
+  }
+
+  function importFromModal(){
+    try {
+      importStateCode($('#import-text').value);
+      closeImport();
+    } catch(e){
+      toast('导入失败：' + e.message, true);
+    }
+  }
+
+  function readHashState(){
+    var h = (location.hash || '').replace(/^#/, '');
+    if (!h) return null;
+    var code = '';
+    var auto = false;
+    if (h.indexOf('DOTS1|') === 0 || h.indexOf('DOTS1%7C') === 0){
+      code = decodeURIComponent(h);
+    } else {
+      try {
+        var hp = new URLSearchParams(h);
+        code = hp.get('s') || '';
+        auto = hp.get('auto') === '1';
+      } catch(e){}
+    }
+    if (!code) return null;
+    try {
+      var st = parseStateCode(code);
+      st.auto = auto;
+      return st;
+    } catch(e){ return null; }
+  }
+
+
+  function askInline(msg){
+    return new Promise(function(resolve, reject){
+      setTimeout(function(){
+        try {
+          var out = window.__dotsEngine && window.__dotsEngine.onmessage(msg);
+          if (!out) throw new Error('引擎无响应');
+          resolve(Object.assign({}, out, { mode:'inline' }));
+        } catch(e){ reject(e); }
+      }, 30);
+    });
+  }
+
+  async function compute(){
+    if (state.thinking) return;
+    var err = validate();
+    if (err){ toast(err, true); return; }
+    state.thinking = true;
+    state.result = null;
+    state.winner = null;
+    state.flash.clear();
+    render();
+    var payload = {
+      kind: 'botpick',
+      id: ++reqId,
+      board: cloneBoard(state.board),
+      mover: state.turn,
+      movesRed: 20,
+      movesBlue: 20,
+      timeMs: state.budget,
+      maxDepth: (function(){
+        var v = Number(new URLSearchParams(location.search).get('maxdepth'));
+        return v >= 1 && v <= 32 ? v : 32;
+      })()
+    };
+    var t0 = performance.now();
+    try {
+      var data = await askInline(payload);
+      var r = data && data.result;
+      if (!r || typeof r.x !== 'number' || r.x < 0) throw new Error('没有找到合法走法');
+      state.result = {
+        x: r.x, y: r.y,
+        score: r.score, depth: r.depth,
+        nodes: r.nodes, elapsedMs: r.elapsedMs,
+        wallMs: Math.round(performance.now() - t0),
+        mode: data.mode
+      };
+      state.thinking = false;
+      render();
+    } catch(e){
+      state.thinking = false;
+      render();
+      toast('计算失败：' + (e && e.message ? e.message : String(e)), true);
+    }
+  }
+
+  function applyBest(){
+    if (!state.result || state.thinking) return;
+    var r = state.result;
+    var cell = state.board[r.y] && state.board[r.y][r.x];
+    if (!cell || cell.color !== state.turn){ toast('棋盘已变化，请重新计算', true); return; }
+    pushHistory();
+    var out = applyMove(state.board, r.x, r.y, state.turn);
+    state.board = out.board;
+    state.lastMove = { x:r.x, y:r.y, by:state.turn };
+    state.flash = out.changed;
+    state.result = null;
+    state.moveNo++;
+    state.log.unshift({
+      no: state.moveNo,
+      by: state.turn,
+      coord: coord(r.x, r.y),
+      waves: out.waves,
+      counts: out.counts,
+      winner: out.winner
+    });
+    state.log = state.log.slice(0, 12);
+    if (out.winner){
+      state.winner = out.winner;
+      state.turn = out.winner === 'red' ? 'blue' : 'red';
+    } else {
+      state.turn = state.turn === 'red' ? 'blue' : 'red';
+    }
+    save();
+    render();
+    setTimeout(function(){ state.flash.clear(); render(); }, 650);
+  }
+
+  function setSize(n){
+    if (!SIZES.includes(n) || n === state.size) return;
+    pushHistory();
+    state.size = n;
+    state.board = initialBoard(n);
+    state.turn = 'red';
+    state.result = null;
+    state.winner = null;
+    state.lastMove = null;
+    state.log = [];
+    state.moveNo = 0;
+    state.flash.clear();
+    state._coordSize = 0;
+    save();
+    render();
+  }
+
+  function resetInitial(){
+    pushHistory();
+    state.board = initialBoard(state.size);
+    state.turn = 'red';
+    state.result = null;
+    state.winner = null;
+    state.lastMove = null;
+    state.log = [];
+    state.moveNo = 0;
+    state.flash.clear();
+    save();
+    render();
+  }
+
+  function clearBoard(){
+    pushHistory();
+    state.board = emptyBoard(state.size);
+    state.turn = 'red';
+    state.result = null;
+    state.winner = null;
+    state.lastMove = null;
+    state.log = [];
+    state.moveNo = 0;
+    state.flash.clear();
+    save();
+    render();
+  }
+
+  function loadDemo(){
+    pushHistory();
+    state.size = 6;
+    state.board = parsePreset(DEMO_6);
+    state.turn = 'red';
+    state.result = null;
+    state.winner = null;
+    state.lastMove = null;
+    state.log = [];
+    state.moveNo = 0;
+    state.flash.clear();
+    state._coordSize = 0;
+    save();
+    render();
+  }
+
+  function buildCoords(){
+    var n = state.size;
+    var cols = $('#cols'), rows = $('#rows');
+    cols.innerHTML = '';
+    rows.innerHTML = '';
+    cols.style.gridTemplateColumns = 'repeat(' + n + ',1fr)';
+    rows.style.gridTemplateRows = 'repeat(' + n + ',1fr)';
+    for (var x=0; x<n; x++){
+      var s = document.createElement('span');
+      s.textContent = String.fromCharCode(65 + x);
+      cols.appendChild(s);
+    }
+    for (var y=0; y<n; y++){
+      var r = document.createElement('span');
+      r.textContent = String(n - y);
+      rows.appendChild(r);
+    }
+  }
+
+  function renderBoard(){
+    var n = state.size;
+    var boardEl = $('#board');
+    boardEl.innerHTML = '';
+    boardEl.style.gridTemplateColumns = 'repeat(' + n + ',minmax(0,1fr))';
+    boardEl.setAttribute('aria-label', n + '×' + n + ' 棋盘');
+    var frag = document.createDocumentFragment();
+    for (var y=0; y<n; y++) for (var x=0; x<n; x++){
+      var cell = state.board[y][x];
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'cell';
+      btn.dataset.x = x;
+      btn.dataset.y = y;
+      btn.setAttribute('role','gridcell');
+      var label = coord(x, y);
+      if (cell) label += '，' + (cell.color === 'red' ? '红' : '蓝') + ' ' + cell.charge;
+      else label += '，空';
+      if (state.result && state.result.x === x && state.result.y === y) label += '，推荐落子';
+      btn.setAttribute('aria-label', label);
+      if (cell){
+        btn.classList.add(cell.color);
+        btn.innerHTML = pipSvg(cell.color, cell.charge);
+      }
+      if (state.lastMove && state.lastMove.x === x && state.lastMove.y === y) btn.classList.add('last');
+      if (state.result && state.result.x === x && state.result.y === y) btn.classList.add('suggest');
+      if (state.flash.has(keyOf(x, y))) btn.classList.add('flash');
+      frag.appendChild(btn);
+    }
+    boardEl.appendChild(frag);
+  }
+
+  function renderCounts(){
+    var c = countColors(state.board);
+    $('#count-red').textContent = c.red;
+    $('#count-blue').textContent = c.blue;
+  }
+
+  function renderTurn(){
+    document.querySelectorAll('#turn-seg [data-turn]').forEach(function(b){
+      var on = b.dataset.turn === state.turn;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  }
+
+  function renderPalette(){
+    document.querySelectorAll('#palette [data-paint]').forEach(function(b){
+      b.classList.toggle('on', b.dataset.paint === state.paint);
+      b.setAttribute('aria-pressed', b.dataset.paint === state.paint ? 'true' : 'false');
+    });
+  }
+
+  function renderLock(){
+    var btn = $('#btn-lock');
+    btn.classList.toggle('on', state.locked);
+    btn.textContent = state.locked ? '解锁' : '锁定';
+    btn.setAttribute('aria-pressed', state.locked ? 'true' : 'false');
+    $('#board').classList.toggle('locked', state.locked);
+    $('#palette').style.opacity = state.locked ? '.55' : '';
+  }
+
+  function renderResult(){
+    var body = $('#result-body');
+    var apply = $('#btn-apply');
+    if (state.winner){
+      body.innerHTML = '<div class="winner"><span class="dot"></span>' +
+        (state.winner === 'red' ? '红方获胜' : '蓝方获胜') + '，棋盘已清空一方。</div>';
+      apply.hidden = true;
+      return;
+    }
+    if (state.thinking){
+      body.innerHTML = '<div class="thinking"><span class="spinner"></span>搜索中…</div>';
+      apply.hidden = true;
+      return;
+    }
+    if (!state.result){
+      body.innerHTML = '<div class="hint">先编辑局面，再点“计算最优解”。<br>推荐结果会以金色框标在棋盘上。</div>';
+      apply.hidden = true;
+      return;
+    }
+    var r = state.result;
+    var side = state.turn === 'red' ? '红方' : '蓝方';
+    var scoreClass = r.score >= 900000 ? 'good' : (r.score <= -900000 ? 'bad' : '');
+    body.innerHTML =
+      '<div class="best">' +
+        '<div class="coord">' + coord(r.x, r.y) + '</div>' +
+        '<div class="meta">' +
+          '<div class="title">' + side + '推荐落子</div>' +
+          '<div class="sub">评分 ' + fmtScore(r.score) + ' · ' + side + '视角</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="metrics">' +
+        '<div class="metric"><b>' + r.depth + '</b><span>搜索深度</span></div>' +
+        '<div class="metric"><b>' + fmtNodes(r.nodes) + '</b><span>节点数</span></div>' +
+        '<div class="metric"><b>' + (r.elapsedMs/1000).toFixed(1) + 's</b><span>引擎用时</span></div>' +
+        '<div class="metric"><b>本地</b><span>运行模式</span></div>' +
+      '</div>' +
+      '<div class="note ' + scoreClass + '">限时搜索，不保证数学意义上的全局最优；增加预算通常更准。应用后会自动结算连锁并切换行棋方。</div>';
+    apply.hidden = false;
+  }
+
+  function renderLog(){
+    var list = $('#log-list');
+    if (!state.log.length){
+      list.innerHTML = '<div class="hint">还没有应用过走法。</div>';
+      return;
+    }
+    list.innerHTML = state.log.map(function(it){
+      var side = it.by === 'red' ? '<span class="r">红</span>' : '<span class="b">蓝</span>';
+      var win = it.winner ? ' · 终局' : '';
+      return '<div class="log-item">' +
+        '<span><b>' + it.no + '.</b> ' + side + ' ' + it.coord + '</span>' +
+        '<span>' + it.waves + ' 波 · 红' + it.counts.red + ' / 蓝' + it.counts.blue + win + '</span>' +
+      '</div>';
+    }).join('');
+  }
+
+  function updateControls(){
+    var btn = $('#btn-compute');
+    btn.disabled = state.thinking || !!state.winner;
+    btn.textContent = state.thinking ? '计算中…' : '计算最优解';
+    document.querySelectorAll('#size-seg [data-size]').forEach(function(b){
+      b.classList.toggle('on', Number(b.dataset.size) === state.size);
+    });
+    document.querySelectorAll('#budget-seg [data-budget]').forEach(function(b){
+      b.classList.toggle('on', Number(b.dataset.budget) === state.budget);
+    });
+  }
+
+  function render(){
+    document.documentElement.style.setProperty('--n', state.size);
+    if (state._coordSize !== state.size){ buildCoords(); state._coordSize = state.size; }
+    renderBoard();
+    renderCounts();
+    renderTurn();
+    renderPalette();
+    renderLock();
+    renderResult();
+    renderLog();
+    updateControls();
+  }
+
+  function save(){
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify({
+        v: 1,
+        size: state.size,
+        board: state.board,
+        turn: state.turn,
+        budget: state.budget,
+        winner: state.winner,
+        lastMove: state.lastMove,
+        log: state.log,
+        moveNo: state.moveNo,
+        locked: state.locked
+      }));
+    } catch(e){}
+  }
+
+  function loadSaved(){
+    try {
+      var raw = localStorage.getItem(STORE_KEY);
+      if (!raw) return false;
+      var d = JSON.parse(raw);
+      if (!d || !SIZES.includes(d.size) || !Array.isArray(d.board) || d.board.length !== d.size) return false;
+      var b = [];
+      for (var y=0; y<d.size; y++){
+        if (!Array.isArray(d.board[y]) || d.board[y].length !== d.size) return false;
+        var row = [];
+        for (var x=0; x<d.size; x++){
+          var c = d.board[y][x];
+          if (!c){ row.push(null); continue; }
+          if ((c.color !== 'red' && c.color !== 'blue') || !(c.charge >= 1 && c.charge <= 3)) return false;
+          row.push({ color:c.color, charge:c.charge });
+        }
+        b.push(row);
+      }
+      state.size = d.size;
+      state.board = b;
+      state.turn = d.turn === 'blue' ? 'blue' : 'red';
+      state.budget = [500,1000,2000,5000].includes(d.budget) ? d.budget : 2000;
+      state.winner = d.winner === 'red' || d.winner === 'blue' ? d.winner : null;
+      state.lastMove = d.lastMove && typeof d.lastMove.x === 'number' ? d.lastMove : null;
+      state.log = Array.isArray(d.log) ? d.log.slice(0,12) : [];
+      state.moveNo = Number(d.moveNo) || 0;
+      state.locked = !!d.locked;
+      return true;
+    } catch(e){ return false; }
+  }
+
+  function initPalette(){
+    var pal = $('#palette');
+    PAINT_DEFS.forEach(function(d){
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'pbtn' + (d[2] ? ' ' + d[2] : '');
+      b.dataset.paint = d[0];
+      b.setAttribute('aria-label', d[1]);
+      b.innerHTML = '<span class="sw"></span>' + d[1];
+      pal.appendChild(b);
+    });
+  }
+
+  function init(){
+    initPalette();
+
+    $('#board').addEventListener('click', function(e){
+      var btn = e.target.closest('.cell');
+      if (!btn) return;
+      paintCell(Number(btn.dataset.x), Number(btn.dataset.y));
+    });
+
+    $('#turn-seg').addEventListener('click', function(e){
+      var b = e.target.closest('[data-turn]');
+      if (!b) return;
+      state.turn = b.dataset.turn === 'blue' ? 'blue' : 'red';
+      state.result = null;
+      save();
+      render();
+    });
+
+    $('#palette').addEventListener('click', function(e){
+      var b = e.target.closest('[data-paint]');
+      if (!b) return;
+      state.paint = b.dataset.paint;
+      renderPalette();
+    });
+
+    $('#size-seg').addEventListener('click', function(e){
+      var b = e.target.closest('[data-size]');
+      if (!b) return;
+      setSize(Number(b.dataset.size));
+    });
+
+    $('#budget-seg').addEventListener('click', function(e){
+      var b = e.target.closest('[data-budget]');
+      if (!b) return;
+      state.budget = Number(b.dataset.budget);
+      save();
+      render();
+    });
+
+    $('#btn-compute').addEventListener('click', compute);
+    $('#btn-apply').addEventListener('click', applyBest);
+    $('#btn-undo').addEventListener('click', undo);
+    $('#btn-initial').addEventListener('click', resetInitial);
+    $('#btn-clear').addEventListener('click', clearBoard);
+    $('#btn-demo').addEventListener('click', loadDemo);
+    $('#btn-import').addEventListener('click', openImport);
+    $('#import-ok').addEventListener('click', importFromModal);
+    $('#import-clip').addEventListener('click', readClipboard);
+    $('#import-cancel').addEventListener('click', closeImport);
+    $('#import-modal').addEventListener('click', function(e){
+      if (e.target === $('#import-modal')) closeImport();
+    });
+    document.addEventListener('keydown', function(e){
+      if (e.key === 'Escape' && !$('#import-modal').hidden) closeImport();
+    });
+    $('#btn-lock').addEventListener('click', function(){
+      state.locked = !state.locked;
+      save();
+      render();
+    });
+
+    window.addEventListener('beforeunload', save);
+
+    var params = new URLSearchParams(location.search);
+    var hasDemo = params.has('demo') || params.has('selftest');
+    var loaded = loadSaved();
+    if (!loaded){
+      state.size = 6;
+      state.board = initialBoard(6);
+      state.turn = 'red';
+      state.budget = 2000;
+      state.winner = null;
+      state.lastMove = null;
+      state.log = [];
+      state.moveNo = 0;
+      state.locked = false;
+    }
+    if (hasDemo){
+      state.size = 6;
+      state.board = parsePreset(DEMO_6);
+      state.turn = 'red';
+      state.budget = 2000;
+      state.winner = null;
+      state.lastMove = null;
+      state.log = [];
+      state.moveNo = 0;
+      state.locked = false;
+    }
+    var sizeParam = Number(params.get('size'));
+    if (!hasDemo && SIZES.includes(sizeParam)){
+      state.size = sizeParam;
+      state.board = initialBoard(sizeParam);
+      state.turn = 'red';
+      state.winner = null;
+      state.lastMove = null;
+      state.log = [];
+      state.moveNo = 0;
+      state.locked = false;
+    }
+    var hashState = readHashState();
+    var hashAuto = !!(hashState && hashState.auto);
+    if (hashState){
+      state.size = hashState.size;
+      state.board = hashState.board;
+      state.turn = hashState.turn;
+      state.winner = null;
+      state.lastMove = null;
+      state.log = [];
+      state.moveNo = 0;
+      state.locked = false;
+    }
+    state.history = [];
+    state.result = null;
+    state.thinking = false;
+    state.flash.clear();
+    state._coordSize = 0;
+    render();
+
+    $('#status').textContent = '引擎已加载；计算在本地运行，期间页面会短暂无响应。';
+    if (!window.__dotsEngine){
+      $('#status').textContent = '引擎加载失败：请使用 Safari 14+ / 较新的浏览器。';
+      $('#status').className = 'err';
+    }
+
+    if (hashAuto) setTimeout(compute, 400);
+
+    window.__dots = {
+      state: state,
+      compute: compute,
+      applyBest: applyBest,
+      applyMove: applyMove,
+      askInline: askInline,
+      render: render,
+      parsePreset: parsePreset,
+      coord: coord,
+      loadDemo: loadDemo,
+      encodeState: encodeState,
+      parseStateCode: parseStateCode,
+      importStateCode: importStateCode
+    };
+
+    if (params.has('selftest')) runSelfTest();
+    if (params.has('import')) setTimeout(openImport, 180);
+    if (params.has('analyze')) setTimeout(compute, 200);
+    if (params.has('apply')) setTimeout(async function(){ await compute(); applyBest(); }, 200);
+
+    window.addEventListener('hashchange', function(){
+      var hs = readHashState();
+      if (!hs) return;
+      try {
+        applyImported(hs, true);
+        toast('已从链接导入局面');
+        if (hs.auto) setTimeout(compute, 300);
+      } catch(e){}
+    });
+  }
+
+  async function runSelfTest(){
+    var out = {};
+    try {
+      state.size = 6;
+      state.board = parsePreset(DEMO_6);
+      state.turn = 'red';
+      state.result = null;
+      state.winner = null;
+      render();
+
+      var round = parseStateCode(encodeState());
+      var roundCounts = countColors(round.board);
+      out.roundTrip = round.size === 6 && round.turn === 'red' &&
+        roundCounts.red === 8 && roundCounts.blue === 6;
+
+      var base = {
+        kind: 'botpick',
+        board: cloneBoard(state.board),
+        mover: 'red',
+        movesRed: 20,
+        movesBlue: 20,
+        timeMs: 5000,
+        maxDepth: 3
+      };
+      var ir = await askInline(Object.assign({ id: 99002 }, base));
+      var ires = ir && ir.result;
+      out.inline = ires ? { x:ires.x, y:ires.y, depth:ires.depth, score:ires.score } : { error:'no inline result' };
+      out.depthOk = !!ires && ires.depth === 3;
+      var applied = applyMove(state.board, ires.x, ires.y, 'red');
+      out.apply = { waves: applied.waves, counts: applied.counts, winner: applied.winner };
+      var stable = applied.board.every(function(row){
+        return row.every(function(c){ return !c || (c.charge >= 1 && c.charge <= 3); });
+      });
+      out.stable = !!applied.winner || stable;
+      out.pass = !!out.roundTrip && !!out.depthOk && !!out.stable && applied.counts.red > 0 && applied.counts.blue > 0;
+    } catch(e){
+      out.error = String(e && e.stack || e);
+      out.pass = false;
+    }
+    var pre = document.createElement('pre');
+    pre.id = 'selftest';
+    pre.textContent = JSON.stringify(out, null, 2);
+    document.body.appendChild(pre);
+    document.title = 'SELFTEST ' + (out.pass ? 'PASS' : 'FAIL');
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>

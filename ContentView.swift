@@ -4,6 +4,7 @@ import UIKit
 import QuartzCore
 import MultipeerConnectivity
 import PhotosUI
+import WebKit
 
 // MARK: - 1. 触觉反馈引擎
 
@@ -4898,10 +4899,66 @@ struct PlayerTakeoverSheet: View {
     @ObservedObject var wsManager = WebSocketNetworkManager.shared
     @Environment(\.dismiss) private var dismiss
     @State private var showSavedToast: Bool = false
+    @State private var showDotsAnalyzer: Bool = false
+    @State private var dotsAnalyzerPositionCode: String?
+
+    private var dotsAnalyzerAvailability: (code: String?, reason: String) {
+        guard game.isGameInPlay else { return (nil, "开始一局后即可分析") }
+        guard !game.isProcessingCascade else { return (nil, "爆裂结算完成后即可分析") }
+        guard game.winnerIndex == nil else { return (nil, "本局已结束") }
+        guard [6, 9, 12].contains(game.boardSize) else { return (nil, "分析器仅支持 6×6、9×9、12×12") }
+        guard game.activePlayerIndices.count == 2 else { return (nil, "分析器仅支持双人局面") }
+        guard game.board.count == game.boardSize,
+              game.board.allSatisfy({ $0.count == game.boardSize }) else {
+            return (nil, "当前棋盘状态不完整")
+        }
+
+        let players = game.activePlayerIndices.sorted()
+        guard players.allSatisfy({ $0 >= 0 && $0 < game.eliminated.count && !game.eliminated[$0] }) else {
+            return (nil, "仅支持双方都仍在对局中的局面")
+        }
+        guard players.contains(game.currentPlayer) else { return (nil, "无法识别当前行棋方") }
+
+        let owners = Set(game.board.flatMap { $0 }.compactMap(\.owner))
+        guard owners == Set(players) else { return (nil, "需要双方棋子都在棋盘上的稳定局面") }
+        guard game.board.flatMap({ $0 }).allSatisfy({ cell in
+            if cell.owner == nil { return cell.count == 0 }
+            return (1...3).contains(cell.count)
+        }) else { return (nil, "棋盘仍有正在爆裂的格子，暂不能分析") }
+
+        var pieces: [String] = []
+        for row in 0..<game.boardSize {
+            for column in 0..<game.boardSize {
+                let cell = game.board[row][column]
+                guard let owner = cell.owner else { continue }
+                let color = owner == players[0] ? "r" : "b"
+                pieces.append("\(column),\(row),\(color),\(cell.count)")
+            }
+        }
+        let turn = game.currentPlayer == players[0] ? "red" : "blue"
+        return ("DOTS1|\(game.boardSize)|\(turn)|\(pieces.joined(separator: ";"))", "")
+    }
     
     var body: some View {
         NavigationStack {
             List {
+                Section(header: Text("局面分析")) {
+                    Button {
+                        guard let code = dotsAnalyzerAvailability.code else { return }
+                        dotsAnalyzerPositionCode = code
+                        showDotsAnalyzer = true
+                    } label: {
+                        Label("打开离线分析器", systemImage: "sparkle.magnifyingglass")
+                    }
+                    .disabled(dotsAnalyzerAvailability.code == nil)
+
+                    Text(dotsAnalyzerAvailability.code == nil
+                         ? dotsAnalyzerAvailability.reason
+                         : "分析当前稳定局面；推荐着法仅在分析器副本中演练，不会修改本局。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 if p2pManager.isConnected || wsManager.isConnected {
                     Section(header: Text("我的联机昵称")) {
                         HStack {
@@ -5010,7 +5067,90 @@ struct PlayerTakeoverSheet: View {
                 Button("完成") { dismiss() }
             }
         }
+        .sheet(isPresented: $showDotsAnalyzer) {
+            if let code = dotsAnalyzerPositionCode {
+                DotsAnalyzerView(positionCode: code)
+            }
+        }
         .presentationBackground(.thinMaterial)
+    }
+}
+
+private struct DotsAnalyzerView: View {
+    let positionCode: String
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                Text("离线分析当前局面。此页面的着法和编辑不会写回原对局。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                DotsAnalyzerWebView(positionCode: positionCode)
+            }
+            .navigationTitle("局面分析")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                Button("完成") { dismiss() }
+            }
+        }
+    }
+}
+
+private struct DotsAnalyzerWebView: UIViewRepresentable {
+    let positionCode: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(positionCode: positionCode)
+    }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.isOpaque = false
+        webView.backgroundColor = UIColor(red: 7.0 / 255.0, green: 9.0 / 255.0, blue: 14.0 / 255.0, alpha: 1.0)
+        webView.scrollView.backgroundColor = webView.backgroundColor
+        webView.navigationDelegate = context.coordinator
+        context.coordinator.loadAnalyzer(in: webView)
+        return webView
+    }
+
+    func updateUIView(_ webView: WKWebView, context: Context) {}
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        private let positionCode: String
+        private var hasImportedPosition = false
+
+        init(positionCode: String) {
+            self.positionCode = positionCode
+        }
+
+        func loadAnalyzer(in webView: WKWebView) {
+            // Local review prototype only: the imported Drive engine's upstream license is not cleared for release.
+            guard let url = Bundle.main.url(forResource: "DotsAnalyzer", withExtension: "html") else {
+                webView.loadHTMLString("<html><body style='background:#07090e;color:white;font:16px -apple-system;padding:24px'>分析器资源未打包。</body></html>", baseURL: nil)
+                return
+            }
+            webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            guard !hasImportedPosition else { return }
+            hasImportedPosition = true
+            guard let data = try? JSONSerialization.data(withJSONObject: [positionCode], options: [.fragmentsAllowed]),
+                  let encoded = String(data: data, encoding: .utf8) else { return }
+            let javascript = "(function(){var code = \(encoded)[0]; window.__dots.importStateCode(code, true); window.__dots.compute();})();"
+            webView.evaluateJavaScript(javascript)
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            decisionHandler(navigationAction.request.url?.isFileURL == true ? .allow : .cancel)
+        }
     }
 }
 
