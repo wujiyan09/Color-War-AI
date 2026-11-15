@@ -3804,6 +3804,12 @@ struct DualPlayerSetupView: View {
     @Binding var playerTwoIsBot: Bool
     let onStartGame: () -> Void
 
+    private let supportedBoardSizes = [6, 9, 12]
+
+    private func nearestSupportedBoardSize(to size: Int) -> Int {
+        supportedBoardSizes.min { abs($0 - size) < abs($1 - size) } ?? 6
+    }
+
     private func playerCard(title: String, isBot: Binding<Bool>, color: Color, icon: String) -> some View {
         Button {
             Haptics.shared.lightImpact()
@@ -3840,9 +3846,12 @@ struct DualPlayerSetupView: View {
                     Spacer()
                 }
                 Slider(
-                    value: Binding<Double>(get: { Double(game.boardSize) }, set: { game.boardSize = Int($0) }),
-                    in: 5...12,
-                    step: 1
+                    value: Binding<Double>(
+                        get: { Double(nearestSupportedBoardSize(to: game.boardSize)) },
+                        set: { game.boardSize = nearestSupportedBoardSize(to: Int($0)) }
+                    ),
+                    in: 6...12,
+                    step: 3
                 )
                 .tint(Color.darkNavyBlue)
             }
@@ -3866,6 +3875,12 @@ struct DualPlayerSetupView: View {
                 .glassEffect(.regular.tint(.darkNavyBlue).interactive(), in: .capsule)
             }
             .buttonStyle(.plain)
+        }
+        .onAppear {
+            let supportedSize = nearestSupportedBoardSize(to: game.boardSize)
+            if game.boardSize != supportedSize {
+                game.boardSize = supportedSize
+            }
         }
     }
 }

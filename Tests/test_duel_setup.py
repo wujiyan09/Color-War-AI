@@ -48,6 +48,16 @@ class LocalDuelSetupTests(unittest.TestCase):
         self.assertIn("@State private var duelPlayerOneIsBot = false", menu)
         self.assertIn("@State private var duelPlayerTwoIsBot = false", menu)
 
+    def test_duel_board_size_is_limited_to_supported_steps(self):
+        setup = section("struct DualPlayerSetupView", "// MARK: - 16. Tab 1: 局域网 P2P Setup View")
+        self.assertIn("private let supportedBoardSizes = [6, 9, 12]", setup)
+        self.assertIn("in: 6...12", setup)
+        self.assertIn("step: 3", setup)
+        self.assertIn(".onAppear", setup)
+        multiplayer = section("struct LocalGameSetupView", "struct DualPlayerSetupView")
+        self.assertIn("in: 5...12", multiplayer)
+        self.assertIn("step: 1", multiplayer)
+
 
 if __name__ == "__main__":
     unittest.main()
