@@ -1054,17 +1054,17 @@ private struct DriveDuelSearch {
         let moves = legalMoves(cells, side, enteredMask, size)
         guard let first = moves.first else { return nil }
         if terminal(cells, side, enteredMask, 0) != nil { return nil }
-        let search = parameters(level: level, movesPlayed: movesPlayed)
-        if search.randomize {
+        let searchParameters = parameters(level: level, movesPlayed: movesPlayed)
+        if searchParameters.randomize {
             let ranked = moves.map { ($0, quietHeuristic(cells, $0, side, enteredMask, size)) }.sorted { $0.1 > $1.1 }
             let candidates = Array(ranked.prefix(3))
             let selected = Double.random(in: 0..<1) < 0.3 ? candidates.randomElement()!.0 : candidates[0].0
             return (selected / size, selected % size)
         }
         if moves.count == 1 { return (first / size, first % size) }
-        let maxDepth = search.maxDepth
+        let maxDepth = searchParameters.maxDepth
         let startTime = ProcessInfo.processInfo.systemUptime
-        var context = Context(deadline: startTime + search.timeMs / 1000)
+        var context = Context(deadline: startTime + searchParameters.timeMs / 1000)
         let ordered = moves.sorted { moveOrderScore(cells, $0, side, enteredMask, size, 0, -1, context) > moveOrderScore(cells, $1, side, enteredMask, size, 0, -1, context) }
         var best = ordered[0], depthCompleted = 0
         var completedMoves: [Int] = [], completedScores: [Int] = []
@@ -1077,7 +1077,7 @@ private struct DriveDuelSearch {
             completedMoves.append(result.move); completedScores.append(result.score)
             if abs(result.score) >= winScore - 1000 { break }
             let elapsedMs = (ProcessInfo.processInfo.systemUptime - startTime) * 1000
-            if depth >= 6 && elapsedMs >= search.softTimeMs && elapsedMs >= search.minTimeMs && completedMoves.count >= 3 {
+            if depth >= 6 && elapsedMs >= searchParameters.softTimeMs && elapsedMs >= searchParameters.minTimeMs && completedMoves.count >= 3 {
                 let recentMoves = completedMoves.suffix(3)
                 let scoreDelta = abs(result.score - completedScores[completedScores.count - 3])
                 if let stableMove = recentMoves.first,
