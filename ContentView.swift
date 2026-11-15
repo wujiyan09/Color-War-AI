@@ -3806,6 +3806,7 @@ struct DualPlayerSetupView: View {
 
     private func playerCard(title: String, isBot: Binding<Bool>, color: Color, icon: String) -> some View {
         Button {
+            Haptics.shared.lightImpact()
             withAnimation(.spring(response: 0.32, dampingFraction: 0.72)) {
                 isBot.wrappedValue.toggle()
             }

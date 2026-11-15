@@ -26,10 +26,22 @@ class LocalDuelSetupTests(unittest.TestCase):
 
     def test_duel_game_settings_hide_role_and_thinking_controls_only_for_duel(self):
         sheet = section("struct PlayerTakeoverSheet", "// MARK: - 24. 历史存档恢复导入 Sheet")
-        self.assertIn("if !(game.isLocalDuelMode && game.activePlayerIndices.count == 2 && !game.isOnlineMultiplayer)", sheet)
-        self.assertIn("AI 思考算力/档位调整", sheet)
-        self.assertIn("实时接管控制（AI / 人类代打）", sheet)
-        self.assertIn("Picker(\"\", selection:", sheet)
+        marker = "if !(game.isLocalDuelMode && game.activePlayerIndices.count == 2 && !game.isOnlineMultiplayer) {"
+        self.assertIn(marker, sheet)
+        start = sheet.index(marker) + len(marker)
+        depth = 1
+        end = start
+        while depth:
+            if sheet[end] == "{":
+                depth += 1
+            elif sheet[end] == "}":
+                depth -= 1
+            end += 1
+        duel_settings_block = sheet[start:end - 1]
+        self.assertIn("AI 思考算力/档位调整", duel_settings_block)
+        self.assertIn("实时接管控制（AI / 人类代打）", duel_settings_block)
+        self.assertIn("Picker(\"\", selection:", duel_settings_block)
+        self.assertIn("Haptics.shared.lightImpact()", section("private func playerCard(", "    var body: some View {"))
 
     def test_duel_setup_defaults_both_players_to_human(self):
         menu = section("struct StartMenuView", "private func startGame(isLocalDuel")
