@@ -2370,7 +2370,9 @@ final class GameModel: ObservableObject {
         if isOnline { return [] }
 
         if !isOnline && !isInLobby && !isGameInPlay {
-            return [.human, .mathNightmare, .enhancedNightmare, .driveBot, .disabled]
+            // Bot 3 is a two-player duel option only; party and lobby setup
+            // must not offer it as a seat role.
+            return [.human, .mathNightmare, .enhancedNightmare, .disabled]
         }
 
         let isSeat0 = (idx == 0)
@@ -3050,7 +3052,7 @@ final class GameModel: ObservableObject {
 
     @discardableResult
     func addAIToRemoteLobby(type: PlayerControlType) -> Bool {
-        guard type.isAI,
+        guard type.isAI, type != .driveBot,
               activeOnlineMode == .remoteWS,
               WebSocketNetworkManager.shared.isConnected,
               WebSocketNetworkManager.shared.isHost,
@@ -3068,6 +3070,7 @@ final class GameModel: ObservableObject {
         if !forceInternal && isOnlineMultiplayer { return }
         
         if !forceInternal {
+            guard newType != .driveBot || (isLocalDuelMode && activePlayerIndices.count == 2) else { return }
             let valids = validSelectableTypes(forPlayerIndex: index, isInLobby: !isGameInPlay)
             guard valids.contains(newType) else { return }
         }
@@ -4410,7 +4413,7 @@ struct RoomLobbyView: View {
             if isHost {
                 if !game.isOnlineMultiplayer || (game.activeOnlineMode == .remoteWS && wsManager.isHost) {
                     Menu {
-                        ForEach([PlayerControlType.mathNightmare, .enhancedNightmare, .driveBot]) { type in
+                        ForEach([PlayerControlType.mathNightmare, .enhancedNightmare]) { type in
                             Button(type.displayName) {
                                 Haptics.shared.lightImpact()
                                 if game.isOnlineMultiplayer {
@@ -5230,6 +5233,57 @@ struct StartMenuView: View {
         .accessibilityAddTraits(selectedTab == tag ? .isSelected : [])
     }
 
+    private func restoreSetupPreferences() {
+        selectedPartyMode = min(1, selectedPartyMode)
+        if !game.isOnlineMultiplayer {
+            if let saved = UserDefaults.standard.data(forKey: "CW_Party_PlayerTypes"),
+               let values = try? JSONDecoder().decode([PlayerControlType].self, from: saved),
+               values.count == PlayerPreset.maxPlayers {
+                game.isLocalDuelMode = false
+                game.playerTypes = values
+            } else if let data = try? JSONEncoder().encode(game.playerTypes) {
+                UserDefaults.standard.set(data, forKey: "CW_Party_PlayerTypes")
+            }
+            game.boardSize = selectedTab == 0 ? duelBoardSize : partyBoardSize
+        }
+        game.flushSetupPreferences()
+    }
+
+    private func handleTabChange(from oldValue: Int, to newValue: Int) {
+        if oldValue == 0 { save(duelBoardSize, forKey: "CW_Duel_BoardSize") }
+        if oldValue == 1 {
+            partyBoardSize = game.boardSize
+            save(partyBoardSize, forKey: "CW_Party_BoardSize")
+        }
+        guard !game.isOnlineMultiplayer else { return }
+        if newValue == 0 {
+            game.isLocalDuelMode = false
+            game.boardSize = duelBoardSize
+        } else if newValue == 1 {
+            if let saved = UserDefaults.standard.data(forKey: "CW_Party_PlayerTypes"),
+               let values = try? JSONDecoder().decode([PlayerControlType].self, from: saved),
+               values.count == PlayerPreset.maxPlayers {
+                game.isLocalDuelMode = false
+                game.playerTypes = values
+            }
+            game.boardSize = partyBoardSize
+        }
+    }
+
+    private func save<T: Encodable>(_ value: T, forKey key: String) {
+        guard let data = try? JSONEncoder().encode(value) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+
+    private func save(_ value: Int, forKey key: String) {
+        UserDefaults.standard.set(value, forKey: key)
+    }
+
+    private func savePartyPlayerTypes(_ value: [PlayerControlType]) {
+        guard selectedTab == 1, !game.isLocalDuelMode, !game.isOnlineMultiplayer else { return }
+        save(value, forKey: "CW_Party_PlayerTypes")
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -5341,58 +5395,23 @@ struct StartMenuView: View {
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
-            .onAppear {
-                selectedPartyMode = min(1, selectedPartyMode)
-                if !game.isOnlineMultiplayer {
-                    if let saved = UserDefaults.standard.data(forKey: "CW_Party_PlayerTypes"),
-                       let values = try? JSONDecoder().decode([PlayerControlType].self, from: saved),
-                       values.count == PlayerPreset.maxPlayers {
-                        game.isLocalDuelMode = false
-                        game.playerTypes = values
-                    } else if let data = try? JSONEncoder().encode(game.playerTypes) {
-                        UserDefaults.standard.set(data, forKey: "CW_Party_PlayerTypes")
-                    }
-                    game.boardSize = selectedTab == 0 ? duelBoardSize : partyBoardSize
-                }
-                game.flushSetupPreferences()
-            }
+            .onAppear(perform: restoreSetupPreferences)
             .onChange(of: selectedTab) { oldValue, newValue in
-                if oldValue == 0 { UserDefaults.standard.set(duelBoardSize, forKey: "CW_Duel_BoardSize") }
-                if oldValue == 1 { partyBoardSize = game.boardSize; UserDefaults.standard.set(partyBoardSize, forKey: "CW_Party_BoardSize") }
-                if !game.isOnlineMultiplayer {
-                    if newValue == 0 {
-                        game.isLocalDuelMode = false
-                        game.boardSize = duelBoardSize
-                    } else if newValue == 1 {
-                        if let saved = UserDefaults.standard.data(forKey: "CW_Party_PlayerTypes"),
-                           let values = try? JSONDecoder().decode([PlayerControlType].self, from: saved), values.count == PlayerPreset.maxPlayers {
-                            game.isLocalDuelMode = false
-                            game.playerTypes = values
-                        }
-                        game.boardSize = partyBoardSize
-                    }
-                }
+                handleTabChange(from: oldValue, to: newValue)
             }
-            .onChange(of: duelBoardSize) { _, value in UserDefaults.standard.set(value, forKey: "CW_Duel_BoardSize") }
-            .onChange(of: duelPlayerOneType) { _, value in
-                if let data = try? JSONEncoder().encode(value) { UserDefaults.standard.set(data, forKey: "CW_Duel_PlayerOne") }
-            }
-            .onChange(of: duelPlayerTwoType) { _, value in
-                if let data = try? JSONEncoder().encode(value) { UserDefaults.standard.set(data, forKey: "CW_Duel_PlayerTwo") }
-            }
-            .onChange(of: partyBoardSize) { _, value in UserDefaults.standard.set(value, forKey: "CW_Party_BoardSize") }
+            .onChange(of: duelBoardSize) { _, value in save(value, forKey: "CW_Duel_BoardSize") }
+            .onChange(of: duelPlayerOneType) { _, value in save(value, forKey: "CW_Duel_PlayerOne") }
+            .onChange(of: duelPlayerTwoType) { _, value in save(value, forKey: "CW_Duel_PlayerTwo") }
+            .onChange(of: partyBoardSize) { _, value in save(value, forKey: "CW_Party_BoardSize") }
             .onChange(of: game.boardSize) { _, value in
-                if selectedTab == 1 { partyBoardSize = value; UserDefaults.standard.set(value, forKey: "CW_Party_BoardSize") }
+                guard selectedTab == 1 else { return }
+                partyBoardSize = value
+                save(value, forKey: "CW_Party_BoardSize")
             }
-            .onChange(of: game.playerTypes) { _, value in
-                if selectedTab == 1 && !game.isLocalDuelMode && !game.isOnlineMultiplayer,
-                   let data = try? JSONEncoder().encode(value) {
-                    UserDefaults.standard.set(data, forKey: "CW_Party_PlayerTypes")
-                }
-            }
-            .onChange(of: selectedPartyMode) { _, value in UserDefaults.standard.set(value, forKey: "CW_SelectedPartyMode") }
-            .onChange(of: analyzerBoardSize) { _, value in UserDefaults.standard.set(value, forKey: "CW_Analyzer_BoardSize") }
-            .onChange(of: analyzerSelfColor) { _, value in UserDefaults.standard.set(value, forKey: "CW_Analyzer_SelfColor") }
+            .onChange(of: game.playerTypes) { _, value in savePartyPlayerTypes(value) }
+            .onChange(of: selectedPartyMode) { _, value in save(value, forKey: "CW_SelectedPartyMode") }
+            .onChange(of: analyzerBoardSize) { _, value in save(value, forKey: "CW_Analyzer_BoardSize") }
+            .onChange(of: analyzerSelfColor) { _, value in save(value, forKey: "CW_Analyzer_SelfColor") }
             .onDisappear { game.flushSetupPreferences() }
         }
     }

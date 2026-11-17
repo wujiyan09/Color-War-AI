@@ -63,6 +63,18 @@ class LegacyAIBaselineTests(unittest.TestCase):
         self.assertIn("isTwoPlayer = (aliveCount == 2)", TEXT)
         self.assertIn("maxNMultiPlayerSearch(", TEXT)
 
+    def test_bot3_is_duel_only_not_party_or_online_add_select_ui(self):
+        selectable = TEXT[TEXT.index("func validSelectableTypes("):TEXT.index("private func updateCachedPlayableCells", TEXT.index("func validSelectableTypes("))]
+        self.assertIn("if isOnline { return [] }", selectable)
+        self.assertIn("return [.human, .mathNightmare, .enhancedNightmare, .disabled]", selectable)
+        self.assertNotIn("return [.human, .mathNightmare, .enhancedNightmare, .driveBot", selectable)
+
+        remote_add = TEXT[TEXT.index("func addAIToRemoteLobby(type:"):TEXT.index("func updatePlayerType(", TEXT.index("func addAIToRemoteLobby(type:"))]
+        self.assertIn("type != .driveBot", remote_add)
+        party_menu = TEXT[TEXT.index('Menu {', TEXT.index('if isHost {', TEXT.index('struct RemoteWebSocketSetupView'))):]
+        self.assertIn("ForEach([PlayerControlType.mathNightmare, .enhancedNightmare])", party_menu)
+        self.assertNotIn("ForEach([PlayerControlType.mathNightmare, .enhancedNightmare, .driveBot])", party_menu)
+
     def test_multiplayer_opening_avoids_corners_when_possible(self):
         start = TEXT.index("private func isCornerOpeningMove")
         end = TEXT.index("private func selectOptimalOpeningMove", start)
