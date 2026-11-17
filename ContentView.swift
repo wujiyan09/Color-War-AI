@@ -4695,6 +4695,7 @@ private struct AnalyzerBoardView: View {
 }
 
 private struct AnalyzerToolPanel: View {
+    let compact: Bool
     @Binding var brush: AnalyzerBrush
     let isLocked: Bool
     let isStarted: Bool
@@ -4724,7 +4725,7 @@ private struct AnalyzerToolPanel: View {
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.white)
             }
-            .frame(maxWidth: .infinity, minHeight: 38)
+            .frame(maxWidth: .infinity, minHeight: compact ? 32 : 38)
             .glassEffect(.regular.interactive().tint(selected ? color.opacity(0.20) : .clear), in: .rect(cornerRadius: 10))
             .contentShape(RoundedRectangle(cornerRadius: 10))
         }
@@ -4732,14 +4733,51 @@ private struct AnalyzerToolPanel: View {
         .disabled(isLocked)
     }
 
+    private var startButton: some View {
+        Button {
+            Haptics.shared.lightImpact()
+            onStart()
+        } label: {
+            Label(isThinking ? "计算中…" : (isStarted && isPaused ? (compact ? "继续" : "继续分析") : (compact ? "开始" : "开始分析")),
+                  systemImage: isThinking ? "hourglass" : "play.fill")
+                .font(compact ? .caption.bold() : .subheadline.bold())
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, compact ? 7 : 11)
+                .contentShape(Capsule())
+                .glassEffect(.regular.interactive().tint(.darkNavyBlue), in: .capsule)
+        }
+        .buttonStyle(.plain)
+        .disabled(isThinking || (isStarted && !isPaused))
+        .opacity(isThinking || (isStarted && !isPaused) ? 0.55 : 1)
+    }
+
+    private var pauseButton: some View {
+        Button {
+            Haptics.shared.lightImpact()
+            onPause()
+        } label: {
+            Label(compact ? "暂停" : "暂停分析", systemImage: "pause.fill")
+                .font(compact ? .caption.bold() : .subheadline.bold())
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, compact ? 7 : 11)
+                .contentShape(Capsule())
+                .glassEffect(.regular.interactive(), in: .capsule)
+        }
+        .buttonStyle(.plain)
+        .disabled(!isStarted || isPaused)
+        .opacity(!isStarted || isPaused ? 0.5 : 1)
+    }
+
     var body: some View {
-        VStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 10) {
+        VStack(spacing: compact ? 6 : 10) {
+            VStack(alignment: .leading, spacing: compact ? 6 : 10) {
                 Text("画笔")
-                    .font(.headline.bold())
+                    .font(compact ? .subheadline.bold() : .headline.bold())
                     .foregroundStyle(.white)
                 ForEach(0..<2, id: \.self) { owner in
-                    HStack(spacing: 5) {
+                    HStack(spacing: compact ? 4 : 5) {
                         Circle().fill(owner == 0 ? Color.red : Color.blue).frame(width: 10, height: 10)
                         Text(owner == 0 ? "红" : "蓝")
                             .font(.caption.bold())
@@ -4755,61 +4793,38 @@ private struct AnalyzerToolPanel: View {
                     Haptics.shared.lightImpact()
                 } label: {
                     Label("橡皮擦", systemImage: "eraser.fill")
-                        .font(.subheadline.bold())
+                        .font(compact ? .caption.bold() : .subheadline.bold())
                         .foregroundStyle(.white)
-                        .frame(maxWidth: .infinity, minHeight: 38)
+                        .frame(maxWidth: .infinity, minHeight: compact ? 32 : 38)
                         .contentShape(Capsule())
                         .glassEffect(.regular.interactive().tint(brush == .eraser ? .gray.opacity(0.35) : .clear), in: .capsule)
                 }
                 .buttonStyle(.plain)
                 .disabled(isLocked)
             }
-            .padding(12)
+            .padding(compact ? 8 : 12)
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             .opacity(isLocked ? 0.52 : 1)
 
-            Button {
-                Haptics.shared.lightImpact()
-                onStart()
-            } label: {
-                Label(isThinking ? "计算中…" : (isStarted && isPaused ? "继续分析" : "开始分析"),
-                      systemImage: isThinking ? "hourglass" : "play.fill")
-                    .font(.subheadline.bold())
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 11)
-                    .contentShape(Capsule())
-                    .glassEffect(.regular.interactive().tint(.darkNavyBlue), in: .capsule)
+            if compact {
+                HStack(spacing: 8) {
+                    startButton
+                    pauseButton
+                }
+            } else {
+                startButton
+                pauseButton
             }
-            .buttonStyle(.plain)
-            .disabled(isThinking || (isStarted && !isPaused))
-            .opacity(isThinking || (isStarted && !isPaused) ? 0.55 : 1)
-
-            Button {
-                Haptics.shared.lightImpact()
-                onPause()
-            } label: {
-                Label("暂停分析", systemImage: "pause.fill")
-                    .font(.subheadline.bold())
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 11)
-                    .contentShape(Capsule())
-                    .glassEffect(.regular.interactive(), in: .capsule)
-            }
-            .buttonStyle(.plain)
-            .disabled(!isStarted || isPaused)
-            .opacity(!isStarted || isPaused ? 0.5 : 1)
 
             Button {
                 Haptics.shared.lightImpact()
                 onToggleSide()
             } label: {
                 Label("我方：\(selfColor == 0 ? "红" : "蓝") · 切换", systemImage: "arrow.left.arrow.right")
-                    .font(.subheadline.bold())
+                    .font(compact ? .caption.bold() : .subheadline.bold())
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
+                    .padding(.vertical, compact ? 7 : 9)
                     .glassEffect(.regular.interactive(), in: .capsule)
             }
             .buttonStyle(.plain)
@@ -4821,10 +4836,10 @@ private struct AnalyzerToolPanel: View {
                 onUndo()
             } label: {
                 Label("撤销上一步", systemImage: "arrow.uturn.backward")
-                    .font(.subheadline.bold())
+                    .font(compact ? .caption.bold() : .subheadline.bold())
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
+                    .padding(.vertical, compact ? 7 : 9)
                     .glassEffect(.regular.interactive(), in: .capsule)
             }
             .buttonStyle(.plain)
@@ -4838,9 +4853,7 @@ private struct AnalyzerPlayView: View {
     @ObservedObject var game: GameModel
     @State private var boardSize: Int
     @Binding var selfColor: Int
-    @Binding var hideTabBar: Bool
     @Binding var importedArchive: GameSaveArchive?
-    let onBack: () -> Void
     @State private var board: [[Cell]]
     @State private var selectedBrush: AnalyzerBrush = .piece(owner: 0, count: 1)
     @State private var analysisStarted = false
@@ -4853,15 +4866,13 @@ private struct AnalyzerPlayView: View {
     @State private var undoStack: [UndoState] = []
     @State private var aiTask: Task<Void, Never>?
 
-    init(game: GameModel, boardSize: Int, selfColor: Binding<Int>, hideTabBar: Binding<Bool>,
-         importedArchive: Binding<GameSaveArchive?>, initialArchive: GameSaveArchive?, onBack: @escaping () -> Void) {
+    init(game: GameModel, boardSize: Int, selfColor: Binding<Int>,
+         importedArchive: Binding<GameSaveArchive?>, initialArchive: GameSaveArchive?) {
         self.game = game
         let initialSize = initialArchive?.boardSize ?? boardSize
         self._boardSize = State(initialValue: initialSize)
         self._selfColor = selfColor
-        self._hideTabBar = hideTabBar
         self._importedArchive = importedArchive
-        self.onBack = onBack
         _board = State(initialValue: Self.makeBoard(size: initialSize, selfColor: selfColor.wrappedValue, archive: initialArchive))
         _moveCount = State(initialValue: initialArchive?.localDuelMoveCount ?? 0)
     }
@@ -4897,24 +4908,6 @@ private struct AnalyzerPlayView: View {
         isThinking = false
         analysisStarted = false
         isPaused = false
-    }
-
-    private var backButton: some View {
-        HStack {
-            Button {
-                Haptics.shared.lightImpact()
-                onBack()
-            } label: {
-                Image(systemName: "chevron.left")
-                    .font(.subheadline.bold())
-                    .foregroundStyle(.white)
-                    .padding(12)
-                    .glassEffect(.regular.interactive(), in: .circle)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("返回")
-            Spacer()
-        }
     }
 
     private func tapCell(row: Int, column: Int) {
@@ -5007,7 +5000,6 @@ private struct AnalyzerPlayView: View {
     }
 
     private func startOrResume() {
-        hideTabBar = true
         if !analysisStarted {
             analysisStarted = true
             isPaused = false
@@ -5052,57 +5044,51 @@ private struct AnalyzerPlayView: View {
             Color(red: 0.025, green: 0.055, blue: 0.14)
                 .ignoresSafeArea()
             GeometryReader { proxy in
-                let horizontal = proxy.size.width >= 940 || (proxy.size.width >= 780 && proxy.size.width > proxy.size.height)
-                let maxBoardSide = min(680, horizontal ? min(proxy.size.height - 50, proxy.size.width - 250) : proxy.size.width - 30)
-                ScrollView(.vertical, showsIndicators: true) {
-                Group {
-                    if horizontal {
-                        HStack(alignment: .top, spacing: 16) {
-                            VStack(spacing: 8) {
-                                backButton
-                                AnalyzerBoardView(boardSize: boardSize, board: board, highlightedCell: highlightedCell,
-                                                 maxSide: maxBoardSide) { row, column in tapCell(row: row, column: column) }
-                            }
-                            AnalyzerToolPanel(brush: $selectedBrush,
-                                              isLocked: analysisStarted && !isPaused,
-                                              isStarted: analysisStarted,
-                                              isPaused: isPaused,
-                                              isThinking: isThinking,
-                                              selfColor: selfColor,
-                                              canUndo: !undoStack.isEmpty,
-                                              onStart: startOrResume,
-                                              onPause: pause,
-                                              onUndo: undoPreviousAction,
-                                              onToggleSide: toggleSelfColor)
+                let horizontal = proxy.size.width >= 900 && proxy.size.height >= 620
+                if horizontal {
+                    let boardSide = max(96, min(680, min(proxy.size.width - 280, proxy.size.height - 24)))
+                    HStack(spacing: 16) {
+                        AnalyzerBoardView(boardSize: boardSize, board: board, highlightedCell: highlightedCell,
+                                          maxSide: boardSide) { row, column in tapCell(row: row, column: column) }
+                        AnalyzerToolPanel(compact: false,
+                                          brush: $selectedBrush,
+                                          isLocked: analysisStarted && !isPaused,
+                                          isStarted: analysisStarted,
+                                          isPaused: isPaused,
+                                          isThinking: isThinking,
+                                          selfColor: selfColor,
+                                          canUndo: !undoStack.isEmpty,
+                                          onStart: startOrResume,
+                                          onPause: pause,
+                                          onUndo: undoPreviousAction,
+                                          onToggleSide: toggleSelfColor)
                             .frame(width: 220)
                             .frame(maxHeight: .infinity, alignment: .center)
-                        }
-                        .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .top)
-                    } else {
-                        VStack(spacing: 10) {
-                            backButton
-                            AnalyzerBoardView(boardSize: boardSize, board: board, highlightedCell: highlightedCell,
-                                             maxSide: maxBoardSide) { row, column in tapCell(row: row, column: column) }
-                            AnalyzerToolPanel(brush: $selectedBrush,
-                                              isLocked: analysisStarted && !isPaused,
-                                              isStarted: analysisStarted,
-                                              isPaused: isPaused,
-                                              isThinking: isThinking,
-                                              selfColor: selfColor,
-                                              canUndo: !undoStack.isEmpty,
-                                              onStart: startOrResume,
-                                              onPause: pause,
-                                              onUndo: undoPreviousAction,
-                                              onToggleSide: toggleSelfColor)
-                            .frame(maxWidth: min(maxBoardSide, 600))
-                        }
-                        .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .top)
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .padding(.horizontal, 12)
+                } else {
+                    let boardSide = max(96, min(proxy.size.width - 24, proxy.size.height - 330))
+                    VStack(spacing: 8) {
+                        AnalyzerBoardView(boardSize: boardSize, board: board, highlightedCell: highlightedCell,
+                                          maxSide: boardSide) { row, column in tapCell(row: row, column: column) }
+                        AnalyzerToolPanel(compact: true,
+                                          brush: $selectedBrush,
+                                          isLocked: analysisStarted && !isPaused,
+                                          isStarted: analysisStarted,
+                                          isPaused: isPaused,
+                                          isThinking: isThinking,
+                                          selfColor: selfColor,
+                                          canUndo: !undoStack.isEmpty,
+                                          onStart: startOrResume,
+                                          onPause: pause,
+                                          onUndo: undoPreviousAction,
+                                          onToggleSide: toggleSelfColor)
+                            .frame(maxWidth: min(proxy.size.width - 24, 600))
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .padding(.horizontal, 12)
                 }
-                .padding(.horizontal, 12)
-                .padding(.top, 2)
-                .padding(.bottom, 8)
-            }
             }
         }
         .onChange(of: importedArchive?.id) { _, _ in
@@ -5133,7 +5119,6 @@ struct StartMenuView: View {
         .flatMap { try? JSONDecoder().decode(PlayerControlType.self, from: $0) } ?? .human
     @State private var duelPlayerTwoType: PlayerControlType = UserDefaults.standard.data(forKey: "CW_Duel_PlayerTwo")
         .flatMap { try? JSONDecoder().decode(PlayerControlType.self, from: $0) } ?? .human
-    @State private var hideAnalyzerTabBar = false
     @State private var navigationPath: [StartMenuDestination] = []
     @State private var showPhotoPicker = false
     @State private var selectedPhotosItem: PhotosPickerItem?
@@ -5204,7 +5189,7 @@ struct StartMenuView: View {
     }
 
     private var partyTab: some View {
-        VStack(spacing: 10) {
+        VStack(alignment: .center, spacing: 10) {
             Picker("派对模式", selection: $selectedPartyMode) {
                 Text("多人").tag(0)
                 Text("联机").tag(1)
@@ -5225,24 +5210,8 @@ struct StartMenuView: View {
                     .frame(maxWidth: 440)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         .padding(.horizontal, 20)
-    }
-
-    private func setupTabButton(title: String, icon: String, tag: Int) -> some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.24)) { selectedTab = tag }
-        } label: {
-            VStack(spacing: 4) {
-                Image(systemName: icon).font(.system(size: 18, weight: .semibold))
-                Text(title).font(.caption2.weight(.semibold))
-            }
-            .foregroundStyle(selectedTab == tag ? Color.cyan : Color.white.opacity(0.65))
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(selectedTab == tag ? .isSelected : [])
     }
 
     private func restoreSetupPreferences() {
@@ -5297,7 +5266,6 @@ struct StartMenuView: View {
     }
 
     private func openAnalyzer() {
-        hideAnalyzerTabBar = true
         navigationPath.append(.analyzerPlay)
     }
 
@@ -5354,29 +5322,15 @@ struct StartMenuView: View {
                 .tag(2)
         }
         .background(Color.clear)
-        .toolbar(.hidden, for: .tabBar)
-    }
-
-    private var setupTabBar: some View {
-        HStack(spacing: 0) {
-            setupTabButton(title: "对弈", icon: "circle.grid.3x3.fill", tag: 0)
-            setupTabButton(title: "派对", icon: "party.popper.fill", tag: 1)
-            setupTabButton(title: "分析器", icon: "wrench.and.screwdriver.fill", tag: 2)
-        }
-        .frame(height: 58)
-        .background(Color(red: 0.025, green: 0.055, blue: 0.14).opacity(0.98))
-        .overlay(alignment: .top) { Rectangle().fill(Color.white.opacity(0.1)).frame(height: 0.5) }
     }
 
     @ToolbarContentBuilder
     private var setupToolbar: some ToolbarContent {
-        if !hideAnalyzerTabBar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button { game.showArchivePickerSheet = true } label: {
-                    Label("导入", systemImage: "square.and.arrow.down")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.cyan)
-                }
+        ToolbarItem(placement: .topBarLeading) {
+            Button { game.showArchivePickerSheet = true } label: {
+                Label("导入", systemImage: "square.and.arrow.down")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.cyan)
             }
         }
         if selectedTab == 0 || (selectedTab == 1 && selectedPartyMode == 0) {
@@ -5461,22 +5415,23 @@ struct StartMenuView: View {
                     case .analyzerPlay:
                         AnalyzerPlayView(game: game, boardSize: analyzerBoardSize,
                                          selfColor: $analyzerSelfColor,
-                                         hideTabBar: $hideAnalyzerTabBar,
                                          importedArchive: $pendingAnalyzerArchive,
-                                         initialArchive: pendingAnalyzerArchive,
-                                         onBack: {
-                                             if !navigationPath.isEmpty { navigationPath.removeLast() }
-                                             hideAnalyzerTabBar = false
-                                             pendingAnalyzerArchive = nil
-                                         })
-                            .toolbar(.hidden, for: .navigationBar)
+                                         initialArchive: pendingAnalyzerArchive)
+                            .navigationBarBackButtonHidden(true)
                             .toolbar(.hidden, for: .tabBar)
-                            .ignoresSafeArea()
+                            .toolbar {
+                                ToolbarItem(placement: .topBarLeading) {
+                                    Button {
+                                        if !navigationPath.isEmpty { navigationPath.removeLast() }
+                                        pendingAnalyzerArchive = nil
+                                    } label: {
+                                        Label("返回", systemImage: "chevron.left")
+                                    }
+                                    .accessibilityLabel("返回")
+                                }
+                            }
                     }
                 }
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if navigationPath.isEmpty && !hideAnalyzerTabBar { setupTabBar }
         }
     }
 

@@ -11,10 +11,10 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn('Label("对弈", systemImage: "circle.grid.3x3.fill")', SWIFT)
         self.assertIn('Label("派对", systemImage: "party.popper.fill")', SWIFT)
         self.assertIn('Label("分析器", systemImage: "wrench.and.screwdriver.fill")', SWIFT)
-        self.assertIn('icon: "wrench.and.screwdriver.fill"', SWIFT)
         self.assertIn('.toolbar(.hidden, for: .tabBar)', SWIFT)
-        self.assertIn('if !hideAnalyzerTabBar {', SWIFT)
-        self.assertIn('.safeAreaInset(edge: .bottom, spacing: 0)', SWIFT)
+        self.assertNotIn('setupTabBar', SWIFT)
+        self.assertNotIn('setupTabButton', SWIFT)
+        self.assertNotIn('.safeAreaInset(edge: .bottom, spacing: 0)', SWIFT)
         self.assertIn('Text("多人").tag(0)', SWIFT)
         self.assertIn('Text("联机").tag(1)', SWIFT)
         self.assertIn('Picker("派对模式", selection: $selectedPartyMode)', SWIFT)
@@ -31,12 +31,13 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn("private enum AnalyzerBrush", SWIFT)
         self.assertIn("case piece(owner: Int, count: Int)", SWIFT)
         self.assertIn("case eraser", SWIFT)
-        self.assertIn("proxy.size.width >= 940", SWIFT)
-        self.assertIn("proxy.size.width >= 780", SWIFT)
+        self.assertIn("proxy.size.width >= 900 && proxy.size.height >= 620", SWIFT)
+        analyzer = SWIFT[SWIFT.index("private struct AnalyzerPlayView"):SWIFT.index("struct StartMenuView")]
+        self.assertNotIn("ScrollView", analyzer)
         self.assertIn("AnalyzerToolPanel", SWIFT)
         self.assertIn(".glassEffect(.regular.interactive()", SWIFT)
 
-    def test_analyzer_entry_hides_tabs_has_haptics_and_icon_back(self):
+    def test_analyzer_entry_hides_tabs_has_haptics_and_fixed_toolbar_back(self):
         setup = SWIFT[SWIFT.index("private struct AnalyzerSetupView"):SWIFT.index("private struct AnalyzerBoardView")]
         self.assertIn("Haptics.shared.lightImpact()", setup)
         menu = SWIFT[SWIFT.index("struct StartMenuView"):SWIFT.index("private struct AnalyzerLandingView")]
@@ -44,12 +45,11 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn("navigationPath.append(.analyzerPlay)", menu)
         self.assertIn("NavigationStack(path: $navigationPath)", menu)
         self.assertIn(".navigationDestination(for: StartMenuDestination.self)", menu)
-        self.assertIn("if navigationPath.isEmpty && !hideAnalyzerTabBar { setupTabBar }", menu)
+        self.assertIn('ToolbarItem(placement: .topBarLeading)', menu)
+        self.assertIn('Label("返回", systemImage: "chevron.left")', menu)
+        self.assertIn('.navigationBarBackButtonHidden(true)', menu)
         self.assertIn("onStart: openAnalyzer", menu)
         self.assertIn("AnalyzerSetupView(boardSize: $boardSize, selfColor: $selfColor, onStart: onStart)", landing)
-        back = SWIFT[SWIFT.index("private var backButton: some View", SWIFT.index("private struct AnalyzerPlayView")):SWIFT.index("private func tapCell", SWIFT.index("private struct AnalyzerPlayView"))]
-        self.assertIn('Image(systemName: "chevron.left")', back)
-        self.assertNotIn('Label("返回", systemImage:', back)
 
     def test_analyzer_archive_import_does_not_restore_live_game(self):
         archive_sheet = SWIFT[SWIFT.index("struct ArchivePickerSheet"):SWIFT.index("// MARK: - 25.")]
@@ -65,17 +65,22 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn("pendingAnalyzerArchive = archive", SWIFT)
         self.assertIn("game.shouldNavigateToGame = true", SWIFT)
 
-    def test_party_mode_picker_sits_at_top_above_title(self):
-        party = SWIFT[SWIFT.index("private var partyTab: some View"):SWIFT.index("private func setupTabButton")]
+    def test_party_mode_picker_keeps_order_and_centers_content(self):
+        party = SWIFT[SWIFT.index("private var partyTab: some View"):SWIFT.index("private func restoreSetupPreferences")]
         self.assertLess(party.index('Picker("派对模式"'), party.index('Text("COLOR WAR")'))
-        self.assertIn("alignment: .top", party)
+        self.assertIn("alignment: .center", party)
 
-    def test_analyzer_uses_fullscreen_blue_background_and_top_alignment(self):
+    def test_analyzer_uses_fixed_non_scroll_adaptive_centered_layout(self):
         analyzer = SWIFT[SWIFT.index("private struct AnalyzerPlayView"):SWIFT.index("struct StartMenuView")]
         self.assertIn("Color(red: 0.025, green: 0.055, blue: 0.14)", analyzer)
         self.assertIn(".ignoresSafeArea()", analyzer)
-        self.assertIn("HStack(alignment: .top, spacing: 16)", analyzer)
-        self.assertGreaterEqual(analyzer.count("minHeight: proxy.size.height, alignment: .top"), 2)
+        self.assertIn("proxy.size.width >= 900 && proxy.size.height >= 620", analyzer)
+        self.assertNotIn("ScrollView", analyzer)
+        self.assertGreaterEqual(analyzer.count("maxHeight: .infinity, alignment: .center"), 2)
+        panel = SWIFT[SWIFT.index("private struct AnalyzerToolPanel"):SWIFT.index("private struct AnalyzerPlayView")]
+        self.assertIn("HStack(spacing: 8)", panel)
+        self.assertIn("ForEach(1...3", panel)
+        self.assertIn('Label("橡皮擦"', panel)
 
     def test_menu_background_uses_blue_base_and_persisted_photo(self):
         menu = SWIFT[SWIFT.index("struct StartMenuView"):SWIFT.index("private struct AnalyzerLandingView")]
