@@ -5284,41 +5284,82 @@ struct StartMenuView: View {
         save(value, forKey: "CW_Party_PlayerTypes")
     }
 
+    private func handleArchiveSelection(_ archive: GameSaveArchive) -> Bool {
+        let activeCount = archive.playerTypes.filter { $0.isEnabled }.count
+        if (selectedTab == 0 || selectedTab == 2) && activeCount > 2 {
+            unsupportedArchiveMessage = selectedTab == 0
+                ? "这是多人棋局，请切换到「派对」模式后再导入。"
+                : "分析器暂不支持多人棋局存档，请选择双人存档。"
+            return false
+        }
+        switch selectedTab {
+        case 2:
+            pendingAnalyzerArchive = archive
+        case 0:
+            game.isLocalDuelMode = true
+            game.restoreArchive(archive)
+            game.shouldNavigateToGame = true
+        default:
+            game.isLocalDuelMode = false
+            game.restoreArchive(archive)
+            game.shouldNavigateToGame = true
+        }
+        return true
+    }
+
+    private func loadSelectedBackground(_ item: PhotosPickerItem?) {
+        guard let item else { return }
+        Task {
+            if let data = try? await item.loadTransferable(type: Data.self),
+               let image = UIImage(data: data) {
+                await MainActor.run { game.saveCustomBackground(image) }
+            }
+        }
+    }
+
+    private var setupTabs: some View {
+        TabView(selection: $selectedTab) {
+            duelTab
+                .background(background)
+                .tabItem { Label("对弈", systemImage: "circle.grid.3x3.fill") }
+                .tag(0)
+            partyTab
+                .background(background)
+                .tabItem { Label("派对", systemImage: "party.popper.fill") }
+                .tag(1)
+            AnalyzerLandingView(game: game,
+                                boardSize: $analyzerBoardSize,
+                                selfColor: $analyzerSelfColor,
+                                hideTabBar: $hideAnalyzerTabBar,
+                                importedArchive: $pendingAnalyzerArchive)
+                .background(background)
+                .tabItem { Label("分析器", systemImage: "wrench.and.screwdriver.fill") }
+                .tag(2)
+        }
+        .background(Color.clear)
+        .toolbar(.hidden, for: .tabBar)
+    }
+
+    private var setupTabBar: some View {
+        HStack(spacing: 0) {
+            setupTabButton(title: "对弈", icon: "circle.grid.3x3.fill", tag: 0)
+            setupTabButton(title: "派对", icon: "party.popper.fill", tag: 1)
+            setupTabButton(title: "分析器", icon: "wrench.and.screwdriver.fill", tag: 2)
+        }
+        .frame(height: 58)
+        .background(Color(red: 0.025, green: 0.055, blue: 0.14).opacity(0.98))
+        .overlay(alignment: .top) { Rectangle().fill(Color.white.opacity(0.1)).frame(height: 0.5) }
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
                 background
-                TabView(selection: $selectedTab) {
-                    duelTab
-                        .background(background)
-                        .tabItem { Label("对弈", systemImage: "circle.grid.3x3.fill") }
-                        .tag(0)
-                    partyTab
-                        .background(background)
-                        .tabItem { Label("派对", systemImage: "party.popper.fill") }
-                        .tag(1)
-                    AnalyzerLandingView(game: game,
-                                        boardSize: $analyzerBoardSize,
-                                        selfColor: $analyzerSelfColor,
-                                        hideTabBar: $hideAnalyzerTabBar,
-                                        importedArchive: $pendingAnalyzerArchive)
-                        .background(background)
-                        .tabItem { Label("分析器", systemImage: "wrench.and.screwdriver.fill") }
-                        .tag(2)
-                }
-                .background(Color.clear)
-                .toolbar(.hidden, for: .tabBar)
+                setupTabs
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if !hideAnalyzerTabBar {
-                    HStack(spacing: 0) {
-                        setupTabButton(title: "对弈", icon: "circle.grid.3x3.fill", tag: 0)
-                        setupTabButton(title: "派对", icon: "party.popper.fill", tag: 1)
-                        setupTabButton(title: "分析器", icon: "wrench.and.screwdriver.fill", tag: 2)
-                    }
-                    .frame(height: 58)
-                    .background(Color(red: 0.025, green: 0.055, blue: 0.14).opacity(0.98))
-                    .overlay(alignment: .top) { Rectangle().fill(Color.white.opacity(0.1)).frame(height: 0.5) }
+                    setupTabBar
                 }
             }
             .toolbar {
@@ -5362,37 +5403,9 @@ struct StartMenuView: View {
             }
             .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhotosItem, matching: .images)
             .sheet(isPresented: $game.showArchivePickerSheet) {
-                ArchivePickerSheet(game: game, unsupportedMessage: $unsupportedArchiveMessage, onSelect: { archive in
-                    let activeCount = archive.playerTypes.filter { $0.isEnabled }.count
-                    if (selectedTab == 0 || selectedTab == 2) && activeCount > 2 {
-                        unsupportedArchiveMessage = selectedTab == 0
-                            ? "这是多人棋局，请切换到「派对」模式后再导入。"
-                            : "分析器暂不支持多人棋局存档，请选择双人存档。"
-                        return false
-                    }
-                    switch selectedTab {
-                    case 2:
-                        pendingAnalyzerArchive = archive
-                    case 0:
-                        game.isLocalDuelMode = true
-                        game.restoreArchive(archive)
-                        game.shouldNavigateToGame = true
-                    default:
-                        game.isLocalDuelMode = false
-                        game.restoreArchive(archive)
-                        game.shouldNavigateToGame = true
-                    }
-                    return true
-                })
+                ArchivePickerSheet(game: game, unsupportedMessage: $unsupportedArchiveMessage, onSelect: handleArchiveSelection)
             }
-            .onChange(of: selectedPhotosItem) { _, newItem in
-                guard let newItem else { return }
-                Task {
-                    if let data = try? await newItem.loadTransferable(type: Data.self), let image = UIImage(data: data) {
-                        await MainActor.run { game.saveCustomBackground(image) }
-                    }
-                }
-            }
+            .onChange(of: selectedPhotosItem) { _, item in loadSelectedBackground(item) }
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
             .onAppear(perform: restoreSetupPreferences)
