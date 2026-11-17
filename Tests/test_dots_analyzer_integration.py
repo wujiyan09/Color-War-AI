@@ -25,7 +25,7 @@ class NativeAnalyzerTests(unittest.TestCase):
 
     def test_native_board_has_corner_setup_editing_tools_and_responsive_layout(self):
         self.assertIn("initial[0][0] = Cell(owner: 0, count: 1)", SWIFT)
-        self.assertIn("initial[boardSize - 1][boardSize - 1] = Cell(owner: 1, count: 1)", SWIFT)
+        self.assertIn("initial[size - 1][size - 1] = Cell(owner: 1, count: 1)", SWIFT)
         self.assertIn("private enum AnalyzerBrush", SWIFT)
         self.assertIn("case piece(owner: Int, count: Int)", SWIFT)
         self.assertIn("case eraser", SWIFT)
@@ -33,6 +33,31 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn("proxy.size.width >= 780", SWIFT)
         self.assertIn("AnalyzerToolPanel", SWIFT)
         self.assertIn(".glassEffect(.regular.interactive()", SWIFT)
+
+    def test_analyzer_entry_hides_tabs_has_haptics_and_icon_back(self):
+        setup = SWIFT[SWIFT.index("private struct AnalyzerSetupView"):SWIFT.index("private struct AnalyzerBoardView")]
+        self.assertIn("Haptics.shared.lightImpact()", setup)
+        self.assertIn("hideTabBar = true", SWIFT[SWIFT.index("private struct AnalyzerLandingView"):SWIFT.index("// MARK: - 21.")])
+        back = SWIFT[SWIFT.index("private var backButton: some View", SWIFT.index("private struct AnalyzerPlayView")):SWIFT.index("private func tapCell", SWIFT.index("private struct AnalyzerPlayView"))]
+        self.assertIn('Image(systemName: "chevron.left")', back)
+        self.assertNotIn('Label("返回", systemImage:', back)
+
+    def test_analyzer_archive_import_does_not_restore_live_game(self):
+        archive_sheet = SWIFT[SWIFT.index("struct ArchivePickerSheet"):SWIFT.index("// MARK: - 25.")]
+        self.assertIn("var onSelect: ((GameSaveArchive) -> Void)? = nil", archive_sheet)
+        self.assertIn("onSelect(archive)", archive_sheet)
+        analyzer = SWIFT[SWIFT.index("private struct AnalyzerPlayView"):SWIFT.index("struct StartMenuView")]
+        self.assertIn("loadArchiveIntoAnalyzer", analyzer)
+        self.assertIn("Self.makeBoard(size: archive.boardSize", analyzer)
+        self.assertIn("selectedTab == 2 ? { archive in", SWIFT)
+
+    def test_menu_background_uses_blue_base_and_persisted_photo(self):
+        menu = SWIFT[SWIFT.index("struct StartMenuView"):SWIFT.index("private struct AnalyzerLandingView")]
+        self.assertIn("Color(red: 0.025, green: 0.055, blue: 0.14)", menu)
+        self.assertIn(".background(background)", menu)
+        self.assertIn(".scaledToFill()", menu)
+        self.assertIn("CW_CustomBackground.jpg", SWIFT)
+        self.assertIn("compressionQuality: 0.72", SWIFT)
 
     def test_analysis_runs_duel_solver_and_waits_for_opponent(self):
         self.assertIn("isLocalDuelMode: true", SWIFT)
@@ -47,7 +72,7 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn(".disabled(isLocked)", SWIFT)
         self.assertIn("isLocked: analysisStarted && !isPaused", SWIFT)
         self.assertIn("if !analysisStarted || isPaused", SWIFT)
-        self.assertIn("Label(\"返回\", systemImage: \"chevron.left\")", SWIFT)
+        self.assertIn('Image(systemName: "chevron.left")', SWIFT)
         self.assertIn(".glassEffect(.regular.interactive().tint(.darkNavyBlue), in: .capsule)", SWIFT)
         self.assertIn(".glassEffect(.regular.interactive(), in: .capsule)", SWIFT)
         self.assertGreaterEqual(SWIFT.count("Haptics.shared.lightImpact()"), 5)
@@ -63,7 +88,7 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn("localDuelMoveCount += 1", SWIFT)
         self.assertIn("currentMoveStartedAt = Date()", SWIFT)
         self.assertIn("hideTabBar = true", SWIFT)
-        self.assertIn("onBack: { started = false; hideTabBar = false }", SWIFT)
+        self.assertIn("onBack: { started = false; hideTabBar = false; importedArchive = nil }", SWIFT)
         self.assertIn("Bot 1", SWIFT)
         self.assertIn("Bot 2", SWIFT)
         self.assertIn("Bot 3", SWIFT)

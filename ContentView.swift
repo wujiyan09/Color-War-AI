@@ -2335,9 +2335,12 @@ final class GameModel: ObservableObject {
             self.emojis = Array(repeating: nil, count: PlayerPreset.maxPlayers)
         }
         
-        if let imgData = UserDefaults.standard.data(forKey: "CW_Saved_CustomBackground"),
-           !imgData.isEmpty,
-           let img = UIImage(data: imgData) {
+        let backgroundURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("CW_CustomBackground.jpg")
+        if let imgData = try? Data(contentsOf: backgroundURL), let img = UIImage(data: imgData) {
+            self.customBackgroundImage = img
+        } else if let legacyData = UserDefaults.standard.data(forKey: "CW_Saved_CustomBackground"),
+                  let img = UIImage(data: legacyData) {
             self.customBackgroundImage = img
         } else {
             self.customBackgroundImage = nil
@@ -2353,10 +2356,15 @@ final class GameModel: ObservableObject {
     
     func saveCustomBackground(_ image: UIImage?) {
         self.customBackgroundImage = image
-        if let img = image, let data = img.jpegData(compressionQuality: 0.8) {
-            UserDefaults.standard.set(data, forKey: "CW_Saved_CustomBackground")
+        let backgroundURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("CW_CustomBackground.jpg")
+        if let image, let data = image.jpegData(compressionQuality: 0.72) {
+            if (try? data.write(to: backgroundURL, options: .atomic)) != nil {
+                UserDefaults.standard.removeObject(forKey: "CW_Saved_CustomBackground")
+            }
         } else {
             UserDefaults.standard.removeObject(forKey: "CW_Saved_CustomBackground")
+            try? FileManager.default.removeItem(at: backgroundURL)
         }
     }
     
@@ -4481,7 +4489,10 @@ private struct AnalyzerSetupView: View {
             .padding(12)
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
 
-            Button(action: onStart) {
+            Button {
+                Haptics.shared.lightImpact()
+                onStart()
+            } label: {
                 Label("进入分析器", systemImage: "sparkle.magnifyingglass")
                     .font(.title3.bold())
                     .foregroundStyle(.white)
@@ -4649,9 +4660,10 @@ private struct AnalyzerToolPanel: View {
 
 private struct AnalyzerPlayView: View {
     @ObservedObject var game: GameModel
-    let boardSize: Int
+    @State private var boardSize: Int
     let selfColor: Int
     @Binding var hideTabBar: Bool
+    @Binding var importedArchive: GameSaveArchive?
     let onBack: () -> Void
     @State private var board: [[Cell]]
     @State private var selectedBrush: AnalyzerBrush = .piece(owner: 0, count: 1)
@@ -4665,16 +4677,51 @@ private struct AnalyzerPlayView: View {
     @State private var highlightedCell: Int?
     @State private var aiTask: Task<Void, Never>?
 
-    init(game: GameModel, boardSize: Int, selfColor: Int, hideTabBar: Binding<Bool>, onBack: @escaping () -> Void) {
+    init(game: GameModel, boardSize: Int, selfColor: Int, hideTabBar: Binding<Bool>,
+         importedArchive: Binding<GameSaveArchive?>, initialArchive: GameSaveArchive?, onBack: @escaping () -> Void) {
         self.game = game
-        self.boardSize = boardSize
+        let initialSize = initialArchive?.boardSize ?? boardSize
+        self._boardSize = State(initialValue: initialSize)
         self.selfColor = selfColor
         self._hideTabBar = hideTabBar
+        self._importedArchive = importedArchive
         self.onBack = onBack
-        var initial = Array(repeating: Array(repeating: Cell(owner: nil, count: 0), count: boardSize), count: boardSize)
-        initial[0][0] = Cell(owner: 0, count: 1)
-        initial[boardSize - 1][boardSize - 1] = Cell(owner: 1, count: 1)
-        _board = State(initialValue: initial)
+        _board = State(initialValue: Self.makeBoard(size: initialSize, selfColor: selfColor, archive: initialArchive))
+        _moveCount = State(initialValue: initialArchive?.localDuelMoveCount ?? 0)
+    }
+
+    private static func makeBoard(size: Int, selfColor: Int, archive: GameSaveArchive?) -> [[Cell]] {
+        guard let archive else {
+            var initial = Array(repeating: Array(repeating: Cell(owner: nil, count: 0), count: size), count: size)
+            initial[0][0] = Cell(owner: 0, count: 1)
+            initial[size - 1][size - 1] = Cell(owner: 1, count: 1)
+            return initial
+        }
+        return (0..<size).map { row in
+            (0..<size).map { column in
+                guard archive.board.indices.contains(row), archive.board[row].indices.contains(column) else {
+                    return Cell(owner: nil, count: 0)
+                }
+                let source = archive.board[row][column]
+                guard let owner = source.owner, source.count > 0 else { return Cell(owner: nil, count: 0) }
+                let mappedOwner = owner == archive.currentPlayer ? selfColor : 1 - selfColor
+                return Cell(owner: mappedOwner, count: source.count)
+            }
+        }
+    }
+
+    private func loadArchiveIntoAnalyzer(_ archive: GameSaveArchive) {
+        aiTask?.cancel()
+        boardSize = archive.boardSize
+        board = Self.makeBoard(size: archive.boardSize, selfColor: selfColor, archive: archive)
+        moveCount = archive.localDuelMoveCount ?? 0
+        matchStartedAt = Date()
+        currentMoveStartedAt = matchStartedAt
+        highlightedCell = nil
+        waitingForOpponent = false
+        isThinking = false
+        analysisStarted = false
+        isPaused = false
     }
 
     private var moveCounter: some View {
@@ -4708,14 +4755,14 @@ private struct AnalyzerPlayView: View {
                 Haptics.shared.lightImpact()
                 onBack()
             } label: {
-                Label("返回", systemImage: "chevron.left")
+                Image(systemName: "chevron.left")
                     .font(.subheadline.bold())
                     .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
-                    .glassEffect(.regular.interactive(), in: .capsule)
+                    .padding(12)
+                    .glassEffect(.regular.interactive(), in: .circle)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("返回")
             Spacer()
         }
     }
@@ -4809,9 +4856,9 @@ private struct AnalyzerPlayView: View {
     }
 
     private func startOrResume() {
+        hideTabBar = true
         if !analysisStarted {
             analysisStarted = true
-            hideTabBar = true
             matchStartedAt = Date()
             currentMoveStartedAt = matchStartedAt
             isPaused = false
@@ -4876,6 +4923,9 @@ private struct AnalyzerPlayView: View {
                 .padding(.vertical, 8)
             }
         }
+        .onChange(of: importedArchive?.id) { _, _ in
+            if let archive = importedArchive { loadArchiveIntoAnalyzer(archive) }
+        }
         .onDisappear { aiTask?.cancel() }
     }
 }
@@ -4892,6 +4942,7 @@ struct StartMenuView: View {
     @State private var selectedPhotosItem: PhotosPickerItem?
     @State private var analyzerBoardSize = 6
     @State private var analyzerSelfColor = 0
+    @State private var pendingAnalyzerArchive: GameSaveArchive?
 
     private func startGame(isLocalDuel: Bool = false) {
         game.isLocalDuelMode = isLocalDuel
@@ -4922,7 +4973,7 @@ struct StartMenuView: View {
                         .scaledToFill()
                         .frame(width: proxy.size.width, height: proxy.size.height)
                         .clipped()
-                        .overlay(Color(red: 0.015, green: 0.035, blue: 0.09).opacity(0.48))
+                        .overlay(Color(red: 0.015, green: 0.035, blue: 0.09).opacity(0.24))
                 }
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
@@ -4971,15 +5022,19 @@ struct StartMenuView: View {
                 background
                 TabView(selection: $selectedTab) {
                     duelTab
+                        .background(background)
                         .tabItem { Label("对弈", systemImage: "circle.grid.3x3.fill") }
                         .tag(0)
                     partyTab
+                        .background(background)
                         .tabItem { Label("派对", systemImage: "party.popper.fill") }
                         .tag(1)
                     AnalyzerLandingView(game: game,
                                         boardSize: $analyzerBoardSize,
                                         selfColor: $analyzerSelfColor,
-                                        hideTabBar: $hideAnalyzerTabBar)
+                                        hideTabBar: $hideAnalyzerTabBar,
+                                        importedArchive: $pendingAnalyzerArchive)
+                        .background(background)
                         .tabItem {
                             Label { Text("分析器") } icon: {
                                 ZStack(alignment: .bottomTrailing) {
@@ -5036,7 +5091,11 @@ struct StartMenuView: View {
                 }
             }
             .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhotosItem, matching: .images)
-            .sheet(isPresented: $game.showArchivePickerSheet) { ArchivePickerSheet(game: game) }
+            .sheet(isPresented: $game.showArchivePickerSheet) {
+                ArchivePickerSheet(game: game, onSelect: selectedTab == 2 ? { archive in
+                    pendingAnalyzerArchive = archive
+                } : nil)
+            }
             .onChange(of: selectedPhotosItem) { _, newItem in
                 guard let newItem else { return }
                 Task {
@@ -5056,14 +5115,16 @@ private struct AnalyzerLandingView: View {
     @Binding var boardSize: Int
     @Binding var selfColor: Int
     @Binding var hideTabBar: Bool
+    @Binding var importedArchive: GameSaveArchive?
     @State private var started = false
 
     var body: some View {
         Group {
             if started {
                 AnalyzerPlayView(game: game, boardSize: boardSize, selfColor: selfColor,
-                                 hideTabBar: $hideTabBar,
-                                 onBack: { started = false; hideTabBar = false })
+                                 hideTabBar: $hideTabBar, importedArchive: $importedArchive,
+                                 initialArchive: importedArchive,
+                                 onBack: { started = false; hideTabBar = false; importedArchive = nil })
             } else {
                 VStack(spacing: 16) {
                     Text("COLOR WAR")
@@ -5071,13 +5132,19 @@ private struct AnalyzerLandingView: View {
                         .foregroundStyle(.white)
                     AnalyzerSetupView(boardSize: $boardSize, selfColor: $selfColor) {
                         started = true
-                        hideTabBar = false
+                        hideTabBar = true
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .background(Color.clear)
+        .onChange(of: importedArchive?.id) { _, newID in
+            if newID != nil {
+                started = true
+                hideTabBar = true
+            }
+        }
     }
 }
 
@@ -5488,6 +5555,7 @@ struct PlayerTakeoverSheet: View {
 
 struct ArchivePickerSheet: View {
     @ObservedObject var game: GameModel
+    var onSelect: ((GameSaveArchive) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var archives: [GameSaveArchive] = []
     
@@ -5502,9 +5570,13 @@ struct ArchivePickerSheet: View {
                 } else {
                     ForEach(archives) { archive in
                         Button(action: {
-                            game.restoreArchive(archive)
+                            if let onSelect {
+                                onSelect(archive)
+                            } else {
+                                game.restoreArchive(archive)
+                                game.shouldNavigateToGame = true
+                            }
                             dismiss()
-                            game.shouldNavigateToGame = true
                         }) {
                             VStack(alignment: .leading, spacing: 6) {
                                 Text(archive.displaySummary)
