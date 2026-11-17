@@ -5129,6 +5129,7 @@ struct StartMenuView: View {
     @State private var duelPlayerTwoType: PlayerControlType = UserDefaults.standard.data(forKey: "CW_Duel_PlayerTwo")
         .flatMap { try? JSONDecoder().decode(PlayerControlType.self, from: $0) } ?? .human
     @State private var hideAnalyzerTabBar = false
+    @State private var navigationPath: [StartMenuDestination] = []
     @State private var showPhotoPicker = false
     @State private var selectedPhotosItem: PhotosPickerItem?
     @State private var analyzerBoardSize = {
@@ -5202,6 +5203,12 @@ struct StartMenuView: View {
             Text("COLOR WAR")
                 .font(.system(size: 36, weight: .black, design: .rounded))
                 .foregroundStyle(.white)
+            Picker("派对模式", selection: $selectedPartyMode) {
+                Text("多人").tag(0)
+                Text("联机").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 440)
             if selectedPartyMode == 0 {
                 LocalGameSetupView(game: game) {
                     game.prepareLocalPlayerNamesForGame()
@@ -5284,6 +5291,11 @@ struct StartMenuView: View {
         save(value, forKey: "CW_Party_PlayerTypes")
     }
 
+    private func openAnalyzer() {
+        hideAnalyzerTabBar = true
+        navigationPath.append(.analyzerPlay)
+    }
+
     private func handleArchiveSelection(_ archive: GameSaveArchive) -> Bool {
         let activeCount = archive.playerTypes.filter { $0.isEnabled }.count
         if (selectedTab == 0 || selectedTab == 2) && activeCount > 2 {
@@ -5295,6 +5307,7 @@ struct StartMenuView: View {
         switch selectedTab {
         case 2:
             pendingAnalyzerArchive = archive
+            openAnalyzer()
         case 0:
             game.isLocalDuelMode = true
             game.restoreArchive(archive)
@@ -5330,8 +5343,7 @@ struct StartMenuView: View {
             AnalyzerLandingView(game: game,
                                 boardSize: $analyzerBoardSize,
                                 selfColor: $analyzerSelfColor,
-                                hideTabBar: $hideAnalyzerTabBar,
-                                importedArchive: $pendingAnalyzerArchive)
+                                onStart: openAnalyzer)
                 .background(background)
                 .tabItem { Label("分析器", systemImage: "wrench.and.screwdriver.fill") }
                 .tag(2)
@@ -5362,16 +5374,6 @@ struct StartMenuView: View {
                 }
             }
         }
-        if selectedTab == 1 {
-            ToolbarItem(placement: .principal) {
-                Picker("派对模式", selection: $selectedPartyMode) {
-                    Text("多人").tag(0)
-                    Text("联机").tag(1)
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 190)
-            }
-        }
         if selectedTab == 0 || (selectedTab == 1 && selectedPartyMode == 0) {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
@@ -5396,9 +5398,6 @@ struct StartMenuView: View {
         ZStack {
             background
             setupTabs
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if !hideAnalyzerTabBar { setupTabBar }
         }
         .toolbar { setupToolbar }
     }
@@ -5450,48 +5449,53 @@ struct StartMenuView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $navigationPath) {
             menuWithAnalyzerPreferences
+                .navigationDestination(for: StartMenuDestination.self) { destination in
+                    switch destination {
+                    case .analyzerPlay:
+                        AnalyzerPlayView(game: game, boardSize: analyzerBoardSize,
+                                         selfColor: $analyzerSelfColor,
+                                         hideTabBar: $hideAnalyzerTabBar,
+                                         importedArchive: $pendingAnalyzerArchive,
+                                         initialArchive: pendingAnalyzerArchive,
+                                         onBack: {
+                                             if !navigationPath.isEmpty { navigationPath.removeLast() }
+                                             hideAnalyzerTabBar = false
+                                             pendingAnalyzerArchive = nil
+                                         })
+                            .toolbar(.hidden, for: .navigationBar)
+                            .toolbar(.hidden, for: .tabBar)
+                            .ignoresSafeArea()
+                    }
+                }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if navigationPath.isEmpty && !hideAnalyzerTabBar { setupTabBar }
         }
     }
 
+}
+
+private enum StartMenuDestination: Hashable {
+    case analyzerPlay
 }
 
 private struct AnalyzerLandingView: View {
     @ObservedObject var game: GameModel
     @Binding var boardSize: Int
     @Binding var selfColor: Int
-    @Binding var hideTabBar: Bool
-    @Binding var importedArchive: GameSaveArchive?
-    @State private var started = false
+    let onStart: () -> Void
 
     var body: some View {
-        Group {
-            if started {
-                AnalyzerPlayView(game: game, boardSize: boardSize, selfColor: $selfColor,
-                                 hideTabBar: $hideTabBar, importedArchive: $importedArchive,
-                                 initialArchive: importedArchive,
-                                 onBack: { started = false; hideTabBar = false; importedArchive = nil })
-            } else {
-                VStack(spacing: 16) {
-                    Text("COLOR WAR")
-                        .font(.system(size: 36, weight: .black, design: .rounded))
-                        .foregroundStyle(.white)
-                    AnalyzerSetupView(boardSize: $boardSize, selfColor: $selfColor) {
-                        started = true
-                        hideTabBar = true
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+        VStack(spacing: 16) {
+            Text("COLOR WAR")
+                .font(.system(size: 36, weight: .black, design: .rounded))
+                .foregroundStyle(.white)
+            AnalyzerSetupView(boardSize: $boardSize, selfColor: $selfColor, onStart: onStart)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.clear)
-        .onChange(of: importedArchive?.id) { _, newID in
-            if newID != nil {
-                started = true
-                hideTabBar = true
-            }
-        }
     }
 }
 

@@ -39,7 +39,14 @@ class NativeAnalyzerTests(unittest.TestCase):
     def test_analyzer_entry_hides_tabs_has_haptics_and_icon_back(self):
         setup = SWIFT[SWIFT.index("private struct AnalyzerSetupView"):SWIFT.index("private struct AnalyzerBoardView")]
         self.assertIn("Haptics.shared.lightImpact()", setup)
-        self.assertIn("hideTabBar = true", SWIFT[SWIFT.index("private struct AnalyzerLandingView"):SWIFT.index("// MARK: - 21.")])
+        menu = SWIFT[SWIFT.index("struct StartMenuView"):SWIFT.index("private struct AnalyzerLandingView")]
+        landing = SWIFT[SWIFT.index("private struct AnalyzerLandingView"):SWIFT.index("// MARK: - 21.")]
+        self.assertIn("navigationPath.append(.analyzerPlay)", menu)
+        self.assertIn("NavigationStack(path: $navigationPath)", menu)
+        self.assertIn(".navigationDestination(for: StartMenuDestination.self)", menu)
+        self.assertIn("if navigationPath.isEmpty && !hideAnalyzerTabBar { setupTabBar }", menu)
+        self.assertIn("onStart: openAnalyzer", menu)
+        self.assertIn("AnalyzerSetupView(boardSize: $boardSize, selfColor: $selfColor, onStart: onStart)", landing)
         back = SWIFT[SWIFT.index("private var backButton: some View", SWIFT.index("private struct AnalyzerPlayView")):SWIFT.index("private func tapCell", SWIFT.index("private struct AnalyzerPlayView"))]
         self.assertIn('Image(systemName: "chevron.left")', back)
         self.assertNotIn('Label("返回", systemImage:', back)
