@@ -30,13 +30,25 @@ enum PlayerControlType: String, CaseIterable, Identifiable, Codable {
     case human = "真人"
     case mathNightmare = "算法-噩梦"
     case enhancedNightmare = "算法-噩梦 (加强版)"
+    case driveBot = "drive-bot"
     case p2pNetwork = "网络玩家"
     case disabled = "未加入"
     
     var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .human: return "真人"
+        case .mathNightmare: return "Bot 1"
+        case .enhancedNightmare: return "Bot 2"
+        case .driveBot: return "Bot 3"
+        case .p2pNetwork: return "网络玩家"
+        case .disabled: return "未加入"
+        }
+    }
     
     var isAI: Bool {
-        self == .mathNightmare || self == .enhancedNightmare
+        self == .mathNightmare || self == .enhancedNightmare || self == .driveBot
     }
     
     var isEnabled: Bool {
@@ -1206,7 +1218,7 @@ struct AISolver: Sendable {
         self.aiLevel = aiLevel
         self.isLocalDuelMode = isLocalDuelMode
         self.localDuelMovesPlayed = localDuelMovesPlayed
-        self.searchDeadline = ProcessInfo.processInfo.systemUptime + (isLocalDuelMode ? DriveDuelSearch.timeBudget(level: aiLevel.rawValue, movesPlayed: localDuelMovesPlayed) : aiLevel.searchTimeBudget)
+        self.searchDeadline = ProcessInfo.processInfo.systemUptime + (playerType == .driveBot ? DriveDuelSearch.timeBudget(level: aiLevel.rawValue, movesPlayed: localDuelMovesPlayed) : aiLevel.searchTimeBudget)
         
         var flat = [SimCell]()
         flat.reserveCapacity(boardSize * boardSize)
@@ -1237,7 +1249,7 @@ struct AISolver: Sendable {
 
     func calculateBestMove() async -> (Int, Int)? {
         if searchStopped { return nil }
-        if isLocalDuelMode {
+        if playerType == .driveBot {
             return DriveDuelSearch.bestMove(board: board, activePlayers: activePlayers, currentPlayer: currentPlayer, hasEntered: hasEntered, level: aiLevel.rawValue, movesPlayed: localDuelMovesPlayed)
         }
         
@@ -2133,6 +2145,8 @@ final class GameModel: ObservableObject {
     @Published var activeOnlineMode: ActiveOnlineMode = .none
     var isLocalDuelMode = false
     @Published private(set) var localDuelMoveCount = 0
+    @Published private(set) var matchStartedAt: Date = Date()
+    @Published private(set) var currentMoveStartedAt: Date = Date()
     
     @Published var customBackgroundImage: UIImage? = nil
     @Published var shouldNavigateToGame: Bool = false
@@ -2165,6 +2179,10 @@ final class GameModel: ObservableObject {
     }
     
     func beginGame() {
+        if !isGameInPlay {
+            matchStartedAt = Date()
+            currentMoveStartedAt = matchStartedAt
+        }
         isGameInPlay = true
         checkAndRunAITurn()
     }
@@ -2211,7 +2229,7 @@ final class GameModel: ObservableObject {
         if isOnline { return [] }
 
         if !isOnline && !isInLobby && !isGameInPlay {
-            return [.human, .mathNightmare, .enhancedNightmare, .disabled]
+            return [.human, .mathNightmare, .enhancedNightmare, .driveBot, .disabled]
         }
 
         let isSeat0 = (idx == 0)
@@ -2355,7 +2373,7 @@ final class GameModel: ObservableObject {
             board: board,
             hasEntered: hasEntered,
             eliminated: eliminated,
-            localDuelMoveCount: isLocalDuelMode ? localDuelMoveCount : nil
+            localDuelMoveCount: localDuelMoveCount
         )
         var list = loadAllArchives()
         list.insert(archive, at: 0)
@@ -2802,6 +2820,8 @@ final class GameModel: ObservableObject {
         winnerIndex = nil
         isProcessingCascade = false
         localDuelMoveCount = 0
+        matchStartedAt = Date()
+        currentMoveStartedAt = matchStartedAt
         
         let active = activePlayerIndices
         guard !active.isEmpty else { return }
@@ -2878,9 +2898,19 @@ final class GameModel: ObservableObject {
               !isGameInPlay,
               let seat = playerTypes.firstIndex(of: .disabled) else { return false }
 
-        let aiType: PlayerControlType = Bool.random() ? .mathNightmare : .enhancedNightmare
-        playerNames[seat] = "\(aiType.rawValue) \(seat + 1)"
-        playerTypes[seat] = aiType
+        return addAIToRemoteLobby(type: .mathNightmare)
+    }
+
+    @discardableResult
+    func addAIToRemoteLobby(type: PlayerControlType) -> Bool {
+        guard type.isAI,
+              activeOnlineMode == .remoteWS,
+              WebSocketNetworkManager.shared.isConnected,
+              WebSocketNetworkManager.shared.isHost,
+              !isGameInPlay,
+              let seat = playerTypes.firstIndex(of: .disabled) else { return false }
+        playerNames[seat] = "\(type.displayName) \(seat + 1)"
+        playerTypes[seat] = type
         syncRoomConfigToPeers()
         return true
     }
@@ -3080,10 +3110,8 @@ final class GameModel: ObservableObject {
             recalculateOrbCounts()
             
             isProcessingCascade = false
-            if isLocalDuelMode && activePlayerIndices.count == 2
-                && !P2PNetworkManager.shared.isConnected && !WebSocketNetworkManager.shared.isConnected {
-                localDuelMoveCount += 1
-            }
+            localDuelMoveCount += 1
+            currentMoveStartedAt = Date()
             
             if checkGameOver() {
                 endGame()
@@ -3681,7 +3709,7 @@ struct LocalGameSetupView: View {
                     Spacer(minLength: 4)
                     
                     if game.isOnlineMultiplayer {
-                        Text(game.playerTypes[safe: idx]?.rawValue ?? "未加入")
+                        Text(game.playerTypes[safe: idx]?.displayName ?? "未加入")
                             .font(.caption)
                             .foregroundColor(.white.opacity(0.65))
                     } else {
@@ -3690,7 +3718,7 @@ struct LocalGameSetupView: View {
                             set: { game.updatePlayerType(at: idx, to: $0) }
                         )) {
                             ForEach(game.validSelectableTypes(forPlayerIndex: idx, isInLobby: false)) { type in
-                                Text(type.rawValue).tag(type)
+                                Text(type.displayName).tag(type)
                             }
                         }
                         .pickerStyle(.menu)
@@ -3733,37 +3761,6 @@ struct LocalGameSetupView: View {
             .padding(12)
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             
-            VStack(spacing: 8) {
-                HStack {
-                    Text("🧠 AI 思考算力/深度:")
-                        .font(.subheadline)
-                        .bold()
-                        .foregroundColor(.white)
-                    Spacer()
-                    Text(game.aiDifficultyLevel.title)
-                        .font(.caption)
-                        .bold()
-                        .foregroundColor(.cyan)
-                }
-                
-                Slider(
-                    value: Binding<Double>(
-                        get: { Double(game.aiDifficultyLevel.rawValue) },
-                        set: { game.aiDifficultyLevel = AIDifficultyLevel(rawValue: Int($0)) ?? .balanced }
-                    ),
-                    in: 1...4,
-                    step: 1
-                )
-                .tint(Color.darkNavyBlue)
-                
-                Text(game.aiDifficultyLevel.description)
-                    .font(.caption2)
-                    .foregroundColor(.gray)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .padding(12)
-            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
-            
             // Keep the player rows in one stable view hierarchy. ViewThatFits previously
             // replaced this subtree with a second copy when the keyboard reduced the
             // available height, which detached the focused TextField and dismissed the
@@ -3800,8 +3797,8 @@ struct LocalGameSetupView: View {
 
 struct DualPlayerSetupView: View {
     @ObservedObject var game: GameModel
-    @Binding var playerOneIsBot: Bool
-    @Binding var playerTwoIsBot: Bool
+    @Binding var playerOneType: PlayerControlType
+    @Binding var playerTwoType: PlayerControlType
     let onStartGame: () -> Void
 
     private let supportedBoardSizes = [6, 9, 12]
@@ -3810,30 +3807,36 @@ struct DualPlayerSetupView: View {
         supportedBoardSizes.min { abs($0 - size) < abs($1 - size) } ?? 6
     }
 
-    private func playerCard(title: String, isBot: Binding<Bool>, color: Color, icon: String) -> some View {
+    private let selectableBotTypes: [PlayerControlType] = [.human, .mathNightmare, .enhancedNightmare, .driveBot]
+
+    private func playerCard(title: String, type: Binding<PlayerControlType>, color: Color, icon: String) -> some View {
         Button {
             Haptics.shared.lightImpact()
             withAnimation(.spring(response: 0.32, dampingFraction: 0.72)) {
-                isBot.wrappedValue.toggle()
+                let current = selectableBotTypes.firstIndex(of: type.wrappedValue) ?? 0
+                type.wrappedValue = selectableBotTypes[(current + 1) % selectableBotTypes.count]
             }
         } label: {
             VStack(spacing: 10) {
-                Image(systemName: isBot.wrappedValue ? "cpu" : icon)
+                Image(systemName: type.wrappedValue.isAI ? "cpu" : icon)
                     .font(.system(size: 30, weight: .semibold))
                     .foregroundStyle(color)
                 Text(title)
                     .font(.headline.bold())
                     .foregroundStyle(.white)
-                Text(isBot.wrappedValue ? "BOT · 点击切换真人" : "真人 · 点击切换 BOT")
+                Text(type.wrappedValue.displayName)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.86))
+                Text("重复点按切换")
                     .font(.caption.weight(.medium))
-                    .foregroundStyle(.white.opacity(0.72))
+                    .foregroundStyle(.white.opacity(0.62))
             }
             .frame(maxWidth: .infinity, minHeight: 150)
             .contentShape(RoundedRectangle(cornerRadius: PlayerPreset.cardCornerRadius))
             .glassEffect(.regular.interactive().tint(color.opacity(0.18)), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(title)，\(isBot.wrappedValue ? "BOT" : "真人")，点按切换")
+        .accessibilityLabel("\(title)，\(type.wrappedValue.displayName)，重复点按切换")
     }
 
     var body: some View {
@@ -3859,8 +3862,8 @@ struct DualPlayerSetupView: View {
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
 
             HStack(spacing: 12) {
-                playerCard(title: "玩家 1", isBot: $playerOneIsBot, color: .red, icon: "person.fill")
-                playerCard(title: "玩家 2", isBot: $playerTwoIsBot, color: .cyan, icon: "person.fill")
+                playerCard(title: "玩家 1", type: $playerOneType, color: .red, icon: "person.fill")
+                playerCard(title: "玩家 2", type: $playerTwoType, color: .cyan, icon: "person.fill")
             }
 
             Button(action: onStartGame) {
@@ -4172,27 +4175,6 @@ struct RoomLobbyView: View {
                     )
                     .tint(Color.darkNavyBlue)
 
-                    if game.activeOnlineMode == .remoteWS {
-                        HStack {
-                            Text("🧠 AI 算力等级:")
-                                .font(.caption)
-                                .bold()
-                                .foregroundColor(.white)
-                            Spacer()
-                            Text(game.aiDifficultyLevel.webTitle)
-                                .font(.caption2.bold())
-                                .foregroundColor(.cyan)
-                        }
-                        Slider(
-                            value: Binding<Double>(
-                                get: { Double(game.aiDifficultyLevel.rawValue) },
-                                set: { game.aiDifficultyLevel = AIDifficultyLevel(rawValue: Int($0)) ?? .balanced }
-                            ),
-                            in: 1...4,
-                            step: 1
-                        )
-                        .tint(Color.darkNavyBlue)
-                    }
                     
                     Toggle(isOn: $game.isRandomFirstPlayer) {
                         Text("随机挑选先手").foregroundColor(.white).font(.caption).bold()
@@ -4247,14 +4229,14 @@ struct RoomLobbyView: View {
                                         set: { game.updatePlayerType(at: idx, to: $0) }
                                     )) {
                                         ForEach(selectableTypes) { type in
-                                            Text(type.rawValue).tag(type)
+                                            Text(type.displayName).tag(type)
                                         }
                                     }
                                     .pickerStyle(.menu)
                                     .tint(.cyan)
                                     .frame(maxWidth: 170, alignment: .trailing)
                                 } else {
-                                    Text(game.playerTypes[idx].rawValue)
+                                    Text(game.playerTypes[idx].displayName)
                                         .font(.caption)
                                         .foregroundColor(.white.opacity(0.6))
                                 }
@@ -4280,22 +4262,21 @@ struct RoomLobbyView: View {
             
             if isHost {
                 if !game.isOnlineMultiplayer || (game.activeOnlineMode == .remoteWS && wsManager.isHost) {
-                    Button(action: {
-                        if game.isOnlineMultiplayer {
-                            game.addAIToRemoteLobby()
-                        } else if let disabledIdx = game.playerTypes.firstIndex(of: .disabled) {
-                            let randomType: PlayerControlType = Bool.random() ? .mathNightmare : .enhancedNightmare
-                            game.playerNames[disabledIdx] = "\(randomType.rawValue) \(disabledIdx + 1)"
-                            game.updatePlayerType(at: disabledIdx, to: randomType)
+                    Menu {
+                        ForEach([PlayerControlType.mathNightmare, .enhancedNightmare, .driveBot]) { type in
+                            Button(type.displayName) {
+                                if game.isOnlineMultiplayer {
+                                    _ = game.addAIToRemoteLobby(type: type)
+                                } else if let seat = game.playerTypes.firstIndex(of: .disabled) {
+                                    game.playerNames[seat] = "\(type.displayName) \(seat + 1)"
+                                    game.updatePlayerType(at: seat, to: type)
+                                }
+                            }
                         }
-                    }) {
-                        HStack {
-                            Image(systemName: "plus.circle.fill")
-                            Text("增加 AI 人机 (随机噩梦/加强版)")
-                        }
-                        .font(.subheadline.bold())
-                        .foregroundColor(.cyan)
-                        .padding(.vertical, 4)
+                    } label: {
+                        Label("添加 Bot", systemImage: "plus.circle.fill")
+                            .font(.subheadline.bold())
+                            .foregroundColor(.cyan)
                     }
                     .disabled(game.playerTypes.allSatisfy { $0 != .disabled } || game.isGameInPlay)
                     .opacity(game.playerTypes.allSatisfy { $0 != .disabled } || game.isGameInPlay ? 0.45 : 1.0)
@@ -4500,7 +4481,7 @@ private struct AnalyzerSetupView: View {
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
 
             Button(action: onStart) {
-                Label("进入分析", systemImage: "sparkle.magnifyingglass")
+                Label("进入分析器", systemImage: "sparkle.magnifyingglass")
                     .font(.title3.bold())
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
@@ -4637,7 +4618,7 @@ private struct AnalyzerToolPanel: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 11)
                     .contentShape(Capsule())
-                    .glassEffect(.regular.tint(.darkNavyBlue).interactive(), in: .capsule)
+                    .glassEffect(.regular.interactive().tint(.darkNavyBlue), in: .capsule)
             }
             .buttonStyle(.plain)
             .disabled(isThinking || (isStarted && !isPaused))
@@ -4663,6 +4644,8 @@ private struct AnalyzerPlayView: View {
     @ObservedObject var game: GameModel
     let boardSize: Int
     let selfColor: Int
+    @Binding var hideTabBar: Bool
+    let onBack: () -> Void
     @State private var board: [[Cell]]
     @State private var selectedBrush: AnalyzerBrush = .piece(owner: 0, count: 1)
     @State private var analysisStarted = false
@@ -4670,13 +4653,17 @@ private struct AnalyzerPlayView: View {
     @State private var isThinking = false
     @State private var waitingForOpponent = false
     @State private var moveCount = 0
+    @State private var matchStartedAt = Date()
+    @State private var currentMoveStartedAt = Date()
     @State private var highlightedCell: Int?
     @State private var aiTask: Task<Void, Never>?
 
-    init(game: GameModel, boardSize: Int, selfColor: Int) {
+    init(game: GameModel, boardSize: Int, selfColor: Int, hideTabBar: Binding<Bool>, onBack: @escaping () -> Void) {
         self.game = game
         self.boardSize = boardSize
         self.selfColor = selfColor
+        self._hideTabBar = hideTabBar
+        self.onBack = onBack
         var initial = Array(repeating: Array(repeating: Cell(owner: nil, count: 0), count: boardSize), count: boardSize)
         initial[0][0] = Cell(owner: 0, count: 1)
         initial[boardSize - 1][boardSize - 1] = Cell(owner: 1, count: 1)
@@ -4684,16 +4671,47 @@ private struct AnalyzerPlayView: View {
     }
 
     private var moveCounter: some View {
-        Label("已走 \(moveCount) 步", systemImage: "arrow.left.arrow.right")
-            .font(.subheadline.bold())
+        TimelineView(.periodic(from: .now, by: 1)) { timeline in
+            let now = timeline.date
+            HStack {
+                Text("本局 \(Self.duration(now.timeIntervalSince(matchStartedAt)))")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("已走 \(moveCount) 步")
+                    .fontWeight(.bold)
+                    .frame(maxWidth: .infinity)
+                Text("本步 \(Self.duration(now.timeIntervalSince(currentMoveStartedAt)))")
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .font(.caption.weight(.semibold).monospacedDigit())
             .foregroundStyle(.white)
-            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 10)
             .padding(.vertical, 9)
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+        }
+    }
+
+    private static func duration(_ interval: TimeInterval) -> String {
+        let seconds = max(0, Int(interval))
+        return String(format: "%02d:%02d", seconds / 60, seconds % 60)
+    }
+
+    private var backButton: some View {
+        HStack {
+            Button(action: onBack) {
+                Label("返回", systemImage: "chevron.left")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .glassEffect(.regular.interactive(), in: .capsule)
+            }
+            .buttonStyle(.plain)
+            Spacer()
+        }
     }
 
     private func tapCell(row: Int, column: Int) {
-        if !analysisStarted {
+        if !analysisStarted || isPaused {
             switch selectedBrush {
             case let .piece(owner, count): board[row][column] = Cell(owner: owner, count: count)
             case .eraser: board[row][column] = Cell(owner: nil, count: 0)
@@ -4706,6 +4724,7 @@ private struct AnalyzerPlayView: View {
         applyMove(row: row, column: column, owner: 1 - selfColor)
         waitingForOpponent = false
         moveCount += 1
+        currentMoveStartedAt = Date()
         runSelfMove()
     }
 
@@ -4749,7 +4768,7 @@ private struct AnalyzerPlayView: View {
             boardSize: boardSize,
             activePlayers: [0, 1],
             currentPlayer: selfColor,
-            playerType: .mathNightmare,
+            playerType: .driveBot,
             aiLevel: difficulty,
             board: board,
             hasEntered: [true, true],
@@ -4771,6 +4790,7 @@ private struct AnalyzerPlayView: View {
             applyMove(row: row, column: column, owner: selfColor)
             highlightedCell = row * boardSize + column
             moveCount += 1
+            currentMoveStartedAt = Date()
             waitingForOpponent = true
             isThinking = false
         }
@@ -4779,6 +4799,9 @@ private struct AnalyzerPlayView: View {
     private func startOrResume() {
         if !analysisStarted {
             analysisStarted = true
+            hideTabBar = true
+            matchStartedAt = Date()
+            currentMoveStartedAt = matchStartedAt
             isPaused = false
             selectedBrush = .piece(owner: 0, count: 1)
             runSelfMove()
@@ -4804,12 +4827,13 @@ private struct AnalyzerPlayView: View {
                     if horizontal {
                         HStack(alignment: .top, spacing: 16) {
                             VStack(spacing: 8) {
+                                backButton
                                 AnalyzerBoardView(boardSize: boardSize, board: board, highlightedCell: highlightedCell,
                                                  maxSide: maxBoardSide) { row, column in tapCell(row: row, column: column) }
                                 moveCounter
                             }
                             AnalyzerToolPanel(brush: $selectedBrush,
-                                              isLocked: analysisStarted,
+                                              isLocked: analysisStarted && !isPaused,
                                               isStarted: analysisStarted,
                                               isPaused: isPaused,
                                               isThinking: isThinking,
@@ -4820,11 +4844,12 @@ private struct AnalyzerPlayView: View {
                         .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .center)
                     } else {
                         VStack(spacing: 10) {
+                            backButton
                             AnalyzerBoardView(boardSize: boardSize, board: board, highlightedCell: highlightedCell,
                                              maxSide: maxBoardSide) { row, column in tapCell(row: row, column: column) }
                             moveCounter.frame(maxWidth: min(maxBoardSide, 600))
                             AnalyzerToolPanel(brush: $selectedBrush,
-                                              isLocked: analysisStarted,
+                                              isLocked: analysisStarted && !isPaused,
                                               isStarted: analysisStarted,
                                               isPaused: isPaused,
                                               isThinking: isThinking,
@@ -4848,8 +4873,9 @@ struct StartMenuView: View {
     @Binding var selectedTab: Int
     @Binding var isSpinningRandomWheel: Bool
     @State private var selectedPartyMode = 0
-    @State private var duelPlayerOneIsBot = false
-    @State private var duelPlayerTwoIsBot = false
+    @State private var duelPlayerOneType: PlayerControlType = .human
+    @State private var duelPlayerTwoType: PlayerControlType = .human
+    @State private var hideAnalyzerTabBar = false
     @State private var showPhotoPicker = false
     @State private var selectedPhotosItem: PhotosPickerItem?
     @State private var analyzerBoardSize = 6
@@ -4867,25 +4893,30 @@ struct StartMenuView: View {
     }
 
     private func startDuelGame() {
-        let first: PlayerControlType = duelPlayerOneIsBot ? .mathNightmare : .human
-        let second: PlayerControlType = duelPlayerTwoIsBot ? .mathNightmare : .human
+        let first = duelPlayerOneType
+        let second = duelPlayerTwoType
         game.playerTypes = [first, second] + Array(repeating: .disabled, count: max(0, PlayerPreset.maxPlayers - 2))
         game.prepareLocalPlayerNamesForGame()
         startGame(isLocalDuel: true)
     }
 
     private var background: some View {
-        ZStack {
-            Color(red: 0.03, green: 0.05, blue: 0.10).ignoresSafeArea()
-            if let customImg = game.customBackgroundImage {
-                Image(uiImage: customImg)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .ignoresSafeArea()
-                    .overlay(Color.black.opacity(0.35))
+        GeometryReader { proxy in
+            ZStack {
+                Color(red: 0.025, green: 0.055, blue: 0.14)
+                if let customImg = game.customBackgroundImage {
+                    Image(uiImage: customImg)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .clipped()
+                        .overlay(Color(red: 0.015, green: 0.035, blue: 0.09).opacity(0.48))
+                }
             }
+            .frame(width: proxy.size.width, height: proxy.size.height)
         }
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
     }
 
     private var duelTab: some View {
@@ -4894,8 +4925,8 @@ struct StartMenuView: View {
                 .font(.system(size: 36, weight: .black, design: .rounded))
                 .foregroundStyle(.white)
             DualPlayerSetupView(game: game,
-                                playerOneIsBot: $duelPlayerOneIsBot,
-                                playerTwoIsBot: $duelPlayerTwoIsBot,
+                                playerOneType: $duelPlayerOneType,
+                                playerTwoType: $duelPlayerTwoType,
                                 onStartGame: startDuelGame)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -4928,18 +4959,23 @@ struct StartMenuView: View {
                 background
                 TabView(selection: $selectedTab) {
                     duelTab
-                        .tabItem { Label("对弈", systemImage: "gamecontroller.fill") }
+                        .tabItem { Label("对弈", systemImage: "circle.grid.3x3.fill") }
                         .tag(0)
                     partyTab
-                        .tabItem { Label("派对", systemImage: "person.3.fill") }
+                        .tabItem { Label("派对", systemImage: "party.popper.fill") }
                         .tag(1)
                     AnalyzerLandingView(game: game,
                                         boardSize: $analyzerBoardSize,
-                                        selfColor: $analyzerSelfColor)
-                        .tabItem { Label("分析器", systemImage: "magnifyingglass") }
+                                        selfColor: $analyzerSelfColor,
+                                        hideTabBar: $hideAnalyzerTabBar)
+                        .tabItem { Label("分析器", systemImage: "wrench.and.screwdriver.fill") }
                         .tag(2)
                 }
-                .toolbarBackground(.hidden, for: .tabBar)
+                .background(Color.clear)
+                .toolbarBackground(.visible, for: .tabBar)
+                .toolbarBackground(Color(red: 0.025, green: 0.055, blue: 0.14).opacity(0.96), for: .tabBar)
+                .toolbarColorScheme(.dark, for: .tabBar)
+                .toolbar(hideAnalyzerTabBar ? .hidden : .visible, for: .tabBar)
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -4998,12 +5034,15 @@ private struct AnalyzerLandingView: View {
     @ObservedObject var game: GameModel
     @Binding var boardSize: Int
     @Binding var selfColor: Int
+    @Binding var hideTabBar: Bool
     @State private var started = false
 
     var body: some View {
         Group {
             if started {
-                AnalyzerPlayView(game: game, boardSize: boardSize, selfColor: selfColor)
+                AnalyzerPlayView(game: game, boardSize: boardSize, selfColor: selfColor,
+                                 hideTabBar: $hideTabBar,
+                                 onBack: { started = false; hideTabBar = false })
             } else {
                 VStack(spacing: 16) {
                     Text("COLOR WAR")
@@ -5011,6 +5050,7 @@ private struct AnalyzerLandingView: View {
                         .foregroundStyle(.white)
                     AnalyzerSetupView(boardSize: $boardSize, selfColor: $selfColor) {
                         started = true
+                        hideTabBar = false
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -5122,29 +5162,37 @@ struct GamePlayView: View {
     @Binding var isSpinningRandomWheel: Bool
     
     @State private var calculatedBoardWidth: CGFloat = 320
+
+    private static func duration(_ interval: TimeInterval) -> String {
+        let seconds = max(0, Int(interval))
+        return String(format: "%02d:%02d", seconds / 60, seconds % 60)
+    }
     
     var body: some View {
         ZStack {
-            if let customImg = game.customBackgroundImage {
-                Image(uiImage: customImg)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
-                    .ignoresSafeArea()
-                    .overlay(Color.black.opacity(0.35))
-            } else {
-                // 原版平滑变幻背景（已完好恢复）
-                LinearGradient(
-                    colors: [
-                        (game.colors[safe: game.currentPlayer] ?? .blue).opacity(0.35),
-                        Color(red: 0.03, green: 0.05, blue: 0.10)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .ignoresSafeArea()
-                .animation(.easeInOut(duration: 0.8), value: game.currentPlayer)
+            GeometryReader { proxy in
+                ZStack {
+                    LinearGradient(
+                        colors: [
+                            (game.colors[safe: game.currentPlayer] ?? .blue).opacity(0.35),
+                            Color(red: 0.025, green: 0.055, blue: 0.14)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    if let customImg = game.customBackgroundImage {
+                        Image(uiImage: customImg)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: proxy.size.width, height: proxy.size.height)
+                            .clipped()
+                            .overlay(Color(red: 0.015, green: 0.035, blue: 0.09).opacity(0.48))
+                    }
+                }
+                .frame(width: proxy.size.width, height: proxy.size.height)
             }
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
             
             VStack(spacing: 8) {
                 HStack {
@@ -5206,13 +5254,23 @@ struct GamePlayView: View {
                 }
                 .padding(.horizontal, 8)
 
-                if game.isLocalDuelMode && game.activePlayerIndices.count == 2 && !game.isOnlineMultiplayer {
-                    Label("已走 \(game.localDuelMoveCount) 步", systemImage: "arrow.left.arrow.right")
-                        .font(.subheadline.bold())
-                        .foregroundStyle(.white)
-                        .frame(width: calculatedBoardWidth)
-                        .padding(.vertical, 9)
-                        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+                TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                    let now = timeline.date
+                    HStack(spacing: 6) {
+                        Text("本局 \(Self.duration(now.timeIntervalSince(game.matchStartedAt)))")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Text("已走 \(game.localDuelMoveCount) 步")
+                            .fontWeight(.bold)
+                            .frame(maxWidth: .infinity)
+                        Text("本步 \(Self.duration(now.timeIntervalSince(game.currentMoveStartedAt)))")
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.white)
+                    .frame(width: calculatedBoardWidth)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 9)
+                    .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
                 }
                 
                 Spacer(minLength: 8)
@@ -5368,32 +5426,6 @@ struct PlayerTakeoverSheet: View {
                 }
                 
                 if !(game.isLocalDuelMode && game.activePlayerIndices.count == 2 && !game.isOnlineMultiplayer) {
-                    Section(header: Text("AI 思考算力/档位调整")) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack {
-                                Text(game.aiDifficultyLevel.title)
-                                    .font(.subheadline)
-                                    .bold()
-                                Spacer()
-                            }
-                        
-                            Slider(
-                                value: Binding<Double>(
-                                    get: { Double(game.aiDifficultyLevel.rawValue) },
-                                    set: { game.aiDifficultyLevel = AIDifficultyLevel(rawValue: Int($0)) ?? .balanced }
-                                ),
-                                in: 1...4,
-                                step: 1
-                            )
-                            .tint(Color.darkNavyBlue)
-                        
-                            Text(game.aiDifficultyLevel.description)
-                                .font(.caption)
-                                .foregroundColor(.gray)
-                        }
-                        .padding(.vertical, 4)
-                    }
-                
                     Section(header: Text("实时接管控制（AI / 人类代打）")) {
                         ForEach(game.activePlayerIndices, id: \.self) { idx in
                             HStack {
@@ -5402,7 +5434,7 @@ struct PlayerTakeoverSheet: View {
                                 Spacer()
                             
                                 if game.isOnlineMultiplayer {
-                                    Text(game.playerTypes[safe: idx]?.rawValue ?? "未加入")
+                                    Text(game.playerTypes[safe: idx]?.displayName ?? "未加入")
                                         .font(.caption)
                                         .foregroundColor(.white.opacity(0.65))
                                 } else {
@@ -5411,7 +5443,7 @@ struct PlayerTakeoverSheet: View {
                                         set: { game.updatePlayerType(at: idx, to: $0) }
                                     )) {
                                         ForEach(game.validSelectableTypes(forPlayerIndex: idx, isInLobby: false)) { type in
-                                            Text(type.rawValue).tag(type)
+                                            Text(type.displayName).tag(type)
                                         }
                                     }
                                     .pickerStyle(.menu)

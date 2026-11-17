@@ -38,15 +38,17 @@ class LocalDuelSetupTests(unittest.TestCase):
                 depth -= 1
             end += 1
         duel_settings_block = sheet[start:end - 1]
-        self.assertIn("AI 思考算力/档位调整", duel_settings_block)
+        self.assertNotIn("AI 思考算力/档位调整", duel_settings_block)
+        self.assertNotIn("Slider(", duel_settings_block)
         self.assertIn("实时接管控制（AI / 人类代打）", duel_settings_block)
         self.assertIn("Picker(\"\", selection:", duel_settings_block)
         self.assertIn("Haptics.shared.lightImpact()", section("private func playerCard(", "    var body: some View {"))
 
     def test_duel_setup_defaults_both_players_to_human(self):
         menu = section("struct StartMenuView", "private func startGame(isLocalDuel")
-        self.assertIn("@State private var duelPlayerOneIsBot = false", menu)
-        self.assertIn("@State private var duelPlayerTwoIsBot = false", menu)
+        self.assertIn("@State private var duelPlayerOneType: PlayerControlType = .human", menu)
+        self.assertIn("@State private var duelPlayerTwoType: PlayerControlType = .human", menu)
+        self.assertIn("private let selectableBotTypes: [PlayerControlType] = [.human, .mathNightmare, .enhancedNightmare, .driveBot]", TEXT)
 
     def test_duel_board_size_is_limited_to_supported_steps(self):
         setup = section("struct DualPlayerSetupView", "// MARK: - 16. Tab 1: 局域网 P2P Setup View")
