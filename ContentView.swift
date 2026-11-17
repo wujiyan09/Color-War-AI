@@ -5351,61 +5351,70 @@ struct StartMenuView: View {
         .overlay(alignment: .top) { Rectangle().fill(Color.white.opacity(0.1)).frame(height: 0.5) }
     }
 
-    var body: some View {
-        NavigationStack {
-            ZStack {
-                background
-                setupTabs
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if !hideAnalyzerTabBar {
-                    setupTabBar
+    @ToolbarContentBuilder
+    private var setupToolbar: some ToolbarContent {
+        if !hideAnalyzerTabBar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button { game.showArchivePickerSheet = true } label: {
+                    Label("导入", systemImage: "square.and.arrow.down")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.cyan)
                 }
             }
-            .toolbar {
-                if !hideAnalyzerTabBar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button { game.showArchivePickerSheet = true } label: {
-                        Label("导入", systemImage: "square.and.arrow.down")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.cyan)
+        }
+        if selectedTab == 1 {
+            ToolbarItem(placement: .principal) {
+                Picker("派对模式", selection: $selectedPartyMode) {
+                    Text("多人").tag(0)
+                    Text("联机").tag(1)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 190)
+            }
+        }
+        if selectedTab == 0 || (selectedTab == 1 && selectedPartyMode == 0) {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button { showPhotoPicker = true } label: {
+                        Label("从相册选择背景", systemImage: "photo.on.rectangle")
                     }
-                }
-                }
-                if selectedTab == 1 {
-                    ToolbarItem(placement: .principal) {
-                        Picker("派对模式", selection: $selectedPartyMode) {
-                            Text("多人").tag(0)
-                            Text("联机").tag(1)
-                        }
-                        .pickerStyle(.segmented)
-                        .frame(width: 190)
-                    }
-                }
-                if selectedTab == 0 || (selectedTab == 1 && selectedPartyMode == 0) {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Menu {
-                            Button { showPhotoPicker = true } label: {
-                                Label("从相册选择背景", systemImage: "photo.on.rectangle")
-                            }
-                            if game.customBackgroundImage != nil {
-                                Button(role: .destructive) { game.saveCustomBackground(nil) } label: {
-                                    Label("清除自定义背景", systemImage: "trash")
-                                }
-                            }
-                        } label: {
-                            Image(systemName: "photo.badge.plus")
-                                .foregroundStyle(.white)
-                                .font(.system(size: 16, weight: .medium))
+                    if game.customBackgroundImage != nil {
+                        Button(role: .destructive) { game.saveCustomBackground(nil) } label: {
+                            Label("清除自定义背景", systemImage: "trash")
                         }
                     }
+                } label: {
+                    Image(systemName: "photo.badge.plus")
+                        .foregroundStyle(.white)
+                        .font(.system(size: 16, weight: .medium))
                 }
             }
+        }
+    }
+
+    private var menuSurface: some View {
+        ZStack {
+            background
+            setupTabs
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if !hideAnalyzerTabBar { setupTabBar }
+        }
+        .toolbar { setupToolbar }
+    }
+
+    private var menuWithPickers: some View {
+        menuSurface
             .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhotosItem, matching: .images)
             .sheet(isPresented: $game.showArchivePickerSheet) {
-                ArchivePickerSheet(game: game, unsupportedMessage: $unsupportedArchiveMessage, onSelect: handleArchiveSelection)
+                ArchivePickerSheet(game: game, unsupportedMessage: $unsupportedArchiveMessage,
+                                   onSelect: handleArchiveSelection)
             }
             .onChange(of: selectedPhotosItem) { _, item in loadSelectedBackground(item) }
+    }
+
+    private var menuWithPreferences: some View {
+        menuWithPickers
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
             .onAppear(perform: restoreSetupPreferences)
@@ -5426,8 +5435,14 @@ struct StartMenuView: View {
             .onChange(of: analyzerBoardSize) { _, value in save(value, forKey: "CW_Analyzer_BoardSize") }
             .onChange(of: analyzerSelfColor) { _, value in save(value, forKey: "CW_Analyzer_SelfColor") }
             .onDisappear { game.flushSetupPreferences() }
+    }
+
+    var body: some View {
+        NavigationStack {
+            menuWithPreferences
         }
     }
+
 }
 
 private struct AnalyzerLandingView: View {
