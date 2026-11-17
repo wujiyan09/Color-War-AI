@@ -10,9 +10,11 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn("TabView(selection: $selectedTab)", SWIFT)
         self.assertIn('Label("对弈", systemImage: "circle.grid.3x3.fill")', SWIFT)
         self.assertIn('Label("派对", systemImage: "party.popper.fill")', SWIFT)
-        self.assertIn('Image(systemName: "gearshape.fill")', SWIFT)
-        self.assertIn('Image(systemName: "wrench.fill")', SWIFT)
-        self.assertIn('.toolbar(hideAnalyzerTabBar ? .hidden : .visible, for: .tabBar)', SWIFT)
+        self.assertIn('Label("分析器", systemImage: "wrench.and.screwdriver.fill")', SWIFT)
+        self.assertIn('icon: "wrench.and.screwdriver.fill"', SWIFT)
+        self.assertIn('.toolbar(.hidden, for: .tabBar)', SWIFT)
+        self.assertIn('if !hideAnalyzerTabBar {', SWIFT)
+        self.assertIn('.safeAreaInset(edge: .bottom, spacing: 0)', SWIFT)
         self.assertIn('Text("多人").tag(0)', SWIFT)
         self.assertIn('Text("联机").tag(1)', SWIFT)
         self.assertIn('Picker("派对模式", selection: $selectedPartyMode)', SWIFT)
@@ -44,12 +46,17 @@ class NativeAnalyzerTests(unittest.TestCase):
 
     def test_analyzer_archive_import_does_not_restore_live_game(self):
         archive_sheet = SWIFT[SWIFT.index("struct ArchivePickerSheet"):SWIFT.index("// MARK: - 25.")]
-        self.assertIn("var onSelect: ((GameSaveArchive) -> Void)? = nil", archive_sheet)
-        self.assertIn("onSelect(archive)", archive_sheet)
+        self.assertIn("var onSelect: ((GameSaveArchive) -> Bool)? = nil", archive_sheet)
+        self.assertIn("if onSelect(archive) { dismiss() }", archive_sheet)
+        self.assertIn("unsupportedMessage", archive_sheet)
+        self.assertIn("activeCount > 2", SWIFT)
+        self.assertIn("分析器暂不支持多人棋局存档", SWIFT)
         analyzer = SWIFT[SWIFT.index("private struct AnalyzerPlayView"):SWIFT.index("struct StartMenuView")]
         self.assertIn("loadArchiveIntoAnalyzer", analyzer)
         self.assertIn("Self.makeBoard(size: archive.boardSize", analyzer)
-        self.assertIn("selectedTab == 2 ? { archive in", SWIFT)
+        self.assertIn("switch selectedTab {", SWIFT)
+        self.assertIn("pendingAnalyzerArchive = archive", SWIFT)
+        self.assertIn("game.shouldNavigateToGame = true", SWIFT)
 
     def test_menu_background_uses_blue_base_and_persisted_photo(self):
         menu = SWIFT[SWIFT.index("struct StartMenuView"):SWIFT.index("private struct AnalyzerLandingView")]
@@ -77,33 +84,51 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn(".glassEffect(.regular.interactive(), in: .capsule)", SWIFT)
         self.assertGreaterEqual(SWIFT.count("Haptics.shared.lightImpact()"), 5)
         self.assertIn("Haptics.shared.lightImpact()\n            return", SWIFT)
-        self.assertIn("Haptics.shared.lightImpact()\n        highlightedCell = nil", SWIFT)
+        self.assertIn("pushUndoSnapshot()\n        highlightedCell = nil", SWIFT)
+        self.assertIn("private func undoPreviousAction()", SWIFT)
+        self.assertIn("onUndo: undoPreviousAction", SWIFT)
+        self.assertIn("onToggleSide: toggleSelfColor", SWIFT)
+        self.assertIn("@Binding var selfColor: Int", SWIFT)
+        self.assertIn(".frame(maxHeight: .infinity, alignment: .center)", SWIFT)
 
-    def test_analyzer_and_duel_show_glass_move_counter_and_old_panel_is_removed(self):
-        self.assertIn(r'Text("已走 \(moveCount) 步")', SWIFT)
-        self.assertIn(r'Text("已走 \(game.localDuelMoveCount) 步")', SWIFT)
-        self.assertIn(r'Text("本局 \(Self.duration(now.timeIntervalSince(game.matchStartedAt)))")', SWIFT)
-        self.assertIn(r'Text("本步 \(Self.duration(now.timeIntervalSince(game.currentMoveStartedAt)))")', SWIFT)
+    def test_analyzer_counter_removed_and_gameplay_header_is_compact(self):
+        analyzer = SWIFT[SWIFT.index("private struct AnalyzerPlayView"):SWIFT.index("struct StartMenuView")]
+        gameplay = SWIFT[SWIFT.index("struct GamePlayView"):SWIFT.index("// MARK: - 23.")]
+        self.assertNotIn("moveCounter", analyzer)
+        self.assertNotIn("本步", analyzer)
+        self.assertIn(r'Text("\(game.localDuelMoveCount)步")', gameplay)
+        self.assertIn("TimelineView(.periodic(from: .now, by: 1))", gameplay)
+        self.assertIn('game.currentPlayer == 0 ? "红" : "蓝"', gameplay)
+        self.assertIn('Text("·")', gameplay)
+        self.assertIn(".animation(.easeInOut(duration: 0.45), value: game.currentPlayer)", gameplay)
         self.assertIn("@Published private(set) var localDuelMoveCount = 0", SWIFT)
         self.assertIn("localDuelMoveCount += 1", SWIFT)
-        self.assertIn("currentMoveStartedAt = Date()", SWIFT)
-        self.assertIn("hideTabBar = true", SWIFT)
-        self.assertIn("onBack: { started = false; hideTabBar = false; importedArchive = nil }", SWIFT)
-        self.assertIn("Bot 1", SWIFT)
-        self.assertIn("Bot 2", SWIFT)
-        self.assertIn("Bot 3", SWIFT)
-        self.assertIn("selectableBotTypes[(current + 1) % selectableBotTypes.count]", SWIFT)
-        self.assertIn("ForEach([PlayerControlType.mathNightmare, .enhancedNightmare, .driveBot])", SWIFT)
+        self.assertIn("CW_CustomBackground.jpg", SWIFT)
+        self.assertIn(".frame(maxWidth: 440)", SWIFT)
         self.assertNotIn("AI 思考算力/深度", SWIFT)
         self.assertNotIn("🧠 AI 算力等级", SWIFT)
-        self.assertIn(".scaledToFill()", SWIFT)
-        self.assertIn(".frame(width: proxy.size.width, height: proxy.size.height)", SWIFT)
-        self.assertIn(".clipped()", SWIFT)
-        self.assertIn("Color(red: 0.025, green: 0.055, blue: 0.14)", SWIFT)
-        self.assertNotIn("showDotsAnalyzer", SWIFT)
-        self.assertNotIn("DotsAnalyzerWebView", SWIFT)
-        self.assertNotIn("struct DotsAnalyzerView", SWIFT)
-        self.assertNotIn('Label("打开离线分析器"', SWIFT)
+
+    def test_setup_preferences_are_persisted_per_mode_and_archives_do_not_overwrite_them(self):
+        self.assertIn("CW_Duel_BoardSize", SWIFT)
+        self.assertIn("CW_Party_BoardSize", SWIFT)
+        self.assertIn("CW_Duel_PlayerOne", SWIFT)
+        self.assertIn("CW_Duel_PlayerTwo", SWIFT)
+        self.assertIn("CW_Party_PlayerTypes", SWIFT)
+        self.assertIn("CW_SelectedPartyMode", SWIFT)
+        self.assertIn("CW_Analyzer_BoardSize", SWIFT)
+        self.assertIn("CW_Analyzer_SelfColor", SWIFT)
+        self.assertIn("func flushSetupPreferences()", SWIFT)
+        for key in ("duelBoardSize", "duelPlayerOneType", "duelPlayerTwoType", "partyBoardSize", "selectedPartyMode", "analyzerBoardSize", "analyzerSelfColor"):
+            self.assertIn(f".onChange(of: {key})", SWIFT)
+        self.assertIn("if !game.isOnlineMultiplayer {", SWIFT)
+        self.assertIn("CW_Saved_PlayerColors", SWIFT)
+        self.assertIn("CW_Saved_PlayerEmojis", SWIFT)
+        self.assertIn("CW_Saved_PlayerNames", SWIFT)
+        restore = SWIFT[SWIFT.index("func restoreArchive("):SWIFT.index("func deleteArchive(")]
+        self.assertIn("isRestoringArchive = true", restore)
+        self.assertIn("defer { isRestoringArchive = false }", restore)
+        self.assertIn("guard !isRestoringArchive else { return }", SWIFT)
+        self.assertIn(".onDisappear { game.flushSetupPreferences() }", SWIFT)
 
 
 if __name__ == "__main__":

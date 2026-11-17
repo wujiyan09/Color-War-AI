@@ -30,6 +30,25 @@ class LegacyAIBaselineTests(unittest.TestCase):
         self.assertIn("playerType == .enhancedNightmare", section)
 
 
+    def test_drive_wrapper_openings_difficulty_profiles_and_easy_randomness(self):
+        book = TEXT[TEXT.index("private enum DriveOpeningBook"):TEXT.index("private struct DriveDuelSearch")]
+        self.assertIn("Port of the 13 deterministic opening sequences", book)
+        self.assertIn("return [", book)
+        self.assertIn("hash % UInt32(patterns.count)", book)
+        self.assertIn("for unit in seed.utf16", book)
+        self.assertIn("startIndex: movesPlayed / 2", TEXT)
+        self.assertIn("level != 1 && movesPlayed < 30", TEXT)
+        self.assertIn("case 1: difficulty = (80, 1)", TEXT)
+        self.assertIn("case 2: difficulty = (250, 3)", TEXT)
+        self.assertIn("default: difficulty = (5000, 32)", TEXT)
+        self.assertIn("phase = (400, 120, 40, 8)", TEXT)
+        self.assertIn("phase = (5000, 1200, 60, 32)", TEXT)
+        self.assertIn("guard [6, 9, 12].contains(size) else { return nil }", book)
+        self.assertIn("roll < 0.25", TEXT)
+        self.assertIn("roll < 0.70", TEXT)
+        self.assertIn("if level == 2 && moves.count > 1", TEXT)
+        self.assertIn("Double.random(in: 0..<1) < 0.25", TEXT)
+
     def test_multiplayer_bot3_falls_through_to_opening_and_maxn_search(self):
         start = TEXT.index("func calculateBestMove() async")
         end = TEXT.index("private func selectOptimalOpeningMove", start)

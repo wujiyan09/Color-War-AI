@@ -766,6 +766,87 @@ enum TacticalRiskMode {
     case desperate
 }
 
+private enum DriveOpeningBook {
+    // Port of the 13 deterministic opening sequences used by Drive's online bot.
+    // Local games use their session UUID in place of a server room code.
+    static func patterns(size: Int) -> [[(Int, Int)]]? {
+        guard [6, 9, 12].contains(size) else { return nil }
+        let edge = size - 1
+        let corners: [(Int, Int, Int, Int)] = [
+            (0, 0, 1, 1), (edge, 0, -1, 1), (0, edge, 1, -1), (edge, edge, -1, -1)
+        ]
+        let cornerPatterns = corners.map { corner in
+            let (x, y, dx, dy) = corner
+            return [(x, y), (x + dx, y), (x, y + dy), (x + dx, y + dy),
+                    (x, y), (x + dx, y + dy), (x + 2 * dx, y), (x, y + 2 * dy),
+                    (x + 2 * dx, y + dy), (x + dx, y + 2 * dy), (x + 2 * dx, y + 2 * dy), (x + dx, y)]
+        }
+        func repeated(_ values: [(Int, Int)]) -> [(Int, Int)] {
+            Array((values + values).prefix(12))
+        }
+        func diagonal(reverse: Bool) -> [(Int, Int)] {
+            let line = (0..<size).map { i in reverse ? (i, edge - i) : (i, i) }
+            var ordered: [(Int, Int)] = []
+            for i in 0..<((size + 1) / 2) {
+                ordered.append(line[i])
+                if edge - i != i { ordered.append(line[edge - i]) }
+            }
+            return repeated(ordered)
+        }
+        func edgeLine(_ side: String) -> [(Int, Int)] {
+            let line = (0..<size).map { i -> (Int, Int) in
+                switch side {
+                case "top": return (i, 0)
+                case "bottom": return (i, edge)
+                case "left": return (0, i)
+                default: return (edge, i)
+                }
+            }
+            var ordered = [line[0], line[edge]]
+            if size / 2 > 1 {
+                for i in 1..<(size / 2) { ordered += [line[i], line[edge - i]] }
+            }
+            if size % 2 == 1 { ordered.append(line[size / 2]) }
+            return repeated(ordered)
+        }
+        let middle = size / 2 - 1
+        let next = middle + 1
+        let center = [(middle, middle), (next, next), (middle, next), (next, middle),
+                      (middle, middle), (next, next), (middle - 1, middle), (next + 1, next),
+                      (middle, middle - 1), (next, next + 1), (next + 1, middle), (middle - 1, next),
+                      (next, middle), (middle, next)].filter {
+            $0.0 >= 0 && $0.0 < size && $0.1 >= 0 && $0.1 < size
+        }
+        let cornerCycle = [(0, 0), (edge, edge), (0, 0), (edge, edge), (0, 0), (edge, edge),
+                           (1, 0), (edge - 1, edge), (0, 1), (edge, edge - 1), (1, 1), (edge - 1, edge - 1)]
+        return [
+            [(0, 0), (edge, edge), (edge, 0), (0, edge), (1, 0), (edge - 1, edge),
+             (edge, 1), (0, edge - 1), (1, 1), (edge - 1, edge - 1), (edge - 1, 1), (1, edge - 1)],
+            cornerPatterns[0], cornerPatterns[1], cornerPatterns[2], cornerPatterns[3],
+            diagonal(reverse: false), diagonal(reverse: true), edgeLine("top"), edgeLine("bottom"),
+            edgeLine("left"), edgeLine("right"), Array(center.prefix(12)), cornerCycle
+        ]
+    }
+
+    static func nextOwnedMove(cells: [UInt8], size: Int, side: Int, startIndex: Int, seed: String) -> Int? {
+        guard let patterns = patterns(size: size), !patterns.isEmpty else { return nil }
+        var hash: UInt32 = 2_166_136_261
+        for unit in seed.utf16 {
+            hash ^= UInt32(unit)
+            hash = hash &* 16_777_619
+        }
+        let pattern = patterns[Int(hash % UInt32(patterns.count))]
+        guard startIndex < pattern.count else { return nil }
+        for (x, y) in pattern.dropFirst(max(0, startIndex)) {
+            let index = y * size + x
+            if index >= 0 && index < cells.count && DriveDuelSearch.owner(cells[index]) == side {
+                return index
+            }
+        }
+        return nil
+    }
+}
+
 private struct DriveDuelSearch {
     private static let mask64 = UInt64.max
     private static func splitmix64(_ value: UInt64) -> UInt64 {
@@ -795,20 +876,22 @@ private struct DriveDuelSearch {
         let softTimeMs: Double
         let minTimeMs: Double
         let maxDepth: Int
-        let randomize: Bool
     }
     private static func parameters(level: Int, movesPlayed: Int) -> SearchParameters {
-        let difficulty: (timeMs: Double, maxDepth: Int, randomize: Bool)
+        let difficulty: (timeMs: Double, maxDepth: Int)
+        // Match the online Drive wrapper's mode ceilings, then intersect with
+        // the independent local phase limits below. Easy is heuristic-only;
+        // Medium searches for at most 250ms/depth 3; Hard tops out at 5s/depth 32.
         switch level {
-        case 1: difficulty = (80, 1, true)
-        case 2: difficulty = (1200, 8, false)
-        default: difficulty = (6000, 32, false)
+        case 1: difficulty = (80, 1)
+        case 2: difficulty = (250, 3)
+        default: difficulty = (5000, 32)
         }
         let phase: (timeMs: Double, softTimeMs: Double, minTimeMs: Double, maxDepth: Int)
         if movesPlayed < 30 {
             phase = (400, 120, 40, 8)
         } else {
-            phase = (5000, 600, 80, 32)
+            phase = (5000, 1200, 60, 32)
         }
         let timeMs = min(difficulty.timeMs, phase.timeMs)
         let softTimeMs = min(phase.softTimeMs, timeMs)
@@ -816,8 +899,7 @@ private struct DriveDuelSearch {
             timeMs: timeMs,
             softTimeMs: softTimeMs,
             minTimeMs: min(phase.minTimeMs, softTimeMs),
-            maxDepth: min(difficulty.maxDepth, phase.maxDepth),
-            randomize: difficulty.randomize
+            maxDepth: min(difficulty.maxDepth, phase.maxDepth)
         )
     }
     static func timeBudget(level: Int, movesPlayed: Int = 0) -> TimeInterval {
@@ -840,7 +922,7 @@ private struct DriveDuelSearch {
     }
     private struct Result { var score: Int; var move: Int }
 
-    private static func owner(_ code: UInt8) -> Int { code == 0 ? -1 : Int(code >> 4) - 1 }
+    fileprivate static func owner(_ code: UInt8) -> Int { code == 0 ? -1 : Int(code >> 4) - 1 }
     private static func charge(_ code: UInt8) -> Int { Int(code & 15) }
     private static func encode(_ owner: Int, _ charge: Int) -> UInt8 {
         guard charge > 0 else { return 0 }
@@ -1003,9 +1085,9 @@ private struct DriveDuelSearch {
             score += Double(max(0, center - distance)) * 2.5
         }
         if total >= 30 && newCharge == 3 { score -= 8 }
-        return score + Double.random(in: -0.005...0.005)
+        return score
     }
-    private static func search(_ cells: [UInt8], _ side: Int, _ enteredMask: Int, _ depth: Int, _ alphaIn: Int, _ beta: Int, _ ply: Int, _ context: inout Context, _ size: Int) -> Result {
+    private static func search(_ cells: [UInt8], _ side: Int, _ enteredMask: Int, _ depth: Int, _ alphaIn: Int, _ beta: Int, _ ply: Int, _ context: inout Context, _ size: Int, allowNullMove: Bool = true) -> Result {
         context.nodes += 1
         if context.nodes & 4095 == 0 && ProcessInfo.processInfo.systemUptime >= context.deadline { context.stopped = true }
         if context.stopped || ply >= maxPly { return Result(score: evaluate(cells, side, enteredMask), move: -1) }
@@ -1019,6 +1101,15 @@ private struct DriveDuelSearch {
             if cached.flag == 2 && cached.score <= alpha { return Result(score: cached.score, move: cached.move) }
         }
         if depth <= 0 { return Result(score: evaluate(cells, side, enteredMask), move: -1) }
+        let sidePieces = cells.reduce(0) { $0 + (owner($1) == side ? 1 : 0) }
+        if allowNullMove && depth >= 3 && beta - alpha == 1 && sidePieces >= 3 {
+            let reduction = depth >= 6 ? 3 : 2
+            let nullChild = search(cells, 1 - side, enteredMask, depth - 1 - reduction,
+                                   -beta, -beta + 1, ply + 1, &context, size, allowNullMove: false)
+            let nullScore = -nullChild.score
+            if context.stopped { return Result(score: evaluate(cells, side, enteredMask), move: -1) }
+            if nullScore >= beta { return Result(score: nullScore, move: -1) }
+        }
         let moves = legalMoves(cells, side, enteredMask, size).sorted {
             moveOrderScore(cells, $0, side, enteredMask, size, ply, ttMove, context) > moveOrderScore(cells, $1, side, enteredMask, size, ply, ttMove, context)
         }
@@ -1049,7 +1140,7 @@ private struct DriveDuelSearch {
         return Result(score: best, move: bestMove)
     }
 
-    static func bestMove(board: AISolver.Board, activePlayers: [Int], currentPlayer: Int, hasEntered: [Bool], level: Int, movesPlayed: Int) -> (Int, Int)? {
+    static func bestMove(board: AISolver.Board, activePlayers: [Int], currentPlayer: Int, hasEntered: [Bool], level: Int, movesPlayed: Int, openingSeed: String) -> (Int, Int)? {
         guard (2...12).contains(board.size), activePlayers.count == 2, let side = activePlayers.firstIndex(of: currentPlayer) else { return nil }
         let size = board.size
         var cells = [UInt8](repeating: 0, count: size * size)
@@ -1067,10 +1158,26 @@ private struct DriveDuelSearch {
         guard let first = moves.first else { return nil }
         if terminal(cells, side, enteredMask, 0) != nil { return nil }
         let searchParameters = parameters(level: level, movesPlayed: movesPlayed)
-        if searchParameters.randomize {
+        // Drive's 13-pattern book applies before its search for the first 12
+        // moves by this side, during the first 30 total moves, except on Easy.
+        if level != 1 && movesPlayed < 30,
+           let opening = DriveOpeningBook.nextOwnedMove(
+                cells: cells, size: size, side: side, startIndex: movesPlayed / 2, seed: openingSeed
+           ) {
+            return (opening / size, opening % size)
+        }
+        if level == 1 {
             let ranked = moves.map { ($0, quietHeuristic(cells, $0, side, enteredMask, size)) }.sorted { $0.1 > $1.1 }
-            let candidates = Array(ranked.prefix(3))
-            let selected = Double.random(in: 0..<1) < 0.3 ? candidates.randomElement()!.0 : candidates[0].0
+            guard let best = ranked.first else { return nil }
+            let roll = Double.random(in: 0..<1)
+            let selected: Int
+            if roll < 0.25 && moves.count > 1 {
+                selected = moves.randomElement()!
+            } else if roll < 0.70 && moves.count > 1 {
+                selected = ranked[Int.random(in: 0..<max(2, (ranked.count + 1) / 2))].0
+            } else {
+                selected = best.0
+            }
             return (selected / size, selected % size)
         }
         if moves.count == 1 { return (first / size, first % size) }
@@ -1083,8 +1190,29 @@ private struct DriveDuelSearch {
         for depth in 1...maxDepth {
             if ProcessInfo.processInfo.systemUptime >= context.deadline || Task.isCancelled { break }
             context.stopped = false
-            let result = search(cells, side, enteredMask, depth, -infinity, infinity, 0, &context, size)
-            if context.stopped || Task.isCancelled || result.move < 0 { break }
+            var alpha = depth >= 4 ? completedScores.last.map { $0 - 50 } ?? -infinity : -infinity
+            var beta = depth >= 4 ? completedScores.last.map { $0 + 50 } ?? infinity : infinity
+            var window = 50
+            var result: Result?
+            while !context.stopped && !Task.isCancelled {
+                let attempt = search(cells, side, enteredMask, depth, alpha, beta, 0, &context, size)
+                if context.stopped || Task.isCancelled { break }
+                if attempt.score <= alpha && alpha > -infinity {
+                    window *= 2
+                    if window > 4000 { alpha = -infinity; beta = infinity }
+                    else { alpha = attempt.score - window; beta = attempt.score + 1 }
+                    continue
+                }
+                if attempt.score >= beta && beta < infinity {
+                    window *= 2
+                    if window > 4000 { alpha = -infinity; beta = infinity }
+                    else { alpha = attempt.score - 1; beta = attempt.score + window }
+                    continue
+                }
+                result = attempt
+                break
+            }
+            guard let result, !context.stopped, !Task.isCancelled, result.move >= 0 else { break }
             best = result.move; depthCompleted = depth
             completedMoves.append(result.move); completedScores.append(result.score)
             if abs(result.score) >= winScore - 1000 { break }
@@ -1097,6 +1225,12 @@ private struct DriveDuelSearch {
             }
         }
         _ = depthCompleted
+        // Drive's Medium mode deliberately plays the heuristic runner-up 25%
+        // of the time; deeper modes keep the best searched move.
+        if level == 2 && moves.count > 1 && Double.random(in: 0..<1) < 0.25 {
+            let ranked = moves.map { ($0, quietHeuristic(cells, $0, side, enteredMask, size)) }.sorted { $0.1 > $1.1 }
+            if ranked.count > 1 { best = ranked[1].0 }
+        }
         return (best / size, best % size)
     }
 }
@@ -1195,6 +1329,7 @@ struct AISolver: Sendable {
     let aiLevel: AIDifficultyLevel
     let isLocalDuelMode: Bool
     let localDuelMovesPlayed: Int
+    let openingSeed: String
     private let searchDeadline: TimeInterval
     let board: Board
     let hasEntered: [Bool]
@@ -1210,7 +1345,8 @@ struct AISolver: Sendable {
          hasEntered: [Bool],
          eliminated: [Bool],
          isLocalDuelMode: Bool = false,
-         localDuelMovesPlayed: Int = 0) {
+         localDuelMovesPlayed: Int = 0,
+         openingSeed: String = "local") {
         self.boardSize = boardSize
         self.activePlayers = activePlayers
         self.currentPlayer = currentPlayer
@@ -1218,6 +1354,7 @@ struct AISolver: Sendable {
         self.aiLevel = aiLevel
         self.isLocalDuelMode = isLocalDuelMode
         self.localDuelMovesPlayed = localDuelMovesPlayed
+        self.openingSeed = openingSeed
         self.searchDeadline = ProcessInfo.processInfo.systemUptime + (playerType == .driveBot ? DriveDuelSearch.timeBudget(level: aiLevel.rawValue, movesPlayed: localDuelMovesPlayed) : aiLevel.searchTimeBudget)
         
         var flat = [SimCell]()
@@ -1253,7 +1390,7 @@ struct AISolver: Sendable {
         // games, continue into the shared multiplayer MaxN path instead of
         // returning nil before the bot can place its opening piece.
         if playerType == .driveBot && activePlayers.count == 2 {
-            return DriveDuelSearch.bestMove(board: board, activePlayers: activePlayers, currentPlayer: currentPlayer, hasEntered: hasEntered, level: aiLevel.rawValue, movesPlayed: localDuelMovesPlayed)
+            return DriveDuelSearch.bestMove(board: board, activePlayers: activePlayers, currentPlayer: currentPlayer, hasEntered: hasEntered, level: aiLevel.rawValue, movesPlayed: localDuelMovesPlayed, openingSeed: openingSeed)
         }
         
         var validMoves = getPlayableCells(for: currentPlayer, on: board)
@@ -2119,15 +2256,15 @@ final class GameModel: ObservableObject {
     @Published private(set) var localPlayerNames: [String]
     @Published var playerTypes: [PlayerControlType] {
         didSet {
-            debounceSave()
+            saveSetupPreferences()
             refreshActivePlayers()
         }
     }
     @Published var colors: [Color] {
-        didSet { debounceSave() }
+        didSet { saveSetupPreferences() }
     }
     @Published var emojis: [String?] {
-        didSet { debounceSave() }
+        didSet { saveSetupPreferences() }
     }
     @Published var currentPlayer: Int = 0 {
         didSet { updateCachedPlayableCells() }
@@ -2172,6 +2309,7 @@ final class GameModel: ObservableObject {
     private var disconnectCancellable: AnyCancellable? = nil
     private var aiTask: Task<Void, Never>? = nil
     private var saveWorkItem: DispatchWorkItem? = nil
+    private var isRestoringArchive = false
     
     var validPlayerCount: Int {
         playerTypes.filter { $0.isEnabled }.count
@@ -2402,6 +2540,8 @@ final class GameModel: ObservableObject {
     }
     
     func restoreArchive(_ archive: GameSaveArchive) {
+        isRestoringArchive = true
+        defer { isRestoringArchive = false }
         self.boardSize = archive.boardSize
         self.currentPlayer = archive.currentPlayer
         self.playerNames = archive.playerNames
@@ -2765,22 +2905,18 @@ final class GameModel: ObservableObject {
         }
     }
     
-    private func debounceSave() {
-        saveWorkItem?.cancel()
-        let item = DispatchWorkItem { [weak self] in
-            guard let self = self else { return }
-            if let encoded = try? JSONEncoder().encode(self.playerTypes) {
-                UserDefaults.standard.set(encoded, forKey: "CW_Saved_PlayerTypes")
-            }
-            let hexes = self.colors.map { $0.toHex() }
-            UserDefaults.standard.set(hexes, forKey: "CW_Saved_PlayerColors")
-            
-            let stringArray = self.emojis.map { $0 ?? "" }
-            UserDefaults.standard.set(stringArray, forKey: "CW_Saved_PlayerEmojis")
+    func flushSetupPreferences() { saveSetupPreferences() }
+
+    private func saveSetupPreferences() {
+        guard !isRestoringArchive else { return }
+        if !isLocalDuelMode, let encoded = try? JSONEncoder().encode(playerTypes) {
+            UserDefaults.standard.set(encoded, forKey: "CW_Saved_PlayerTypes")
         }
-        saveWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: item)
+        UserDefaults.standard.set(colors.map { $0.toHex() }, forKey: "CW_Saved_PlayerColors")
+        UserDefaults.standard.set(emojis.map { $0 ?? "" }, forKey: "CW_Saved_PlayerEmojis")
     }
+
+    private func debounceSave() { saveSetupPreferences() }
     
     func tryUpdatePlayerEmoji(at index: Int, newEmoji: String?) -> Bool {
         guard index >= 0 && index < PlayerPreset.maxPlayers, index < emojis.count else { return false }
@@ -3233,7 +3369,8 @@ final class GameModel: ObservableObject {
                 hasEntered: hasEntered,
                 eliminated: eliminated,
                 isLocalDuelMode: self.isLocalDuelMode && !isP2P && !isWS && activePlayerIndices.count == 2,
-                localDuelMovesPlayed: self.localDuelMoveCount
+                localDuelMovesPlayed: self.localDuelMoveCount,
+                openingSeed: self.currentGameSessionID.uuidString
             )
             
             if let bestMove = await solver.calculateBestMove() {
@@ -3808,6 +3945,7 @@ struct LocalGameSetupView: View {
 
 struct DualPlayerSetupView: View {
     @ObservedObject var game: GameModel
+    @Binding var boardSize: Int
     @Binding var playerOneType: PlayerControlType
     @Binding var playerTwoType: PlayerControlType
     let onStartGame: () -> Void
@@ -3854,15 +3992,15 @@ struct DualPlayerSetupView: View {
         VStack(spacing: 14) {
             VStack(spacing: 10) {
                 HStack {
-                    Text("棋盘大小：\(game.boardSize) × \(game.boardSize)")
+                    Text("棋盘大小：\(boardSize) × \(boardSize)")
                         .font(.subheadline.bold())
                         .foregroundColor(.white)
                     Spacer()
                 }
                 Slider(
                     value: Binding<Double>(
-                        get: { Double(nearestSupportedBoardSize(to: game.boardSize)) },
-                        set: { game.boardSize = nearestSupportedBoardSize(to: Int($0)) }
+                        get: { Double(nearestSupportedBoardSize(to: boardSize)) },
+                        set: { boardSize = nearestSupportedBoardSize(to: Int($0)) }
                     ),
                     in: 6...12,
                     step: 3
@@ -3891,10 +4029,8 @@ struct DualPlayerSetupView: View {
             .buttonStyle(.plain)
         }
         .onAppear {
-            let supportedSize = nearestSupportedBoardSize(to: game.boardSize)
-            if game.boardSize != supportedSize {
-                game.boardSize = supportedSize
-            }
+            let supportedSize = nearestSupportedBoardSize(to: boardSize)
+            if boardSize != supportedSize { boardSize = supportedSize }
         }
     }
 }
@@ -4561,8 +4697,12 @@ private struct AnalyzerToolPanel: View {
     let isStarted: Bool
     let isPaused: Bool
     let isThinking: Bool
+    let selfColor: Int
+    let canUndo: Bool
     let onStart: () -> Void
     let onPause: () -> Void
+    let onUndo: () -> Void
+    let onToggleSide: () -> Void
 
     private func brushButton(owner: Int, count: Int) -> some View {
         let color: Color = owner == 0 ? .red : .blue
@@ -4657,6 +4797,36 @@ private struct AnalyzerToolPanel: View {
             .buttonStyle(.plain)
             .disabled(!isStarted || isPaused)
             .opacity(!isStarted || isPaused ? 0.5 : 1)
+
+            Button {
+                Haptics.shared.lightImpact()
+                onToggleSide()
+            } label: {
+                Label("我方：\(selfColor == 0 ? "红" : "蓝") · 切换", systemImage: "arrow.left.arrow.right")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .glassEffect(.regular.interactive(), in: .capsule)
+            }
+            .buttonStyle(.plain)
+            .disabled(isThinking || (isStarted && !isPaused))
+            .opacity(isThinking || (isStarted && !isPaused) ? 0.5 : 1)
+
+            Button {
+                Haptics.shared.lightImpact()
+                onUndo()
+            } label: {
+                Label("撤销上一步", systemImage: "arrow.uturn.backward")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .glassEffect(.regular.interactive(), in: .capsule)
+            }
+            .buttonStyle(.plain)
+            .disabled(!canUndo || isThinking)
+            .opacity(!canUndo || isThinking ? 0.5 : 1)
         }
     }
 }
@@ -4664,7 +4834,7 @@ private struct AnalyzerToolPanel: View {
 private struct AnalyzerPlayView: View {
     @ObservedObject var game: GameModel
     @State private var boardSize: Int
-    let selfColor: Int
+    @Binding var selfColor: Int
     @Binding var hideTabBar: Bool
     @Binding var importedArchive: GameSaveArchive?
     let onBack: () -> Void
@@ -4675,21 +4845,21 @@ private struct AnalyzerPlayView: View {
     @State private var isThinking = false
     @State private var waitingForOpponent = false
     @State private var moveCount = 0
-    @State private var matchStartedAt = Date()
-    @State private var currentMoveStartedAt = Date()
     @State private var highlightedCell: Int?
+    private struct UndoState { let board: [[Cell]]; let moveCount: Int; let waitingForOpponent: Bool; let highlightedCell: Int? }
+    @State private var undoStack: [UndoState] = []
     @State private var aiTask: Task<Void, Never>?
 
-    init(game: GameModel, boardSize: Int, selfColor: Int, hideTabBar: Binding<Bool>,
+    init(game: GameModel, boardSize: Int, selfColor: Binding<Int>, hideTabBar: Binding<Bool>,
          importedArchive: Binding<GameSaveArchive?>, initialArchive: GameSaveArchive?, onBack: @escaping () -> Void) {
         self.game = game
         let initialSize = initialArchive?.boardSize ?? boardSize
         self._boardSize = State(initialValue: initialSize)
-        self.selfColor = selfColor
+        self._selfColor = selfColor
         self._hideTabBar = hideTabBar
         self._importedArchive = importedArchive
         self.onBack = onBack
-        _board = State(initialValue: Self.makeBoard(size: initialSize, selfColor: selfColor, archive: initialArchive))
+        _board = State(initialValue: Self.makeBoard(size: initialSize, selfColor: selfColor.wrappedValue, archive: initialArchive))
         _moveCount = State(initialValue: initialArchive?.localDuelMoveCount ?? 0)
     }
 
@@ -4718,38 +4888,12 @@ private struct AnalyzerPlayView: View {
         boardSize = archive.boardSize
         board = Self.makeBoard(size: archive.boardSize, selfColor: selfColor, archive: archive)
         moveCount = archive.localDuelMoveCount ?? 0
-        matchStartedAt = Date()
-        currentMoveStartedAt = matchStartedAt
         highlightedCell = nil
+        undoStack.removeAll()
         waitingForOpponent = false
         isThinking = false
         analysisStarted = false
         isPaused = false
-    }
-
-    private var moveCounter: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { timeline in
-            let now = timeline.date
-            HStack {
-                Text("本局 \(Self.duration(now.timeIntervalSince(matchStartedAt)))")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Text("已走 \(moveCount) 步")
-                    .fontWeight(.bold)
-                    .frame(maxWidth: .infinity)
-                Text("本步 \(Self.duration(now.timeIntervalSince(currentMoveStartedAt)))")
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-            }
-            .font(.caption.weight(.semibold).monospacedDigit())
-            .foregroundStyle(.white)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 9)
-            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
-        }
-    }
-
-    private static func duration(_ interval: TimeInterval) -> String {
-        let seconds = max(0, Int(interval))
-        return String(format: "%02d:%02d", seconds / 60, seconds % 60)
     }
 
     private var backButton: some View {
@@ -4772,6 +4916,7 @@ private struct AnalyzerPlayView: View {
 
     private func tapCell(row: Int, column: Int) {
         if !analysisStarted || isPaused {
+            pushUndoSnapshot()
             switch selectedBrush {
             case let .piece(owner, count): board[row][column] = Cell(owner: owner, count: count)
             case .eraser: board[row][column] = Cell(owner: nil, count: 0)
@@ -4782,11 +4927,11 @@ private struct AnalyzerPlayView: View {
         guard !isPaused, !isThinking, waitingForOpponent,
               board[row][column].owner == 1 - selfColor else { return }
         Haptics.shared.lightImpact()
+        pushUndoSnapshot()
         highlightedCell = nil
         applyMove(row: row, column: column, owner: 1 - selfColor)
         waitingForOpponent = false
         moveCount += 1
-        currentMoveStartedAt = Date()
         runSelfMove()
     }
 
@@ -4849,10 +4994,10 @@ private struct AnalyzerPlayView: View {
                 waitingForOpponent = false
                 return
             }
+            pushUndoSnapshot()
             applyMove(row: row, column: column, owner: selfColor)
             highlightedCell = row * boardSize + column
             moveCount += 1
-            currentMoveStartedAt = Date()
             waitingForOpponent = true
             isThinking = false
         }
@@ -4862,8 +5007,6 @@ private struct AnalyzerPlayView: View {
         hideTabBar = true
         if !analysisStarted {
             analysisStarted = true
-            matchStartedAt = Date()
-            currentMoveStartedAt = matchStartedAt
             isPaused = false
             selectedBrush = .piece(owner: 0, count: 1)
             runSelfMove()
@@ -4871,6 +5014,27 @@ private struct AnalyzerPlayView: View {
             isPaused = false
             if !waitingForOpponent { runSelfMove() }
         }
+    }
+
+    private func pushUndoSnapshot() {
+        undoStack.append(UndoState(board: board, moveCount: moveCount,
+                                   waitingForOpponent: waitingForOpponent, highlightedCell: highlightedCell))
+    }
+
+    private func undoPreviousAction() {
+        guard let previous = undoStack.popLast() else { return }
+        aiTask?.cancel()
+        board = previous.board
+        moveCount = previous.moveCount
+        waitingForOpponent = previous.waitingForOpponent
+        highlightedCell = previous.highlightedCell
+        isThinking = false
+        isPaused = true
+    }
+
+    private func toggleSelfColor() {
+        guard !isThinking && (!analysisStarted || isPaused) else { return }
+        selfColor = 1 - selfColor
     }
 
     private func pause() {
@@ -4887,21 +5051,25 @@ private struct AnalyzerPlayView: View {
             ScrollView(.vertical, showsIndicators: true) {
                 Group {
                     if horizontal {
-                        HStack(alignment: .top, spacing: 16) {
+                        HStack(alignment: .center, spacing: 16) {
                             VStack(spacing: 8) {
                                 backButton
                                 AnalyzerBoardView(boardSize: boardSize, board: board, highlightedCell: highlightedCell,
                                                  maxSide: maxBoardSide) { row, column in tapCell(row: row, column: column) }
-                                moveCounter
                             }
                             AnalyzerToolPanel(brush: $selectedBrush,
                                               isLocked: analysisStarted && !isPaused,
                                               isStarted: analysisStarted,
                                               isPaused: isPaused,
                                               isThinking: isThinking,
+                                              selfColor: selfColor,
+                                              canUndo: !undoStack.isEmpty,
                                               onStart: startOrResume,
-                                              onPause: pause)
+                                              onPause: pause,
+                                              onUndo: undoPreviousAction,
+                                              onToggleSide: toggleSelfColor)
                             .frame(width: 220)
+                            .frame(maxHeight: .infinity, alignment: .center)
                         }
                         .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .center)
                     } else {
@@ -4909,14 +5077,17 @@ private struct AnalyzerPlayView: View {
                             backButton
                             AnalyzerBoardView(boardSize: boardSize, board: board, highlightedCell: highlightedCell,
                                              maxSide: maxBoardSide) { row, column in tapCell(row: row, column: column) }
-                            moveCounter.frame(maxWidth: min(maxBoardSide, 600))
                             AnalyzerToolPanel(brush: $selectedBrush,
                                               isLocked: analysisStarted && !isPaused,
                                               isStarted: analysisStarted,
                                               isPaused: isPaused,
                                               isThinking: isThinking,
+                                              selfColor: selfColor,
+                                              canUndo: !undoStack.isEmpty,
                                               onStart: startOrResume,
-                                              onPause: pause)
+                                              onPause: pause,
+                                              onUndo: undoPreviousAction,
+                                              onToggleSide: toggleSelfColor)
                             .frame(maxWidth: min(maxBoardSide, 600))
                         }
                         .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .center)
@@ -4937,15 +5108,33 @@ struct StartMenuView: View {
     @ObservedObject var game: GameModel
     @Binding var selectedTab: Int
     @Binding var isSpinningRandomWheel: Bool
-    @State private var selectedPartyMode = 0
-    @State private var duelPlayerOneType: PlayerControlType = .human
-    @State private var duelPlayerTwoType: PlayerControlType = .human
+    @State private var selectedPartyMode = UserDefaults.standard.integer(forKey: "CW_SelectedPartyMode")
+    @State private var duelBoardSize: Int = {
+        let value = UserDefaults.standard.integer(forKey: "CW_Duel_BoardSize")
+        if [6, 9, 12].contains(value) { return value }
+        let legacy = UserDefaults.standard.integer(forKey: "CW_Saved_BoardSize")
+        return [6, 9, 12].min(by: { abs($0 - (legacy == 0 ? 6 : legacy)) < abs($1 - (legacy == 0 ? 6 : legacy)) }) ?? 6
+    }()
+    @State private var partyBoardSize: Int = {
+        let value = UserDefaults.standard.integer(forKey: "CW_Party_BoardSize")
+        if (5...12).contains(value) { return value }
+        let legacy = UserDefaults.standard.integer(forKey: "CW_Saved_BoardSize")
+        return (5...12).contains(legacy) ? legacy : 8
+    }()
+    @State private var duelPlayerOneType: PlayerControlType = UserDefaults.standard.data(forKey: "CW_Duel_PlayerOne")
+        .flatMap { try? JSONDecoder().decode(PlayerControlType.self, from: $0) } ?? .human
+    @State private var duelPlayerTwoType: PlayerControlType = UserDefaults.standard.data(forKey: "CW_Duel_PlayerTwo")
+        .flatMap { try? JSONDecoder().decode(PlayerControlType.self, from: $0) } ?? .human
     @State private var hideAnalyzerTabBar = false
     @State private var showPhotoPicker = false
     @State private var selectedPhotosItem: PhotosPickerItem?
-    @State private var analyzerBoardSize = 6
-    @State private var analyzerSelfColor = 0
+    @State private var analyzerBoardSize = {
+        let value = UserDefaults.standard.integer(forKey: "CW_Analyzer_BoardSize")
+        return [6, 9, 12].contains(value) ? value : 6
+    }()
+    @State private var analyzerSelfColor = UserDefaults.standard.integer(forKey: "CW_Analyzer_SelfColor") == 1 ? 1 : 0
     @State private var pendingAnalyzerArchive: GameSaveArchive?
+    @State private var unsupportedArchiveMessage: String?
 
     private func startGame(isLocalDuel: Bool = false) {
         game.isLocalDuelMode = isLocalDuel
@@ -4959,6 +5148,10 @@ struct StartMenuView: View {
     }
 
     private func startDuelGame() {
+        UserDefaults.standard.set(duelBoardSize, forKey: "CW_Duel_BoardSize")
+        UserDefaults.standard.set(partyBoardSize, forKey: "CW_Party_BoardSize")
+        game.isLocalDuelMode = true
+        game.boardSize = duelBoardSize
         let first = duelPlayerOneType
         let second = duelPlayerTwoType
         game.playerTypes = [first, second] + Array(repeating: .disabled, count: max(0, PlayerPreset.maxPlayers - 2))
@@ -4991,9 +5184,11 @@ struct StartMenuView: View {
                 .font(.system(size: 36, weight: .black, design: .rounded))
                 .foregroundStyle(.white)
             DualPlayerSetupView(game: game,
+                                boardSize: $duelBoardSize,
                                 playerOneType: $duelPlayerOneType,
                                 playerTwoType: $duelPlayerTwoType,
                                 onStartGame: startDuelGame)
+                .frame(maxWidth: 440)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(.horizontal, 20)
@@ -5019,6 +5214,22 @@ struct StartMenuView: View {
         .padding(.horizontal, 20)
     }
 
+    private func setupTabButton(title: String, icon: String, tag: Int) -> some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.24)) { selectedTab = tag }
+        } label: {
+            VStack(spacing: 4) {
+                Image(systemName: icon).font(.system(size: 18, weight: .semibold))
+                Text(title).font(.caption2.weight(.semibold))
+            }
+            .foregroundStyle(selectedTab == tag ? Color.cyan : Color.white.opacity(0.65))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selectedTab == tag ? .isSelected : [])
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -5038,31 +5249,33 @@ struct StartMenuView: View {
                                         hideTabBar: $hideAnalyzerTabBar,
                                         importedArchive: $pendingAnalyzerArchive)
                         .background(background)
-                        .tabItem {
-                            Label { Text("分析器") } icon: {
-                                ZStack(alignment: .bottomTrailing) {
-                                    Image(systemName: "gearshape.fill")
-                                    Image(systemName: "wrench.fill")
-                                        .font(.system(size: 9, weight: .bold))
-                                        .offset(x: 3, y: 2)
-                                }
-                            }
-                        }
+                        .tabItem { Label("分析器", systemImage: "wrench.and.screwdriver.fill") }
                         .tag(2)
                 }
                 .background(Color.clear)
-                .toolbarBackground(.visible, for: .tabBar)
-                .toolbarBackground(Color(red: 0.025, green: 0.055, blue: 0.14).opacity(0.96), for: .tabBar)
-                .toolbarColorScheme(.dark, for: .tabBar)
-                .toolbar(hideAnalyzerTabBar ? .hidden : .visible, for: .tabBar)
+                .toolbar(.hidden, for: .tabBar)
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if !hideAnalyzerTabBar {
+                    HStack(spacing: 0) {
+                        setupTabButton(title: "对弈", icon: "circle.grid.3x3.fill", tag: 0)
+                        setupTabButton(title: "派对", icon: "party.popper.fill", tag: 1)
+                        setupTabButton(title: "分析器", icon: "wrench.and.screwdriver.fill", tag: 2)
+                    }
+                    .frame(height: 58)
+                    .background(Color(red: 0.025, green: 0.055, blue: 0.14).opacity(0.98))
+                    .overlay(alignment: .top) { Rectangle().fill(Color.white.opacity(0.1)).frame(height: 0.5) }
+                }
             }
             .toolbar {
+                if !hideAnalyzerTabBar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { game.showArchivePickerSheet = true } label: {
                         Label("导入", systemImage: "square.and.arrow.down")
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(.cyan)
                     }
+                }
                 }
                 if selectedTab == 1 {
                     ToolbarItem(placement: .principal) {
@@ -5095,9 +5308,28 @@ struct StartMenuView: View {
             }
             .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhotosItem, matching: .images)
             .sheet(isPresented: $game.showArchivePickerSheet) {
-                ArchivePickerSheet(game: game, onSelect: selectedTab == 2 ? { archive in
-                    pendingAnalyzerArchive = archive
-                } : nil)
+                ArchivePickerSheet(game: game, unsupportedMessage: $unsupportedArchiveMessage, onSelect: { archive in
+                    let activeCount = archive.playerTypes.filter { $0.isEnabled }.count
+                    if (selectedTab == 0 || selectedTab == 2) && activeCount > 2 {
+                        unsupportedArchiveMessage = selectedTab == 0
+                            ? "这是多人棋局，请切换到「派对」模式后再导入。"
+                            : "分析器暂不支持多人棋局存档，请选择双人存档。"
+                        return false
+                    }
+                    switch selectedTab {
+                    case 2:
+                        pendingAnalyzerArchive = archive
+                    case 0:
+                        game.isLocalDuelMode = true
+                        game.restoreArchive(archive)
+                        game.shouldNavigateToGame = true
+                    default:
+                        game.isLocalDuelMode = false
+                        game.restoreArchive(archive)
+                        game.shouldNavigateToGame = true
+                    }
+                    return true
+                })
             }
             .onChange(of: selectedPhotosItem) { _, newItem in
                 guard let newItem else { return }
@@ -5109,6 +5341,59 @@ struct StartMenuView: View {
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
+            .onAppear {
+                selectedPartyMode = min(1, selectedPartyMode)
+                if !game.isOnlineMultiplayer {
+                    if let saved = UserDefaults.standard.data(forKey: "CW_Party_PlayerTypes"),
+                       let values = try? JSONDecoder().decode([PlayerControlType].self, from: saved),
+                       values.count == PlayerPreset.maxPlayers {
+                        game.isLocalDuelMode = false
+                        game.playerTypes = values
+                    } else if let data = try? JSONEncoder().encode(game.playerTypes) {
+                        UserDefaults.standard.set(data, forKey: "CW_Party_PlayerTypes")
+                    }
+                    game.boardSize = selectedTab == 0 ? duelBoardSize : partyBoardSize
+                }
+                game.flushSetupPreferences()
+            }
+            .onChange(of: selectedTab) { oldValue, newValue in
+                if oldValue == 0 { UserDefaults.standard.set(duelBoardSize, forKey: "CW_Duel_BoardSize") }
+                if oldValue == 1 { partyBoardSize = game.boardSize; UserDefaults.standard.set(partyBoardSize, forKey: "CW_Party_BoardSize") }
+                if !game.isOnlineMultiplayer {
+                    if newValue == 0 {
+                        game.isLocalDuelMode = false
+                        game.boardSize = duelBoardSize
+                    } else if newValue == 1 {
+                        if let saved = UserDefaults.standard.data(forKey: "CW_Party_PlayerTypes"),
+                           let values = try? JSONDecoder().decode([PlayerControlType].self, from: saved), values.count == PlayerPreset.maxPlayers {
+                            game.isLocalDuelMode = false
+                            game.playerTypes = values
+                        }
+                        game.boardSize = partyBoardSize
+                    }
+                }
+            }
+            .onChange(of: duelBoardSize) { _, value in UserDefaults.standard.set(value, forKey: "CW_Duel_BoardSize") }
+            .onChange(of: duelPlayerOneType) { _, value in
+                if let data = try? JSONEncoder().encode(value) { UserDefaults.standard.set(data, forKey: "CW_Duel_PlayerOne") }
+            }
+            .onChange(of: duelPlayerTwoType) { _, value in
+                if let data = try? JSONEncoder().encode(value) { UserDefaults.standard.set(data, forKey: "CW_Duel_PlayerTwo") }
+            }
+            .onChange(of: partyBoardSize) { _, value in UserDefaults.standard.set(value, forKey: "CW_Party_BoardSize") }
+            .onChange(of: game.boardSize) { _, value in
+                if selectedTab == 1 { partyBoardSize = value; UserDefaults.standard.set(value, forKey: "CW_Party_BoardSize") }
+            }
+            .onChange(of: game.playerTypes) { _, value in
+                if selectedTab == 1 && !game.isLocalDuelMode && !game.isOnlineMultiplayer,
+                   let data = try? JSONEncoder().encode(value) {
+                    UserDefaults.standard.set(data, forKey: "CW_Party_PlayerTypes")
+                }
+            }
+            .onChange(of: selectedPartyMode) { _, value in UserDefaults.standard.set(value, forKey: "CW_SelectedPartyMode") }
+            .onChange(of: analyzerBoardSize) { _, value in UserDefaults.standard.set(value, forKey: "CW_Analyzer_BoardSize") }
+            .onChange(of: analyzerSelfColor) { _, value in UserDefaults.standard.set(value, forKey: "CW_Analyzer_SelfColor") }
+            .onDisappear { game.flushSetupPreferences() }
         }
     }
 }
@@ -5124,7 +5409,7 @@ private struct AnalyzerLandingView: View {
     var body: some View {
         Group {
             if started {
-                AnalyzerPlayView(game: game, boardSize: boardSize, selfColor: selfColor,
+                AnalyzerPlayView(game: game, boardSize: boardSize, selfColor: $selfColor,
                                  hideTabBar: $hideTabBar, importedArchive: $importedArchive,
                                  initialArchive: importedArchive,
                                  onBack: { started = false; hideTabBar = false; importedArchive = nil })
@@ -5281,6 +5566,7 @@ struct GamePlayView: View {
                     }
                 }
                 .frame(width: proxy.size.width, height: proxy.size.height)
+                .animation(.easeInOut(duration: 0.45), value: game.currentPlayer)
             }
             .ignoresSafeArea()
             .allowsHitTesting(false)
@@ -5302,28 +5588,29 @@ struct GamePlayView: View {
                     }
                     .buttonStyle(.plain)
                     
-                    Spacer()
-                    
-                    HStack(spacing: 8) {
-                        ZStack {
-                            Circle()
-                                .fill(game.colors[safe: game.currentPlayer] ?? .blue)
-                                .frame(width: 12, height: 12)
-                            
-                            if let em = game.emojis[safe: game.currentPlayer], let emoji = em, !emoji.isEmpty {
-                                Text(emoji).font(.caption2)
+                    Spacer(minLength: 4)
+                    TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                        HStack(spacing: 7) {
+                            Text(Self.duration(timeline.date.timeIntervalSince(game.matchStartedAt)))
+                            Text("·").foregroundStyle(.white.opacity(0.55))
+                            HStack(spacing: 6) {
+                                Circle().fill(game.colors[safe: game.currentPlayer] ?? .blue).frame(width: 9, height: 9)
+                                Text(game.activePlayerIndices.count == 2
+                                     ? "\(game.currentPlayer == 0 ? "红" : "蓝")回合"
+                                     : "\(game.playerNames[safe: game.currentPlayer] ?? "玩家")回合")
+                                    .font(.system(size: 14, weight: .bold, design: .rounded))
                             }
+                            Text("·").foregroundStyle(.white.opacity(0.55))
+                            Text("\(game.localDuelMoveCount)步")
                         }
-                        
-                        Text("\(game.playerNames[safe: game.currentPlayer] ?? "玩家") 回合")
-                            .font(.system(size: 15, weight: .bold, design: .rounded))
-                            .foregroundColor(.white)
+                        .font(.caption.weight(.semibold).monospacedDigit())
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .glassEffect(.regular, in: Capsule())
+                        .fixedSize()
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .glassEffect(.regular, in: Capsule())
-                    
-                    Spacer()
+                    Spacer(minLength: 4)
                     
                     Button(action: { game.showControlSheet = true }) {
                         Image(systemName: "gearshape.fill")
@@ -5345,25 +5632,6 @@ struct GamePlayView: View {
                 }
                 .padding(.horizontal, 8)
 
-                TimelineView(.periodic(from: .now, by: 1)) { timeline in
-                    let now = timeline.date
-                    HStack(spacing: 6) {
-                        Text("本局 \(Self.duration(now.timeIntervalSince(game.matchStartedAt)))")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        Text("已走 \(game.localDuelMoveCount) 步")
-                            .fontWeight(.bold)
-                            .frame(maxWidth: .infinity)
-                        Text("本步 \(Self.duration(now.timeIntervalSince(game.currentMoveStartedAt)))")
-                            .frame(maxWidth: .infinity, alignment: .trailing)
-                    }
-                    .font(.caption.weight(.semibold).monospacedDigit())
-                    .foregroundStyle(.white)
-                    .frame(width: calculatedBoardWidth)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 9)
-                    .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
-                }
-                
                 Spacer(minLength: 8)
             }
             
@@ -5558,7 +5826,8 @@ struct PlayerTakeoverSheet: View {
 
 struct ArchivePickerSheet: View {
     @ObservedObject var game: GameModel
-    var onSelect: ((GameSaveArchive) -> Void)? = nil
+    @Binding var unsupportedMessage: String?
+    var onSelect: ((GameSaveArchive) -> Bool)? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var archives: [GameSaveArchive] = []
     
@@ -5574,12 +5843,12 @@ struct ArchivePickerSheet: View {
                     ForEach(archives) { archive in
                         Button(action: {
                             if let onSelect {
-                                onSelect(archive)
+                                if onSelect(archive) { dismiss() }
                             } else {
                                 game.restoreArchive(archive)
                                 game.shouldNavigateToGame = true
+                                dismiss()
                             }
-                            dismiss()
                         }) {
                             VStack(alignment: .leading, spacing: 6) {
                                 Text(archive.displaySummary)
@@ -5620,6 +5889,14 @@ struct ArchivePickerSheet: View {
             }
             .onAppear {
                 archives = game.loadAllArchives()
+            }
+            .alert("无法导入此存档", isPresented: Binding(
+                get: { unsupportedMessage != nil },
+                set: { if !$0 { unsupportedMessage = nil } }
+            )) {
+                Button("好", role: .cancel) { unsupportedMessage = nil }
+            } message: {
+                Text(unsupportedMessage ?? "")
             }
         }
         .presentationBackground(.thinMaterial)

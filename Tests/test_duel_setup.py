@@ -46,8 +46,8 @@ class LocalDuelSetupTests(unittest.TestCase):
 
     def test_duel_setup_defaults_both_players_to_human(self):
         menu = section("struct StartMenuView", "private func startGame(isLocalDuel")
-        self.assertIn("@State private var duelPlayerOneType: PlayerControlType = .human", menu)
-        self.assertIn("@State private var duelPlayerTwoType: PlayerControlType = .human", menu)
+        self.assertIn("@State private var duelPlayerOneType: PlayerControlType = UserDefaults.standard.data(forKey: \"CW_Duel_PlayerOne\")", menu)
+        self.assertIn("@State private var duelPlayerTwoType: PlayerControlType = UserDefaults.standard.data(forKey: \"CW_Duel_PlayerTwo\")", menu)
         self.assertIn("private let selectableBotTypes: [PlayerControlType] = [.human, .mathNightmare, .enhancedNightmare, .driveBot]", TEXT)
 
     def test_duel_board_size_is_limited_to_supported_steps(self):
