@@ -5413,17 +5413,25 @@ struct StartMenuView: View {
             .onChange(of: selectedPhotosItem) { _, item in loadSelectedBackground(item) }
     }
 
-    private var menuWithPreferences: some View {
+    private var menuWithAppearance: some View {
         menuWithPickers
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
             .onAppear(perform: restoreSetupPreferences)
+    }
+
+    private var menuWithModePreferences: some View {
+        menuWithAppearance
             .onChange(of: selectedTab) { oldValue, newValue in
                 handleTabChange(from: oldValue, to: newValue)
             }
             .onChange(of: duelBoardSize) { _, value in save(value, forKey: "CW_Duel_BoardSize") }
             .onChange(of: duelPlayerOneType) { _, value in save(value, forKey: "CW_Duel_PlayerOne") }
             .onChange(of: duelPlayerTwoType) { _, value in save(value, forKey: "CW_Duel_PlayerTwo") }
+    }
+
+    private var menuWithPartyPreferences: some View {
+        menuWithModePreferences
             .onChange(of: partyBoardSize) { _, value in save(value, forKey: "CW_Party_BoardSize") }
             .onChange(of: game.boardSize) { _, value in
                 guard selectedTab == 1 else { return }
@@ -5432,6 +5440,10 @@ struct StartMenuView: View {
             }
             .onChange(of: game.playerTypes) { _, value in savePartyPlayerTypes(value) }
             .onChange(of: selectedPartyMode) { _, value in save(value, forKey: "CW_SelectedPartyMode") }
+    }
+
+    private var menuWithAnalyzerPreferences: some View {
+        menuWithPartyPreferences
             .onChange(of: analyzerBoardSize) { _, value in save(value, forKey: "CW_Analyzer_BoardSize") }
             .onChange(of: analyzerSelfColor) { _, value in save(value, forKey: "CW_Analyzer_SelfColor") }
             .onDisappear { game.flushSetupPreferences() }
@@ -5439,7 +5451,7 @@ struct StartMenuView: View {
 
     var body: some View {
         NavigationStack {
-            menuWithPreferences
+            menuWithAnalyzerPreferences
         }
     }
 
