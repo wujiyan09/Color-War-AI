@@ -103,7 +103,7 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn(".disabled(isLocked)", SWIFT)
         self.assertIn("isLocked: analysisStarted && !isPaused", SWIFT)
         self.assertIn("if !analysisStarted || isPaused", SWIFT)
-        self.assertIn('Image(systemName: "chevron.left")', SWIFT)
+        self.assertIn('Label("返回", systemImage: "chevron.left")', SWIFT)
         self.assertIn(".glassEffect(.regular.interactive().tint(.darkNavyBlue), in: .capsule)", SWIFT)
         self.assertIn(".glassEffect(.regular.interactive(), in: .capsule)", SWIFT)
         self.assertGreaterEqual(SWIFT.count("Haptics.shared.lightImpact()"), 5)
@@ -120,10 +120,15 @@ class NativeAnalyzerTests(unittest.TestCase):
         gameplay = SWIFT[SWIFT.index("struct GamePlayView"):SWIFT.index("// MARK: - 23.")]
         self.assertNotIn("moveCounter", analyzer)
         self.assertNotIn("本步", analyzer)
-        self.assertIn(r'Text("\(game.localDuelMoveCount)步")', gameplay)
-        self.assertIn("TimelineView(.periodic(from: .now, by: 1))", gameplay)
-        self.assertIn('game.currentPlayer == 0 ? "红" : "蓝"', gameplay)
-        self.assertIn('Text("·")', gameplay)
+        toolbar = SWIFT[SWIFT.index("private var gameToolbar"):SWIFT.index("private func handleArchiveSelection")]
+        self.assertIn(r'Text("\(game.localDuelMoveCount)步")', toolbar)
+        self.assertIn("TimelineView(.periodic(from: .now, by: 1))", toolbar)
+        self.assertIn('game.currentPlayer == 0 ? "红" : "蓝"', toolbar)
+        self.assertIn('Text("·")', toolbar)
+        self.assertIn('.accessibilityLabel("设置")', toolbar)
+        self.assertIn('.accessibilityLabel("导入存档")', toolbar)
+        self.assertNotIn('Image(systemName: "chevron.left")', gameplay)
+        self.assertNotIn('Image(systemName: "gearshape.fill")', gameplay)
         self.assertIn(".animation(.easeInOut(duration: 0.45), value: game.currentPlayer)", gameplay)
         self.assertIn("@Published private(set) var localDuelMoveCount = 0", SWIFT)
         self.assertIn("localDuelMoveCount += 1", SWIFT)
@@ -131,6 +136,34 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn(".frame(maxWidth: 440)", SWIFT)
         self.assertNotIn("AI 思考算力/深度", SWIFT)
         self.assertNotIn("🧠 AI 算力等级", SWIFT)
+
+
+    def test_gameplay_pushes_from_navigation_stack_for_duel_and_party(self):
+        menu = SWIFT[SWIFT.index("struct StartMenuView"):SWIFT.index("private struct AnalyzerLandingView")]
+        root = SWIFT[SWIFT.index("struct ContentView: View"):]
+        self.assertIn("case gamePlay", menu)
+        self.assertIn("case .gamePlay:", menu)
+        self.assertIn("GamePlayView(game: game", menu)
+        self.assertIn("navigationPath.append(.gamePlay)", menu)
+        self.assertIn(".navigationDestination(for: StartMenuDestination.self)", menu)
+        self.assertIn("startGame(isLocalDuel: true)", menu)
+        self.assertIn("onChange(of: game.shouldNavigateToGame)", menu)
+        self.assertNotIn("if isGameStarted", root)
+
+    def test_game_toolbar_has_fixed_top_level_navigation_and_tools(self):
+        menu = SWIFT[SWIFT.index("struct StartMenuView"):SWIFT.index("private struct AnalyzerLandingView")]
+        toolbar = menu[menu.index("private var gameToolbar"):menu.index("private func handleArchiveSelection")]
+        self.assertIn("ToolbarItem(placement: .topBarLeading)", toolbar)
+        self.assertIn("ToolbarItemGroup(placement: .topBarTrailing)", toolbar)
+        self.assertIn('Image(systemName: "square.and.arrow.down")', toolbar)
+        self.assertIn('Image(systemName: "photo.badge.plus")', toolbar)
+        self.assertIn('Image(systemName: "gearshape.fill")', toolbar)
+        setup = menu[menu.index("private var setupToolbar"):menu.index("private var menuSurface")]
+        self.assertIn("ToolbarItem(placement: .topBarLeading)", setup)
+        self.assertIn("ToolbarItem(placement: .topBarTrailing)", setup)
+        self.assertNotIn("selectedPartyMode == 0", setup)
+        self.assertNotIn("selectedTab == 0", setup)
+        self.assertIn(".toolbarBackground(.visible, for: .navigationBar)", menu)
 
     def test_setup_preferences_are_persisted_per_mode_and_archives_do_not_overwrite_them(self):
         self.assertIn("CW_Duel_BoardSize", SWIFT)

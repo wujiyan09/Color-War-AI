@@ -5269,6 +5269,71 @@ struct StartMenuView: View {
         navigationPath.append(.analyzerPlay)
     }
 
+    private func openGame() {
+        guard !navigationPath.contains(.gamePlay) else { return }
+        game.shouldNavigateToGame = false
+        navigationPath.append(.gamePlay)
+    }
+
+    private func leaveGame() {
+        game.returnToMenuPreservingOnlineSession()
+        if navigationPath.last == .gamePlay { navigationPath.removeLast() }
+    }
+
+    private func chooseBackground() {
+        showPhotoPicker = true
+    }
+
+    @ToolbarContentBuilder
+    private var gameToolbar: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            Button(action: leaveGame) {
+                Label("返回", systemImage: "chevron.left")
+            }
+            .accessibilityLabel("返回")
+        }
+        ToolbarItem(placement: .principal) {
+            TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                HStack(spacing: 6) {
+                    Text(String(format: "%02d:%02d", max(0, Int(timeline.date.timeIntervalSince(game.matchStartedAt))) / 60,
+                                max(0, Int(timeline.date.timeIntervalSince(game.matchStartedAt))) % 60))
+                    Text("·").foregroundStyle(.white.opacity(0.55))
+                    Text(game.activePlayerIndices.count == 2
+                         ? "\(game.currentPlayer == 0 ? "红" : "蓝")回合"
+                         : "\(game.playerNames[safe: game.currentPlayer] ?? "玩家")回合")
+                    Text("·").foregroundStyle(.white.opacity(0.55))
+                    Text("\(game.localDuelMoveCount)步")
+                }
+                .font(.caption.weight(.semibold).monospacedDigit())
+                .foregroundStyle(.white)
+                .fixedSize()
+            }
+        }
+        ToolbarItemGroup(placement: .topBarTrailing) {
+            Button { game.showArchivePickerSheet = true } label: {
+                Image(systemName: "square.and.arrow.down")
+            }
+            .accessibilityLabel("导入存档")
+            Menu {
+                Button(action: chooseBackground) {
+                    Label("从相册选择背景", systemImage: "photo.on.rectangle")
+                }
+                if game.customBackgroundImage != nil {
+                    Button(role: .destructive) { game.saveCustomBackground(nil) } label: {
+                        Label("清除自定义背景", systemImage: "trash")
+                    }
+                }
+            } label: {
+                Image(systemName: "photo.badge.plus")
+            }
+            .accessibilityLabel("背景")
+            Button { game.showControlSheet = true } label: {
+                Image(systemName: "gearshape.fill")
+            }
+            .accessibilityLabel("设置")
+        }
+    }
+
     private func handleArchiveSelection(_ archive: GameSaveArchive) -> Bool {
         let activeCount = archive.playerTypes.filter { $0.isEnabled }.count
         if (selectedTab == 0 || selectedTab == 2) && activeCount > 2 {
@@ -5333,8 +5398,7 @@ struct StartMenuView: View {
                     .foregroundStyle(.cyan)
             }
         }
-        if selectedTab == 0 || (selectedTab == 1 && selectedPartyMode == 0) {
-            ToolbarItem(placement: .topBarTrailing) {
+        ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Button { showPhotoPicker = true } label: {
                         Label("从相册选择背景", systemImage: "photo.on.rectangle")
@@ -5350,7 +5414,6 @@ struct StartMenuView: View {
                         .font(.system(size: 16, weight: .medium))
                 }
             }
-        }
     }
 
     private var menuSurface: some View {
@@ -5363,18 +5426,12 @@ struct StartMenuView: View {
 
     private var menuWithPickers: some View {
         menuSurface
-            .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhotosItem, matching: .images)
-            .sheet(isPresented: $game.showArchivePickerSheet) {
-                ArchivePickerSheet(game: game, unsupportedMessage: $unsupportedArchiveMessage,
-                                   onSelect: handleArchiveSelection)
-            }
-            .onChange(of: selectedPhotosItem) { _, item in loadSelectedBackground(item) }
     }
 
     private var menuWithAppearance: some View {
         menuWithPickers
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(.hidden, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .onAppear(perform: restoreSetupPreferences)
     }
 
@@ -5412,6 +5469,15 @@ struct StartMenuView: View {
             menuWithAnalyzerPreferences
                 .navigationDestination(for: StartMenuDestination.self) { destination in
                     switch destination {
+                    case .gamePlay:
+                        GamePlayView(game: game,
+                                     isSpinningRandomWheel: $isSpinningRandomWheel,
+                                     onExit: leaveGame)
+                            .navigationBarBackButtonHidden(true)
+                            .navigationBarTitleDisplayMode(.inline)
+                            .toolbarBackground(.visible, for: .navigationBar)
+                            .toolbar(.hidden, for: .tabBar)
+                            .toolbar { gameToolbar }
                     case .analyzerPlay:
                         AnalyzerPlayView(game: game, boardSize: analyzerBoardSize,
                                          selfColor: $analyzerSelfColor,
@@ -5433,12 +5499,22 @@ struct StartMenuView: View {
                     }
                 }
         }
+        .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhotosItem, matching: .images)
+        .sheet(isPresented: $game.showArchivePickerSheet) {
+            ArchivePickerSheet(game: game, unsupportedMessage: $unsupportedArchiveMessage,
+                               onSelect: handleArchiveSelection)
+        }
+        .onChange(of: selectedPhotosItem) { _, item in loadSelectedBackground(item) }
+        .onChange(of: game.shouldNavigateToGame) { _, shouldNavigate in
+            if shouldNavigate { openGame() }
+        }
     }
 
 }
 
 private enum StartMenuDestination: Hashable {
     case analyzerPlay
+    case gamePlay
 }
 
 private struct AnalyzerLandingView: View {
@@ -5557,15 +5633,8 @@ struct RandomPlayerWheelOverlay: View {
 
 struct GamePlayView: View {
     @ObservedObject var game: GameModel
-    @Binding var isGameStarted: Bool
     @Binding var isSpinningRandomWheel: Bool
-    
-    @State private var calculatedBoardWidth: CGFloat = 320
-
-    private static func duration(_ interval: TimeInterval) -> String {
-        let seconds = max(0, Int(interval))
-        return String(format: "%02d:%02d", seconds / 60, seconds % 60)
-    }
+    let onExit: () -> Void
     
     var body: some View {
         ZStack {
@@ -5595,66 +5664,9 @@ struct GamePlayView: View {
             .allowsHitTesting(false)
             
             VStack(spacing: 8) {
-                HStack {
-                    Button(action: {
-                        game.returnToMenuPreservingOnlineSession()
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                            isGameStarted = false
-                        }
-                    }) {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundColor(.white)
-                            .frame(width: 34, height: 34)
-                            .contentShape(Circle())
-                            .glassEffect(.regular.interactive(), in: .circle)
-                    }
-                    .buttonStyle(.plain)
-                    
-                    Spacer(minLength: 4)
-                    TimelineView(.periodic(from: .now, by: 1)) { timeline in
-                        HStack(spacing: 7) {
-                            Text(Self.duration(timeline.date.timeIntervalSince(game.matchStartedAt)))
-                            Text("·").foregroundStyle(.white.opacity(0.55))
-                            HStack(spacing: 6) {
-                                Circle().fill(game.colors[safe: game.currentPlayer] ?? .blue).frame(width: 9, height: 9)
-                                Text(game.activePlayerIndices.count == 2
-                                     ? "\(game.currentPlayer == 0 ? "红" : "蓝")回合"
-                                     : "\(game.playerNames[safe: game.currentPlayer] ?? "玩家")回合")
-                                    .font(.system(size: 14, weight: .bold, design: .rounded))
-                            }
-                            Text("·").foregroundStyle(.white.opacity(0.55))
-                            Text("\(game.localDuelMoveCount)步")
-                        }
-                        .font(.caption.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .glassEffect(.regular, in: Capsule())
-                        .fixedSize()
-                    }
-                    Spacer(minLength: 4)
-                    
-                    Button(action: { game.showControlSheet = true }) {
-                        Image(systemName: "gearshape.fill")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundColor(.white)
-                            .frame(width: 34, height: 34)
-                            .contentShape(Circle())
-                            .glassEffect(.regular.interactive(), in: .circle)
-                    }
-                    .buttonStyle(.plain)
-                }
-                .frame(width: calculatedBoardWidth)
-                .padding(.top, 10)
-                
                 Spacer(minLength: 4)
-                
-                BoardView(game: game) { actualWidth in
-                    self.calculatedBoardWidth = actualWidth
-                }
-                .padding(.horizontal, 8)
-
+                BoardView(game: game) { _ in }
+                    .padding(.horizontal, 8)
                 Spacer(minLength: 8)
             }
             
@@ -5707,10 +5719,7 @@ struct GamePlayView: View {
                         }
                         .buttonStyle(.plain)
                         
-                        Button(action: {
-                            game.returnToMenuPreservingOnlineSession()
-                            withAnimation(.spring()) { isGameStarted = false }
-                        }) {
+                        Button(action: onExit) {
                             Text("返回主菜单")
                                 .font(.subheadline)
                                 .foregroundColor(.white.opacity(0.9))
@@ -5733,9 +5742,7 @@ struct GamePlayView: View {
             PlayerTakeoverSheet(game: game)
         }
         .alert("连接断开", isPresented: $game.showDisconnectedAlert) {
-            Button("确定", role: .cancel) {
-                withAnimation(.spring()) { isGameStarted = false }
-            }
+            Button("确定", role: .cancel, action: onExit)
         } message: {
             Text(game.disconnectedMessage)
         }
@@ -5930,7 +5937,6 @@ struct ArchivePickerSheet: View {
 
 struct ContentView: View {
     @StateObject private var game = GameModel()
-    @State private var isGameStarted = false
     @State private var isSpinningRandomWheel = false
     @State private var selectedSetupTab = 0
     
@@ -5938,21 +5944,11 @@ struct ContentView: View {
         ZStack {
             Color(red: 0.03, green: 0.05, blue: 0.10)
                 .ignoresSafeArea()
-            
-            if isGameStarted {
-                GamePlayView(
-                    game: game,
-                    isGameStarted: $isGameStarted,
-                    isSpinningRandomWheel: $isSpinningRandomWheel
-                )
-            } else {
-                StartMenuView(
-                    game: game,
-                    selectedTab: $selectedSetupTab,
-                    isSpinningRandomWheel: $isSpinningRandomWheel
-                )
-            }
-            
+            StartMenuView(
+                game: game,
+                selectedTab: $selectedSetupTab,
+                isSpinningRandomWheel: $isSpinningRandomWheel
+            )
             if isSpinningRandomWheel {
                 RandomPlayerWheelOverlay(
                     game: game,
@@ -5961,18 +5957,9 @@ struct ContentView: View {
                         game.resetGame(chosenFirstPlayer: chosenWinner)
                         game.beginGame()
                         isSpinningRandomWheel = false
-                        withAnimation(.spring()) {
-                            isGameStarted = true
-                        }
+                        game.shouldNavigateToGame = true
                     }
                 )
-            }
-        }
-        .onChange(of: game.shouldNavigateToGame) { _, shouldNav in
-            if shouldNav {
-                withAnimation(.spring()) {
-                    isGameStarted = true
-                }
             }
         }
     }
