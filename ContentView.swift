@@ -4586,7 +4586,7 @@ private struct AnalyzerToolPanel: View {
                     .foregroundStyle(.white)
             }
             .frame(maxWidth: .infinity, minHeight: 38)
-            .background(selected ? color.opacity(0.22) : .clear, in: RoundedRectangle(cornerRadius: 10))
+            .glassEffect(.regular.interactive().tint(selected ? color.opacity(0.20) : .clear), in: .rect(cornerRadius: 10))
             .contentShape(RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(.plain)
