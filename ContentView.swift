@@ -4,7 +4,6 @@ import UIKit
 import QuartzCore
 import MultipeerConnectivity
 import PhotosUI
-import WebKit
 
 // MARK: - 1. 触觉反馈引擎
 
@@ -2133,7 +2132,7 @@ final class GameModel: ObservableObject {
     @Published var disconnectedMessage: String = "房主已断开连接，对局已自动结束。"
     @Published var activeOnlineMode: ActiveOnlineMode = .none
     var isLocalDuelMode = false
-    private(set) var localDuelMoveCount = 0
+    @Published private(set) var localDuelMoveCount = 0
     
     @Published var customBackgroundImage: UIImage? = nil
     @Published var shouldNavigateToGame: Bool = false
@@ -4452,16 +4451,409 @@ struct OnlineGameSetupView: View {
     }
 }
 
-// MARK: - 20. 主菜单 View
+// MARK: - 20. 主菜单与原生标签栏
+
+private enum AnalyzerBrush: Equatable {
+    case piece(owner: Int, count: Int)
+    case eraser
+}
+
+private struct AnalyzerSetupView: View {
+    @Binding var boardSize: Int
+    @Binding var selfColor: Int
+    let onStart: () -> Void
+
+    private let supportedSizes = [6, 9, 12]
+
+    var body: some View {
+        VStack(spacing: 14) {
+            VStack(spacing: 10) {
+                HStack {
+                    Text("棋盘大小：\(boardSize) × \(boardSize)")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.white)
+                    Spacer()
+                }
+                Slider(value: Binding(
+                    get: { Double(boardSize) },
+                    set: { value in
+                        boardSize = supportedSizes.min(by: { abs($0 - Int(value)) < abs($1 - Int(value)) }) ?? 6
+                    }
+                ), in: 6...12, step: 3)
+                .tint(.darkNavyBlue)
+            }
+            .padding(12)
+            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("我方棋子")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.white)
+                Picker("我方颜色", selection: $selfColor) {
+                    Text("红色").tag(0)
+                    Text("蓝色").tag(1)
+                }
+                .pickerStyle(.segmented)
+                .tint(selfColor == 0 ? .red : .blue)
+            }
+            .padding(12)
+            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+
+            Button(action: onStart) {
+                Label("进入分析", systemImage: "sparkle.magnifyingglass")
+                    .font(.title3.bold())
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .contentShape(Capsule())
+                    .glassEffect(.regular.tint(.darkNavyBlue).interactive(), in: .capsule)
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(maxWidth: 440)
+        .padding(.horizontal, 20)
+    }
+}
+
+private struct AnalyzerBoardView: View {
+    let boardSize: Int
+    let board: [[Cell]]
+    let highlightedCell: Int?
+    let maxSide: CGFloat
+    let onTap: (Int, Int) -> Void
+
+    private let gap: CGFloat = 3
+    private let border: CGFloat = 6
+
+    var body: some View {
+        let side = max(10, (maxSide - border * 2 - gap * CGFloat(boardSize - 1)) / CGFloat(boardSize))
+        VStack(spacing: gap) {
+            ForEach(0..<boardSize, id: \.self) { row in
+                HStack(spacing: gap) {
+                    ForEach(0..<boardSize, id: \.self) { column in
+                        let index = row * boardSize + column
+                        let cell = board[row][column]
+                        ZStack {
+                            RoundedRectangle(cornerRadius: max(4, side * 0.17), style: .continuous)
+                                .fill(index == highlightedCell ? Color.yellow.opacity(0.42) : Color.white.opacity(0.05))
+                                .overlay(RoundedRectangle(cornerRadius: max(4, side * 0.17)).stroke(
+                                    index == highlightedCell ? Color.yellow.opacity(0.85) : Color.white.opacity(0.12),
+                                    lineWidth: index == highlightedCell ? 1.5 : 0.7
+                                ))
+                            if cell.count > 0 {
+                                PieceView(color: cell.owner == 0 ? .red : .blue, emoji: nil, count: cell.count, size: side * 0.76)
+                            }
+                        }
+                        .frame(width: side, height: side)
+                        .contentShape(Rectangle())
+                        .onTapGesture { onTap(row, column) }
+                        .animation(.spring(response: 0.2, dampingFraction: 0.68), value: cell)
+                    }
+                }
+            }
+        }
+        .padding(border)
+        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+        .frame(width: side * CGFloat(boardSize) + gap * CGFloat(boardSize - 1) + border * 2,
+               height: side * CGFloat(boardSize) + gap * CGFloat(boardSize - 1) + border * 2)
+    }
+}
+
+private struct AnalyzerToolPanel: View {
+    @Binding var brush: AnalyzerBrush
+    let isLocked: Bool
+    let isStarted: Bool
+    let isPaused: Bool
+    let isThinking: Bool
+    let onStart: () -> Void
+    let onPause: () -> Void
+
+    private func brushButton(owner: Int, count: Int) -> some View {
+        let color: Color = owner == 0 ? .red : .blue
+        let selected = brush == .piece(owner: owner, count: count)
+        return Button {
+            brush = .piece(owner: owner, count: count)
+            Haptics.shared.lightImpact()
+        } label: {
+            VStack(spacing: 3) {
+                HStack(spacing: 2) {
+                    ForEach(0..<count, id: \.self) { _ in
+                        Circle().fill(color).frame(width: 6, height: 6)
+                    }
+                }
+                Text("\(count)点")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.white)
+            }
+            .frame(maxWidth: .infinity, minHeight: 38)
+            .background(selected ? color.opacity(0.22) : .clear, in: RoundedRectangle(cornerRadius: 10))
+            .contentShape(RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.plain)
+        .disabled(isLocked)
+    }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("画笔")
+                    .font(.headline.bold())
+                    .foregroundStyle(.white)
+                ForEach(0..<2, id: \.self) { owner in
+                    HStack(spacing: 5) {
+                        Circle().fill(owner == 0 ? Color.red : Color.blue).frame(width: 10, height: 10)
+                        Text(owner == 0 ? "红" : "蓝")
+                            .font(.caption.bold())
+                            .foregroundStyle(.white)
+                            .frame(width: 22, alignment: .leading)
+                        ForEach(1...3, id: \.self) { count in
+                            brushButton(owner: owner, count: count)
+                        }
+                    }
+                }
+                Button {
+                    brush = .eraser
+                    Haptics.shared.lightImpact()
+                } label: {
+                    Label("橡皮擦", systemImage: "eraser.fill")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, minHeight: 38)
+                        .contentShape(Capsule())
+                        .glassEffect(.regular.interactive().tint(brush == .eraser ? .gray.opacity(0.35) : .clear), in: .capsule)
+                }
+                .buttonStyle(.plain)
+                .disabled(isLocked)
+            }
+            .padding(12)
+            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+            .opacity(isLocked ? 0.52 : 1)
+
+            Button(action: onStart) {
+                Label(isThinking ? "计算中…" : (isStarted && isPaused ? "继续分析" : "开始分析"),
+                      systemImage: isThinking ? "hourglass" : "play.fill")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 11)
+                    .contentShape(Capsule())
+                    .glassEffect(.regular.tint(.darkNavyBlue).interactive(), in: .capsule)
+            }
+            .buttonStyle(.plain)
+            .disabled(isThinking || (isStarted && !isPaused))
+            .opacity(isThinking || (isStarted && !isPaused) ? 0.55 : 1)
+
+            Button(action: onPause) {
+                Label("暂停分析", systemImage: "pause.fill")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 11)
+                    .contentShape(Capsule())
+                    .glassEffect(.regular.interactive(), in: .capsule)
+            }
+            .buttonStyle(.plain)
+            .disabled(!isStarted || isPaused)
+            .opacity(!isStarted || isPaused ? 0.5 : 1)
+        }
+    }
+}
+
+private struct AnalyzerPlayView: View {
+    @ObservedObject var game: GameModel
+    let boardSize: Int
+    let selfColor: Int
+    @State private var board: [[Cell]]
+    @State private var selectedBrush: AnalyzerBrush = .piece(owner: 0, count: 1)
+    @State private var analysisStarted = false
+    @State private var isPaused = false
+    @State private var isThinking = false
+    @State private var waitingForOpponent = false
+    @State private var moveCount = 0
+    @State private var highlightedCell: Int?
+    @State private var aiTask: Task<Void, Never>?
+
+    init(game: GameModel, boardSize: Int, selfColor: Int) {
+        self.game = game
+        self.boardSize = boardSize
+        self.selfColor = selfColor
+        var initial = Array(repeating: Array(repeating: Cell(owner: nil, count: 0), count: boardSize), count: boardSize)
+        initial[0][0] = Cell(owner: 0, count: 1)
+        initial[boardSize - 1][boardSize - 1] = Cell(owner: 1, count: 1)
+        _board = State(initialValue: initial)
+    }
+
+    private var moveCounter: some View {
+        Label("已走 \(moveCount) 步", systemImage: "arrow.left.arrow.right")
+            .font(.subheadline.bold())
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 9)
+            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+    }
+
+    private func tapCell(row: Int, column: Int) {
+        if !analysisStarted {
+            switch selectedBrush {
+            case let .piece(owner, count): board[row][column] = Cell(owner: owner, count: count)
+            case .eraser: board[row][column] = Cell(owner: nil, count: 0)
+            }
+            return
+        }
+        guard !isPaused, !isThinking, waitingForOpponent,
+              board[row][column].owner == 1 - selfColor else { return }
+        highlightedCell = nil
+        applyMove(row: row, column: column, owner: 1 - selfColor)
+        waitingForOpponent = false
+        moveCount += 1
+        runSelfMove()
+    }
+
+    private func applyMove(row: Int, column: Int, owner: Int) {
+        if board[row][column].owner == owner {
+            board[row][column].count += 1
+        } else {
+            board[row][column] = Cell(owner: owner, count: board[row][column].count + 1)
+        }
+        var iterations = 0
+        while iterations < boardSize * boardSize * 8 {
+            iterations += 1
+            let exploding = (0..<boardSize).flatMap { r in
+                (0..<boardSize).compactMap { c -> (Int, Int, Int)? in
+                    let cell = board[r][c]
+                    guard cell.count >= 4, let source = cell.owner else { return nil }
+                    return (r, c, source)
+                }
+            }
+            guard !exploding.isEmpty else { break }
+            for (r, c, _) in exploding {
+                board[r][c].count -= 4
+                if board[r][c].count == 0 { board[r][c].owner = nil }
+            }
+            for (r, c, source) in exploding {
+                for (dr, dc) in [(0, 1), (0, -1), (1, 0), (-1, 0)] {
+                    let nr = r + dr, nc = c + dc
+                    guard (0..<boardSize).contains(nr), (0..<boardSize).contains(nc) else { continue }
+                    board[nr][nc].owner = source
+                    board[nr][nc].count += 1
+                }
+            }
+        }
+    }
+
+    private func runSelfMove() {
+        guard analysisStarted, !isPaused, !isThinking else { return }
+        isThinking = true
+        let difficulty = game.aiDifficultyLevel
+        let solver = AISolver(
+            boardSize: boardSize,
+            activePlayers: [0, 1],
+            currentPlayer: selfColor,
+            playerType: .mathNightmare,
+            aiLevel: difficulty,
+            board: board,
+            hasEntered: [true, true],
+            eliminated: [false, false],
+            isLocalDuelMode: true,
+            localDuelMovesPlayed: moveCount
+        )
+        aiTask = Task {
+            let move = await solver.calculateBestMove()
+            guard !Task.isCancelled else {
+                isThinking = false
+                return
+            }
+            guard !isPaused, let (row, column) = move else {
+                isThinking = false
+                waitingForOpponent = false
+                return
+            }
+            applyMove(row: row, column: column, owner: selfColor)
+            highlightedCell = row * boardSize + column
+            moveCount += 1
+            waitingForOpponent = true
+            isThinking = false
+        }
+    }
+
+    private func startOrResume() {
+        if !analysisStarted {
+            analysisStarted = true
+            isPaused = false
+            selectedBrush = .piece(owner: 0, count: 1)
+            runSelfMove()
+        } else if isPaused {
+            isPaused = false
+            if !waitingForOpponent { runSelfMove() }
+        }
+    }
+
+    private func pause() {
+        guard analysisStarted else { return }
+        isPaused = true
+        aiTask?.cancel()
+        isThinking = false
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let horizontal = proxy.size.width >= 940 || (proxy.size.width >= 780 && proxy.size.width > proxy.size.height)
+            let maxBoardSide = min(680, horizontal ? min(proxy.size.height - 50, proxy.size.width - 250) : proxy.size.width - 30)
+            ScrollView(.vertical, showsIndicators: true) {
+                Group {
+                    if horizontal {
+                        HStack(alignment: .top, spacing: 16) {
+                            VStack(spacing: 8) {
+                                AnalyzerBoardView(boardSize: boardSize, board: board, highlightedCell: highlightedCell,
+                                                 maxSide: maxBoardSide) { row, column in tapCell(row: row, column: column) }
+                                moveCounter
+                            }
+                            AnalyzerToolPanel(brush: $selectedBrush,
+                                              isLocked: analysisStarted,
+                                              isStarted: analysisStarted,
+                                              isPaused: isPaused,
+                                              isThinking: isThinking,
+                                              onStart: startOrResume,
+                                              onPause: pause)
+                            .frame(width: 220)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .center)
+                    } else {
+                        VStack(spacing: 10) {
+                            AnalyzerBoardView(boardSize: boardSize, board: board, highlightedCell: highlightedCell,
+                                             maxSide: maxBoardSide) { row, column in tapCell(row: row, column: column) }
+                            moveCounter.frame(maxWidth: min(maxBoardSide, 600))
+                            AnalyzerToolPanel(brush: $selectedBrush,
+                                              isLocked: analysisStarted,
+                                              isStarted: analysisStarted,
+                                              isPaused: isPaused,
+                                              isThinking: isThinking,
+                                              onStart: startOrResume,
+                                              onPause: pause)
+                            .frame(maxWidth: min(maxBoardSide, 600))
+                        }
+                        .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .center)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            }
+        }
+        .onDisappear { aiTask?.cancel() }
+    }
+}
 
 struct StartMenuView: View {
     @ObservedObject var game: GameModel
     @Binding var selectedTab: Int
     @Binding var isSpinningRandomWheel: Bool
+    @State private var selectedPartyMode = 0
     @State private var duelPlayerOneIsBot = false
     @State private var duelPlayerTwoIsBot = false
-    @State private var showPhotoPicker: Bool = false
-    @State private var selectedPhotosItem: PhotosPickerItem? = nil
+    @State private var showPhotoPicker = false
+    @State private var selectedPhotosItem: PhotosPickerItem?
+    @State private var analyzerBoardSize = 6
+    @State private var analyzerSelfColor = 0
 
     private func startGame(isLocalDuel: Bool = false) {
         game.isLocalDuelMode = isLocalDuel
@@ -4482,133 +4874,149 @@ struct StartMenuView: View {
         startGame(isLocalDuel: true)
     }
 
+    private var background: some View {
+        ZStack {
+            Color(red: 0.03, green: 0.05, blue: 0.10).ignoresSafeArea()
+            if let customImg = game.customBackgroundImage {
+                Image(uiImage: customImg)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .ignoresSafeArea()
+                    .overlay(Color.black.opacity(0.35))
+            }
+        }
+    }
+
+    private var duelTab: some View {
+        VStack(spacing: 16) {
+            Text("COLOR WAR")
+                .font(.system(size: 36, weight: .black, design: .rounded))
+                .foregroundStyle(.white)
+            DualPlayerSetupView(game: game,
+                                playerOneIsBot: $duelPlayerOneIsBot,
+                                playerTwoIsBot: $duelPlayerTwoIsBot,
+                                onStartGame: startDuelGame)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 20)
+    }
+
+    private var partyTab: some View {
+        VStack(spacing: 16) {
+            Text("COLOR WAR")
+                .font(.system(size: 36, weight: .black, design: .rounded))
+                .foregroundStyle(.white)
+            if selectedPartyMode == 0 {
+                LocalGameSetupView(game: game) {
+                    game.prepareLocalPlayerNamesForGame()
+                    startGame()
+                }
+                .frame(maxWidth: 440)
+            } else {
+                RemoteWebSocketSetupView(game: game) { startGame() }
+                    .frame(maxWidth: 440)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 20)
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
-                Color(red: 0.03, green: 0.05, blue: 0.10)
-                    .ignoresSafeArea()
-
-                if let customImg = game.customBackgroundImage {
-                    Image(uiImage: customImg)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
-                        .ignoresSafeArea()
-                        .overlay(Color.black.opacity(0.35))
+                background
+                TabView(selection: $selectedTab) {
+                    duelTab
+                        .tabItem { Label("对弈", systemImage: "gamecontroller.fill") }
+                        .tag(0)
+                    partyTab
+                        .tabItem { Label("派对", systemImage: "person.3.fill") }
+                        .tag(1)
+                    AnalyzerLandingView(game: game,
+                                        boardSize: $analyzerBoardSize,
+                                        selfColor: $analyzerSelfColor)
+                        .tabItem { Label("分析器", systemImage: "magnifyingglass") }
+                        .tag(2)
                 }
-
-                if selectedTab < 2 {
-                    VStack(spacing: 0) {
-                        Spacer()
-
-                        VStack(spacing: 16) {
-                            Text("COLOR WAR")
-                                .font(.system(size: 36, weight: .black, design: .rounded))
-                                .foregroundColor(.white)
-
-                            if selectedTab == 0 {
-                                DualPlayerSetupView(
-                                    game: game,
-                                    playerOneIsBot: $duelPlayerOneIsBot,
-                                    playerTwoIsBot: $duelPlayerTwoIsBot,
-                                    onStartGame: startDuelGame
-                                )
-                                .transition(.opacity)
-                            } else {
-                                LocalGameSetupView(game: game) {
-                                    game.prepareLocalPlayerNamesForGame()
-                                    startGame()
-                                }
-                                .transition(.opacity)
-                            }
-                        }
-                        .frame(maxWidth: 440)
-
-                        Spacer()
-                    }
-                    .padding(.horizontal, 20)
-                } else {
-                    VStack(spacing: 16) {
-                        Text("COLOR WAR")
-                            .font(.system(size: 36, weight: .black, design: .rounded))
-                            .foregroundColor(.white)
-
-                        RemoteWebSocketSetupView(game: game) {
-                            startGame()
-                        }
-                        .transition(.opacity)
-                    }
-                    .frame(maxWidth: 440)
-                    .padding(.horizontal, 20)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
+                .toolbarBackground(.hidden, for: .tabBar)
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button(action: {
-                        game.showArchivePickerSheet = true
-                    }) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "square.and.arrow.down")
-                            Text("导入")
+                    Button { game.showArchivePickerSheet = true } label: {
+                        Label("导入", systemImage: "square.and.arrow.down")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.cyan)
+                    }
+                }
+                if selectedTab == 1 {
+                    ToolbarItem(placement: .principal) {
+                        Picker("派对模式", selection: $selectedPartyMode) {
+                            Text("多人").tag(0)
+                            Text("联机").tag(1)
                         }
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(.cyan)
+                        .pickerStyle(.segmented)
+                        .frame(width: 190)
                     }
                 }
-
-                ToolbarItem(placement: .principal) {
-                    Picker("Game Mode", selection: $selectedTab) {
-                        Text("双人模式").tag(0)
-                        Text("多人模式").tag(1)
-                        Text("联机模式").tag(2)
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 300)
-                }
-
-                if selectedTab < 2 {
+                if selectedTab == 0 || (selectedTab == 1 && selectedPartyMode == 0) {
                     ToolbarItem(placement: .topBarTrailing) {
                         Menu {
-                            Button {
-                                showPhotoPicker = true
-                            } label: {
+                            Button { showPhotoPicker = true } label: {
                                 Label("从相册选择背景", systemImage: "photo.on.rectangle")
                             }
-
                             if game.customBackgroundImage != nil {
-                                Button(role: .destructive) {
-                                    game.saveCustomBackground(nil)
-                                } label: {
+                                Button(role: .destructive) { game.saveCustomBackground(nil) } label: {
                                     Label("清除自定义背景", systemImage: "trash")
                                 }
                             }
                         } label: {
                             Image(systemName: "photo.badge.plus")
-                                .foregroundColor(.white)
+                                .foregroundStyle(.white)
                                 .font(.system(size: 16, weight: .medium))
                         }
                     }
                 }
             }
             .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhotosItem, matching: .images)
-            .sheet(isPresented: $game.showArchivePickerSheet) {
-                ArchivePickerSheet(game: game)
-            }
+            .sheet(isPresented: $game.showArchivePickerSheet) { ArchivePickerSheet(game: game) }
             .onChange(of: selectedPhotosItem) { _, newItem in
-                guard let newItem = newItem else { return }
+                guard let newItem else { return }
                 Task {
-                    if let data = try? await newItem.loadTransferable(type: Data.self),
-                       let uiImage = UIImage(data: data) {
-                        await MainActor.run {
-                            game.saveCustomBackground(uiImage)
-                        }
+                    if let data = try? await newItem.loadTransferable(type: Data.self), let image = UIImage(data: data) {
+                        await MainActor.run { game.saveCustomBackground(image) }
                     }
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
         }
+    }
+}
+
+private struct AnalyzerLandingView: View {
+    @ObservedObject var game: GameModel
+    @Binding var boardSize: Int
+    @Binding var selfColor: Int
+    @State private var started = false
+
+    var body: some View {
+        Group {
+            if started {
+                AnalyzerPlayView(game: game, boardSize: boardSize, selfColor: selfColor)
+            } else {
+                VStack(spacing: 16) {
+                    Text("COLOR WAR")
+                        .font(.system(size: 36, weight: .black, design: .rounded))
+                        .foregroundStyle(.white)
+                    AnalyzerSetupView(boardSize: $boardSize, selfColor: $selfColor) {
+                        started = true
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .background(Color.clear)
     }
 }
 
@@ -4797,6 +5205,15 @@ struct GamePlayView: View {
                     self.calculatedBoardWidth = actualWidth
                 }
                 .padding(.horizontal, 8)
+
+                if game.isLocalDuelMode && game.activePlayerIndices.count == 2 && !game.isOnlineMultiplayer {
+                    Label("已走 \(game.localDuelMoveCount) 步", systemImage: "arrow.left.arrow.right")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.white)
+                        .frame(width: calculatedBoardWidth)
+                        .padding(.vertical, 9)
+                        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+                }
                 
                 Spacer(minLength: 8)
             }
@@ -4899,66 +5316,9 @@ struct PlayerTakeoverSheet: View {
     @ObservedObject var wsManager = WebSocketNetworkManager.shared
     @Environment(\.dismiss) private var dismiss
     @State private var showSavedToast: Bool = false
-    @State private var showDotsAnalyzer: Bool = false
-    @State private var dotsAnalyzerPositionCode: String?
-
-    private var dotsAnalyzerAvailability: (code: String?, reason: String) {
-        guard game.isGameInPlay else { return (nil, "开始一局后即可分析") }
-        guard !game.isProcessingCascade else { return (nil, "爆裂结算完成后即可分析") }
-        guard game.winnerIndex == nil else { return (nil, "本局已结束") }
-        guard [6, 9, 12].contains(game.boardSize) else { return (nil, "分析器仅支持 6×6、9×9、12×12") }
-        guard game.activePlayerIndices.count == 2 else { return (nil, "分析器仅支持双人局面") }
-        guard game.board.count == game.boardSize,
-              game.board.allSatisfy({ $0.count == game.boardSize }) else {
-            return (nil, "当前棋盘状态不完整")
-        }
-
-        let players = game.activePlayerIndices.sorted()
-        guard players.allSatisfy({ $0 >= 0 && $0 < game.eliminated.count && !game.eliminated[$0] }) else {
-            return (nil, "仅支持双方都仍在对局中的局面")
-        }
-        guard players.contains(game.currentPlayer) else { return (nil, "无法识别当前行棋方") }
-
-        let owners = Set(game.board.flatMap { $0 }.compactMap(\.owner))
-        guard owners == Set(players) else { return (nil, "需要双方棋子都在棋盘上的稳定局面") }
-        guard game.board.flatMap({ $0 }).allSatisfy({ cell in
-            if cell.owner == nil { return cell.count == 0 }
-            return (1...3).contains(cell.count)
-        }) else { return (nil, "棋盘仍有正在爆裂的格子，暂不能分析") }
-
-        var pieces: [String] = []
-        for row in 0..<game.boardSize {
-            for column in 0..<game.boardSize {
-                let cell = game.board[row][column]
-                guard let owner = cell.owner else { continue }
-                let color = owner == players[0] ? "r" : "b"
-                pieces.append("\(column),\(row),\(color),\(cell.count)")
-            }
-        }
-        let turn = game.currentPlayer == players[0] ? "red" : "blue"
-        return ("DOTS1|\(game.boardSize)|\(turn)|\(pieces.joined(separator: ";"))", "")
-    }
-    
     var body: some View {
         NavigationStack {
             List {
-                Section(header: Text("局面分析")) {
-                    Button {
-                        guard let code = dotsAnalyzerAvailability.code else { return }
-                        dotsAnalyzerPositionCode = code
-                        showDotsAnalyzer = true
-                    } label: {
-                        Label("打开离线分析器", systemImage: "sparkle.magnifyingglass")
-                    }
-                    .disabled(dotsAnalyzerAvailability.code == nil)
-
-                    Text(dotsAnalyzerAvailability.code == nil
-                         ? dotsAnalyzerAvailability.reason
-                         : "分析当前稳定局面；推荐着法仅在分析器副本中演练，不会修改本局。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
                 if p2pManager.isConnected || wsManager.isConnected {
                     Section(header: Text("我的联机昵称")) {
                         HStack {
@@ -5067,90 +5427,7 @@ struct PlayerTakeoverSheet: View {
                 Button("完成") { dismiss() }
             }
         }
-        .sheet(isPresented: $showDotsAnalyzer) {
-            if let code = dotsAnalyzerPositionCode {
-                DotsAnalyzerView(positionCode: code)
-            }
-        }
         .presentationBackground(.thinMaterial)
-    }
-}
-
-private struct DotsAnalyzerView: View {
-    let positionCode: String
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                Text("离线分析当前局面。此页面的着法和编辑不会写回原对局。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                DotsAnalyzerWebView(positionCode: positionCode)
-            }
-            .navigationTitle("局面分析")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                Button("完成") { dismiss() }
-            }
-        }
-    }
-}
-
-private struct DotsAnalyzerWebView: UIViewRepresentable {
-    let positionCode: String
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(positionCode: positionCode)
-    }
-
-    func makeUIView(context: Context) -> WKWebView {
-        let configuration = WKWebViewConfiguration()
-        configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
-        let webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.isOpaque = false
-        webView.backgroundColor = UIColor(red: 7.0 / 255.0, green: 9.0 / 255.0, blue: 14.0 / 255.0, alpha: 1.0)
-        webView.scrollView.backgroundColor = webView.backgroundColor
-        webView.navigationDelegate = context.coordinator
-        context.coordinator.loadAnalyzer(in: webView)
-        return webView
-    }
-
-    func updateUIView(_ webView: WKWebView, context: Context) {}
-
-    final class Coordinator: NSObject, WKNavigationDelegate {
-        private let positionCode: String
-        private var hasImportedPosition = false
-
-        init(positionCode: String) {
-            self.positionCode = positionCode
-        }
-
-        func loadAnalyzer(in webView: WKWebView) {
-            // Local review prototype only: the imported Drive engine's upstream license is not cleared for release.
-            guard let url = Bundle.main.url(forResource: "DotsAnalyzer", withExtension: "html") else {
-                webView.loadHTMLString("<html><body style='background:#07090e;color:white;font:16px -apple-system;padding:24px'>分析器资源未打包。</body></html>", baseURL: nil)
-                return
-            }
-            webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
-        }
-
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            guard !hasImportedPosition else { return }
-            hasImportedPosition = true
-            guard let data = try? JSONSerialization.data(withJSONObject: [positionCode], options: [.fragmentsAllowed]),
-                  let encoded = String(data: data, encoding: .utf8) else { return }
-            let javascript = "(function(){var code = \(encoded)[0]; window.__dots.importStateCode(code, true); window.__dots.compute();})();"
-            webView.evaluateJavaScript(javascript)
-        }
-
-        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
-                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            decisionHandler(navigationAction.request.url?.isFileURL == true ? .allow : .cancel)
-        }
     }
 }
 

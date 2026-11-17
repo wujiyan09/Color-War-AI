@@ -1,75 +1,56 @@
-from html.parser import HTMLParser
 from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SWIFT = (ROOT / "ContentView.swift").read_text()
-HTML = (ROOT / "Resources" / "DotsAnalyzer.html").read_text()
-PACKAGE = (ROOT / "Package.swift").read_text()
 
 
-class InlineScripts(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.scripts = []
-        self.current = None
+class NativeAnalyzerTests(unittest.TestCase):
+    def test_three_native_tabs_and_party_mode_picker(self):
+        self.assertIn("TabView(selection: $selectedTab)", SWIFT)
+        self.assertIn('Label("对弈", systemImage: "gamecontroller.fill")', SWIFT)
+        self.assertIn('Label("派对", systemImage: "person.3.fill")', SWIFT)
+        self.assertIn('Label("分析器", systemImage: "magnifyingglass")', SWIFT)
+        self.assertIn('Text("多人").tag(0)', SWIFT)
+        self.assertIn('Text("联机").tag(1)', SWIFT)
+        self.assertIn('Picker("派对模式", selection: $selectedPartyMode)', SWIFT)
 
-    def handle_starttag(self, tag, attrs):
-        if tag == "script":
-            self.current = []
+    def test_analyzer_setup_offers_supported_sizes_and_self_color(self):
+        self.assertIn("private let supportedSizes = [6, 9, 12]", SWIFT)
+        self.assertIn('Text("红色").tag(0)', SWIFT)
+        self.assertIn('Text("蓝色").tag(1)', SWIFT)
+        self.assertIn('Label("进入分析", systemImage: "sparkle.magnifyingglass")', SWIFT)
 
-    def handle_data(self, data):
-        if self.current is not None:
-            self.current.append(data)
+    def test_native_board_has_corner_setup_editing_tools_and_responsive_layout(self):
+        self.assertIn("initial[0][0] = Cell(owner: 0, count: 1)", SWIFT)
+        self.assertIn("initial[boardSize - 1][boardSize - 1] = Cell(owner: 1, count: 1)", SWIFT)
+        self.assertIn("private enum AnalyzerBrush", SWIFT)
+        self.assertIn("case piece(owner: Int, count: Int)", SWIFT)
+        self.assertIn("case eraser", SWIFT)
+        self.assertIn("proxy.size.width >= 940", SWIFT)
+        self.assertIn("proxy.size.width >= 780", SWIFT)
+        self.assertIn("AnalyzerToolPanel", SWIFT)
+        self.assertIn(".glassEffect(.regular.interactive()", SWIFT)
 
-    def handle_endtag(self, tag):
-        if tag == "script" and self.current is not None:
-            self.scripts.append("".join(self.current))
-            self.current = None
+    def test_analysis_runs_duel_solver_and_waits_for_opponent(self):
+        self.assertIn("isLocalDuelMode: true", SWIFT)
+        self.assertIn("let move = await solver.calculateBestMove()", SWIFT)
+        self.assertIn("highlightedCell = row * boardSize + column", SWIFT)
+        self.assertIn("waitingForOpponent = true", SWIFT)
+        self.assertIn("highlightedCell = nil", SWIFT)
+        self.assertIn("board[row][column].owner == 1 - selfColor", SWIFT)
+        self.assertIn("case let .piece(owner, count): board[row][column] = Cell(owner: owner, count: count)", SWIFT)
+        self.assertIn("case .eraser: board[row][column] = Cell(owner: nil, count: 0)", SWIFT)
+        self.assertIn(".disabled(isLocked)", SWIFT)
 
-
-class DotsAnalyzerIntegrationTests(unittest.TestCase):
-    def test_html_is_bundled_as_app_resource(self):
-        self.assertIn('.process("Resources")', PACKAGE)
-        self.assertTrue((ROOT / "Resources" / "DotsAnalyzer.html").is_file())
-        self.assertIn('forResource: "DotsAnalyzer", withExtension: "html"', SWIFT)
-
-    def test_analyzer_is_separate_offline_webview_not_native_ai_replacement(self):
-        self.assertIn("import WebKit", SWIFT)
-        self.assertIn("struct DotsAnalyzerWebView: UIViewRepresentable", SWIFT)
-        self.assertIn("webView.loadFileURL", SWIFT)
-        self.assertIn("navigationAction.request.url?.isFileURL == true ? .allow : .cancel", SWIFT)
-        self.assertIn("window.__dots.importStateCode(code, true); window.__dots.compute();", SWIFT)
-        self.assertIn("不会写回原对局", SWIFT)
-
-    def test_live_position_export_is_limited_to_stable_supported_two_player_boards(self):
-        self.assertIn("[6, 9, 12].contains(game.boardSize)", SWIFT)
-        self.assertIn("game.activePlayerIndices.count == 2", SWIFT)
-        self.assertIn("!game.isProcessingCascade", SWIFT)
-        self.assertIn("(1...3).contains(cell.count)", SWIFT)
-        self.assertIn('"DOTS1|\\(game.boardSize)|\\(turn)|', SWIFT)
-        self.assertIn('pieces.append("\\(column),\\(row),\\(color),\\(cell.count)")', SWIFT)
-
-    def test_imported_analyzer_has_no_external_scraper_or_userscript(self):
-        lowered = HTML.lower()
-        for forbidden in ("userscript", "dotscapture", "dots-online.com", "copy-userscript", "scrape("):
-            self.assertNotIn(forbidden, lowered)
-        self.assertNotRegex(lowered, r'<(?:script|link)[^>]+(?:src|href)=["\']https?://')
-
-    def test_analyzer_keeps_its_own_local_copy_and_state_import(self):
-        self.assertIn("function importStateCode(code, quiet)", HTML)
-        self.assertIn("window.__dots = {", HTML)
-        self.assertIn("state.board = parsed.board", HTML)
-        self.assertIn("state.turn = parsed.turn", HTML)
-        self.assertIn("state.board = out.board", HTML)
-        self.assertIn("此页中的编辑和“应用此手”仅作用于分析副本", HTML)
-
-    def test_inline_scripts_are_present_and_closed(self):
-        parser = InlineScripts()
-        parser.feed(HTML)
-        self.assertIsNone(parser.current)
-        self.assertGreaterEqual(len(parser.scripts), 2)
-        self.assertTrue(all(script.strip() for script in parser.scripts))
+    def test_analyzer_and_duel_show_glass_move_counter_and_old_panel_is_removed(self):
+        self.assertIn(r'Label("已走 \(moveCount) 步", systemImage: "arrow.left.arrow.right")', SWIFT)
+        self.assertIn(r'Label("已走 \(game.localDuelMoveCount) 步", systemImage: "arrow.left.arrow.right")', SWIFT)
+        self.assertIn("@Published private(set) var localDuelMoveCount = 0", SWIFT)
+        self.assertNotIn("showDotsAnalyzer", SWIFT)
+        self.assertNotIn("DotsAnalyzerWebView", SWIFT)
+        self.assertNotIn("struct DotsAnalyzerView", SWIFT)
+        self.assertNotIn('Label("打开离线分析器"', SWIFT)
 
 
 if __name__ == "__main__":
