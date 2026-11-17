@@ -65,6 +65,18 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn("pendingAnalyzerArchive = archive", SWIFT)
         self.assertIn("game.shouldNavigateToGame = true", SWIFT)
 
+    def test_party_mode_picker_sits_at_top_above_title(self):
+        party = SWIFT[SWIFT.index("private var partyTab: some View"):SWIFT.index("private func setupTabButton")]
+        self.assertLess(party.index('Picker("派对模式"'), party.index('Text("COLOR WAR")'))
+        self.assertIn("alignment: .top", party)
+
+    def test_analyzer_uses_fullscreen_blue_background_and_top_alignment(self):
+        analyzer = SWIFT[SWIFT.index("private struct AnalyzerPlayView"):SWIFT.index("struct StartMenuView")]
+        self.assertIn("Color(red: 0.025, green: 0.055, blue: 0.14)", analyzer)
+        self.assertIn(".ignoresSafeArea()", analyzer)
+        self.assertIn("HStack(alignment: .top, spacing: 16)", analyzer)
+        self.assertGreaterEqual(analyzer.count("minHeight: proxy.size.height, alignment: .top"), 2)
+
     def test_menu_background_uses_blue_base_and_persisted_photo(self):
         menu = SWIFT[SWIFT.index("struct StartMenuView"):SWIFT.index("private struct AnalyzerLandingView")]
         self.assertIn("Color(red: 0.025, green: 0.055, blue: 0.14)", menu)

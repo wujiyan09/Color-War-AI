@@ -5048,13 +5048,16 @@ private struct AnalyzerPlayView: View {
     }
 
     var body: some View {
-        GeometryReader { proxy in
-            let horizontal = proxy.size.width >= 940 || (proxy.size.width >= 780 && proxy.size.width > proxy.size.height)
-            let maxBoardSide = min(680, horizontal ? min(proxy.size.height - 50, proxy.size.width - 250) : proxy.size.width - 30)
-            ScrollView(.vertical, showsIndicators: true) {
+        ZStack {
+            Color(red: 0.025, green: 0.055, blue: 0.14)
+                .ignoresSafeArea()
+            GeometryReader { proxy in
+                let horizontal = proxy.size.width >= 940 || (proxy.size.width >= 780 && proxy.size.width > proxy.size.height)
+                let maxBoardSide = min(680, horizontal ? min(proxy.size.height - 50, proxy.size.width - 250) : proxy.size.width - 30)
+                ScrollView(.vertical, showsIndicators: true) {
                 Group {
                     if horizontal {
-                        HStack(alignment: .center, spacing: 16) {
+                        HStack(alignment: .top, spacing: 16) {
                             VStack(spacing: 8) {
                                 backButton
                                 AnalyzerBoardView(boardSize: boardSize, board: board, highlightedCell: highlightedCell,
@@ -5074,7 +5077,7 @@ private struct AnalyzerPlayView: View {
                             .frame(width: 220)
                             .frame(maxHeight: .infinity, alignment: .center)
                         }
-                        .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .center)
+                        .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .top)
                     } else {
                         VStack(spacing: 10) {
                             backButton
@@ -5093,11 +5096,13 @@ private struct AnalyzerPlayView: View {
                                               onToggleSide: toggleSelfColor)
                             .frame(maxWidth: min(maxBoardSide, 600))
                         }
-                        .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .center)
+                        .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .top)
                     }
                 }
                 .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+                .padding(.top, 2)
+                .padding(.bottom, 8)
+            }
             }
         }
         .onChange(of: importedArchive?.id) { _, _ in
@@ -5199,16 +5204,16 @@ struct StartMenuView: View {
     }
 
     private var partyTab: some View {
-        VStack(spacing: 16) {
-            Text("COLOR WAR")
-                .font(.system(size: 36, weight: .black, design: .rounded))
-                .foregroundStyle(.white)
+        VStack(spacing: 10) {
             Picker("派对模式", selection: $selectedPartyMode) {
                 Text("多人").tag(0)
                 Text("联机").tag(1)
             }
             .pickerStyle(.segmented)
             .frame(maxWidth: 440)
+            Text("COLOR WAR")
+                .font(.system(size: 36, weight: .black, design: .rounded))
+                .foregroundStyle(.white)
             if selectedPartyMode == 0 {
                 LocalGameSetupView(game: game) {
                     game.prepareLocalPlayerNamesForGame()
@@ -5220,7 +5225,7 @@ struct StartMenuView: View {
                     .frame(maxWidth: 440)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .padding(.horizontal, 20)
     }
 
