@@ -4265,6 +4265,7 @@ struct RoomLobbyView: View {
                     Menu {
                         ForEach([PlayerControlType.mathNightmare, .enhancedNightmare, .driveBot]) { type in
                             Button(type.displayName) {
+                                Haptics.shared.lightImpact()
                                 if game.isOnlineMultiplayer {
                                     _ = game.addAIToRemoteLobby(type: type)
                                 } else if let seat = game.playerTypes.firstIndex(of: .disabled) {
@@ -4610,7 +4611,10 @@ private struct AnalyzerToolPanel: View {
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
             .opacity(isLocked ? 0.52 : 1)
 
-            Button(action: onStart) {
+            Button {
+                Haptics.shared.lightImpact()
+                onStart()
+            } label: {
                 Label(isThinking ? "计算中…" : (isStarted && isPaused ? "继续分析" : "开始分析"),
                       systemImage: isThinking ? "hourglass" : "play.fill")
                     .font(.subheadline.bold())
@@ -4624,7 +4628,10 @@ private struct AnalyzerToolPanel: View {
             .disabled(isThinking || (isStarted && !isPaused))
             .opacity(isThinking || (isStarted && !isPaused) ? 0.55 : 1)
 
-            Button(action: onPause) {
+            Button {
+                Haptics.shared.lightImpact()
+                onPause()
+            } label: {
                 Label("暂停分析", systemImage: "pause.fill")
                     .font(.subheadline.bold())
                     .foregroundStyle(.white)
@@ -4697,7 +4704,10 @@ private struct AnalyzerPlayView: View {
 
     private var backButton: some View {
         HStack {
-            Button(action: onBack) {
+            Button {
+                Haptics.shared.lightImpact()
+                onBack()
+            } label: {
                 Label("返回", systemImage: "chevron.left")
                     .font(.subheadline.bold())
                     .foregroundStyle(.white)
@@ -4716,10 +4726,12 @@ private struct AnalyzerPlayView: View {
             case let .piece(owner, count): board[row][column] = Cell(owner: owner, count: count)
             case .eraser: board[row][column] = Cell(owner: nil, count: 0)
             }
+            Haptics.shared.lightImpact()
             return
         }
         guard !isPaused, !isThinking, waitingForOpponent,
               board[row][column].owner == 1 - selfColor else { return }
+        Haptics.shared.lightImpact()
         highlightedCell = nil
         applyMove(row: row, column: column, owner: 1 - selfColor)
         waitingForOpponent = false

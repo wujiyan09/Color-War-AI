@@ -49,6 +49,9 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn("Label(\"返回\", systemImage: \"chevron.left\")", SWIFT)
         self.assertIn(".glassEffect(.regular.interactive().tint(.darkNavyBlue), in: .capsule)", SWIFT)
         self.assertIn(".glassEffect(.regular.interactive(), in: .capsule)", SWIFT)
+        self.assertGreaterEqual(SWIFT.count("Haptics.shared.lightImpact()"), 5)
+        self.assertIn("Haptics.shared.lightImpact()\n            return", SWIFT)
+        self.assertIn("Haptics.shared.lightImpact()\n        highlightedCell = nil", SWIFT)
 
     def test_analyzer_and_duel_show_glass_move_counter_and_old_panel_is_removed(self):
         self.assertIn(r'Text("已走 \(moveCount) 步")', SWIFT)
