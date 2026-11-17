@@ -4980,7 +4980,16 @@ struct StartMenuView: View {
                                         boardSize: $analyzerBoardSize,
                                         selfColor: $analyzerSelfColor,
                                         hideTabBar: $hideAnalyzerTabBar)
-                        .tabItem { Label("分析器", systemImage: "wrench.and.screwdriver.fill") }
+                        .tabItem {
+                            Label { Text("分析器") } icon: {
+                                ZStack(alignment: .bottomTrailing) {
+                                    Image(systemName: "gearshape.fill")
+                                    Image(systemName: "wrench.fill")
+                                        .font(.system(size: 9, weight: .bold))
+                                        .offset(x: 3, y: 2)
+                                }
+                            }
+                        }
                         .tag(2)
                 }
                 .background(Color.clear)
