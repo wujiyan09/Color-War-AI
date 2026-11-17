@@ -1249,7 +1249,10 @@ struct AISolver: Sendable {
 
     func calculateBestMove() async -> (Int, Int)? {
         if searchStopped { return nil }
-        if playerType == .driveBot {
+        // The Drive botpick search is a two-player zero-sum engine. In party
+        // games, continue into the shared multiplayer MaxN path instead of
+        // returning nil before the bot can place its opening piece.
+        if playerType == .driveBot && activePlayers.count == 2 {
             return DriveDuelSearch.bestMove(board: board, activePlayers: activePlayers, currentPlayer: currentPlayer, hasEntered: hasEntered, level: aiLevel.rawValue, movesPlayed: localDuelMovesPlayed)
         }
         
