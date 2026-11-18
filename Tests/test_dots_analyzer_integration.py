@@ -23,7 +23,7 @@ class NativeAnalyzerTests(unittest.TestCase):
         menu = SWIFT[SWIFT.index("struct StartMenuView"):SWIFT.index("private struct AnalyzerLandingView")]
         root = SWIFT[SWIFT.index("struct ContentView: View"):]
         self.assertIn("private var setupTabs: some View {\n        TabView(selection: $selectedTab)", menu)
-        self.assertIn("var body: some View {\n        setupTabs", menu)
+        self.assertIn("var body: some View {\n        tabsWithPickersAndSheets", menu)
         self.assertIn("StartMenuView(", root)
         self.assertIn(".tabItem { Label(\"对弈\"", menu)
         self.assertNotIn('Picker("主导航"', menu)
@@ -61,7 +61,7 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn("NavigationStack(path: $duelNavigationPath)", menu)
         self.assertIn("NavigationStack(path: $partyNavigationPath)", menu)
         self.assertIn(".navigationDestination(for: StartMenuDestination.self)", menu)
-        self.assertIn("var body: some View {\n        setupTabs", menu)
+        self.assertIn("var body: some View {\n        tabsWithPickersAndSheets", menu)
         self.assertNotIn(".toolbar(.hidden, for: .tabBar)", tabs)
         self.assertNotIn('Picker("主导航"', setup_toolbar)
         self.assertIn('Image(systemName: "square.and.arrow.down")', setup_toolbar)
@@ -189,7 +189,7 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn("partyNavigationPath.append(.gamePlay)", menu)
         self.assertIn("duelNavigationPath.append(.gamePlay)", menu)
         self.assertIn(".navigationDestination(for: StartMenuDestination.self)", menu)
-        self.assertIn("var body: some View {\n        setupTabs", menu)
+        self.assertIn("var body: some View {\n        tabsWithPickersAndSheets", menu)
         self.assertIn("StartMenuView(", root)
         self.assertNotIn("Picker(\"主导航\"", menu)
         self.assertIn("startGame(isLocalDuel: true)", menu)

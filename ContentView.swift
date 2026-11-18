@@ -2689,7 +2689,7 @@ struct StartMenuView: View {
         }
     }
 
-    var body: some View {
+    private var tabsWithCorePreferences: some View {
         setupTabs
             .onAppear(perform: restoreSetupPreferences)
             .onChange(of: selectedTab) { oldValue, newValue in
@@ -2698,6 +2698,10 @@ struct StartMenuView: View {
             .onChange(of: duelBoardSize) { _, value in save(value, forKey: "CW_Duel_BoardSize") }
             .onChange(of: duelPlayerOneType) { _, value in save(value, forKey: "CW_Duel_PlayerOne") }
             .onChange(of: duelPlayerTwoType) { _, value in save(value, forKey: "CW_Duel_PlayerTwo") }
+    }
+
+    private var tabsWithPartyPreferences: some View {
+        tabsWithCorePreferences
             .onChange(of: partyBoardSize) { _, value in save(value, forKey: "CW_Party_BoardSize") }
             .onChange(of: game.boardSize) { _, value in
                 guard selectedTab == 1 else { return }
@@ -2706,15 +2710,27 @@ struct StartMenuView: View {
             }
             .onChange(of: game.playerTypes) { _, value in savePartyPlayerTypes(value) }
             .onChange(of: selectedPartyMode) { _, value in save(value, forKey: "CW_SelectedPartyMode") }
+    }
+
+    private var tabsWithAnalyzerPreferences: some View {
+        tabsWithPartyPreferences
             .onChange(of: analyzerBoardSize) { _, value in save(value, forKey: "CW_Analyzer_BoardSize") }
             .onChange(of: analyzerSelfColor) { _, value in save(value, forKey: "CW_Analyzer_SelfColor") }
             .onDisappear { game.flushSetupPreferences() }
+    }
+
+    private var tabsWithPickersAndSheets: some View {
+        tabsWithAnalyzerPreferences
             .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhotosItem, matching: .images)
             .sheet(isPresented: $game.showArchivePickerSheet) {
                 ArchivePickerSheet(game: game, unsupportedMessage: $unsupportedArchiveMessage,
                                    onSelect: handleArchiveSelection)
             }
             .onChange(of: selectedPhotosItem) { _, item in loadSelectedBackground(item) }
+    }
+
+    var body: some View {
+        tabsWithPickersAndSheets
             .onChange(of: game.shouldNavigateToGame) { _, shouldNavigate in
                 if shouldNavigate { openGame() }
             }
