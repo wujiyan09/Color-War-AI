@@ -115,6 +115,15 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn("@Binding var selfColor: Int", SWIFT)
         self.assertIn(".frame(maxHeight: .infinity, alignment: .center)", SWIFT)
 
+
+    def test_analyzer_uses_deep_search_with_five_second_cap_from_opening(self):
+        self.assertIn("timeLimitOverride: TimeInterval? = nil", SWIFT)
+        self.assertIn("min(5000, max(80, timeLimitOverride * 1000))", SWIFT)
+        self.assertIn("timeLimitOverride == nil && level != 1 && movesPlayed < 30", SWIFT)
+        analyzer = SWIFT[SWIFT.index("private func runSelfMove()"):SWIFT.index("private func startOrResume()")]
+        self.assertIn("aiLevel: .extreme", analyzer)
+        self.assertIn("searchTimeLimitOverride: 5.0", analyzer)
+
     def test_analyzer_counter_removed_and_gameplay_header_is_compact(self):
         analyzer = SWIFT[SWIFT.index("private struct AnalyzerPlayView"):SWIFT.index("struct StartMenuView")]
         gameplay = SWIFT[SWIFT.index("struct GamePlayView"):SWIFT.index("// MARK: - 23.")]
@@ -126,7 +135,8 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn('game.currentPlayer == 0 ? "红" : "蓝"', toolbar)
         self.assertIn('Text("·")', toolbar)
         self.assertIn('.accessibilityLabel("设置")', toolbar)
-        self.assertIn('.accessibilityLabel("导入存档")', toolbar)
+        self.assertNotIn('square.and.arrow.down', toolbar)
+        self.assertNotIn('photo.badge.plus', toolbar)
         self.assertNotIn('Image(systemName: "chevron.left")', gameplay)
         self.assertNotIn('Image(systemName: "gearshape.fill")', gameplay)
         self.assertIn(".animation(.easeInOut(duration: 0.45), value: game.currentPlayer)", gameplay)
@@ -154,13 +164,17 @@ class NativeAnalyzerTests(unittest.TestCase):
         menu = SWIFT[SWIFT.index("struct StartMenuView"):SWIFT.index("private struct AnalyzerLandingView")]
         toolbar = menu[menu.index("private var gameToolbar"):menu.index("private func handleArchiveSelection")]
         self.assertIn("ToolbarItem(placement: .topBarLeading)", toolbar)
-        self.assertIn("ToolbarItemGroup(placement: .topBarTrailing)", toolbar)
-        self.assertIn('Image(systemName: "square.and.arrow.down")', toolbar)
-        self.assertIn('Image(systemName: "photo.badge.plus")', toolbar)
+        self.assertIn("ToolbarItem(placement: .topBarTrailing)", toolbar)
+        self.assertNotIn('Image(systemName: "square.and.arrow.down")', toolbar)
+        self.assertNotIn('Image(systemName: "photo.badge.plus")', toolbar)
         self.assertIn('Image(systemName: "gearshape.fill")', toolbar)
         setup = menu[menu.index("private var setupToolbar"):menu.index("private var menuSurface")]
         self.assertIn("ToolbarItem(placement: .topBarLeading)", setup)
-        self.assertIn("ToolbarItem(placement: .topBarTrailing)", setup)
+        self.assertIn("ToolbarItem(placement: .principal)", setup)
+        self.assertIn('Picker("主导航", selection: $selectedTab)', setup)
+        self.assertIn(".pickerStyle(.segmented)", setup)
+        self.assertIn('Image(systemName: "square.and.arrow.down")', setup)
+        self.assertIn(".toolbar(.hidden, for: .tabBar)", menu)
         self.assertNotIn("selectedPartyMode == 0", setup)
         self.assertNotIn("selectedTab == 0", setup)
         self.assertIn(".toolbarBackground(.visible, for: .navigationBar)", menu)

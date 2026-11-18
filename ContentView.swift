@@ -877,7 +877,14 @@ private struct DriveDuelSearch {
         let minTimeMs: Double
         let maxDepth: Int
     }
-    private static func parameters(level: Int, movesPlayed: Int) -> SearchParameters {
+    private static func parameters(level: Int, movesPlayed: Int, timeLimitOverride: TimeInterval? = nil) -> SearchParameters {
+        if let timeLimitOverride {
+            let timeMs = min(5000, max(80, timeLimitOverride * 1000))
+            return SearchParameters(timeMs: timeMs,
+                                    softTimeMs: timeMs,
+                                    minTimeMs: min(500, timeMs * 0.8),
+                                    maxDepth: 32)
+        }
         let difficulty: (timeMs: Double, maxDepth: Int)
         // Match the online Drive wrapper's mode ceilings, then intersect with
         // the independent local phase limits below. Easy is heuristic-only;
@@ -902,8 +909,8 @@ private struct DriveDuelSearch {
             maxDepth: min(difficulty.maxDepth, phase.maxDepth)
         )
     }
-    static func timeBudget(level: Int, movesPlayed: Int = 0) -> TimeInterval {
-        parameters(level: level, movesPlayed: movesPlayed).timeMs / 1000
+    static func timeBudget(level: Int, movesPlayed: Int = 0, timeLimitOverride: TimeInterval? = nil) -> TimeInterval {
+        parameters(level: level, movesPlayed: movesPlayed, timeLimitOverride: timeLimitOverride).timeMs / 1000
     }
 
     private struct Entry {
@@ -1140,7 +1147,7 @@ private struct DriveDuelSearch {
         return Result(score: best, move: bestMove)
     }
 
-    static func bestMove(board: AISolver.Board, activePlayers: [Int], currentPlayer: Int, hasEntered: [Bool], level: Int, movesPlayed: Int, openingSeed: String) -> (Int, Int)? {
+    static func bestMove(board: AISolver.Board, activePlayers: [Int], currentPlayer: Int, hasEntered: [Bool], level: Int, movesPlayed: Int, openingSeed: String, timeLimitOverride: TimeInterval? = nil) -> (Int, Int)? {
         guard (2...12).contains(board.size), activePlayers.count == 2, let side = activePlayers.firstIndex(of: currentPlayer) else { return nil }
         let size = board.size
         var cells = [UInt8](repeating: 0, count: size * size)
@@ -1157,10 +1164,10 @@ private struct DriveDuelSearch {
         let moves = legalMoves(cells, side, enteredMask, size)
         guard let first = moves.first else { return nil }
         if terminal(cells, side, enteredMask, 0) != nil { return nil }
-        let searchParameters = parameters(level: level, movesPlayed: movesPlayed)
-        // Drive's 13-pattern book applies before its search for the first 12
-        // moves by this side, during the first 30 total moves, except on Easy.
-        if level != 1 && movesPlayed < 30,
+        let searchParameters = parameters(level: level, movesPlayed: movesPlayed, timeLimitOverride: timeLimitOverride)
+        // Drive's opening book applies to ordinary matches. The Analyzer deliberately
+        // skips it so its chosen time budget is spent searching from the first move.
+        if timeLimitOverride == nil && level != 1 && movesPlayed < 30,
            let opening = DriveOpeningBook.nextOwnedMove(
                 cells: cells, size: size, side: side, startIndex: movesPlayed / 2, seed: openingSeed
            ) {
@@ -1330,6 +1337,7 @@ struct AISolver: Sendable {
     let isLocalDuelMode: Bool
     let localDuelMovesPlayed: Int
     let openingSeed: String
+    private let searchTimeLimitOverride: TimeInterval?
     private let searchDeadline: TimeInterval
     let board: Board
     let hasEntered: [Bool]
@@ -1346,7 +1354,8 @@ struct AISolver: Sendable {
          eliminated: [Bool],
          isLocalDuelMode: Bool = false,
          localDuelMovesPlayed: Int = 0,
-         openingSeed: String = "local") {
+         openingSeed: String = "local",
+         searchTimeLimitOverride: TimeInterval? = nil) {
         self.boardSize = boardSize
         self.activePlayers = activePlayers
         self.currentPlayer = currentPlayer
@@ -1355,7 +1364,12 @@ struct AISolver: Sendable {
         self.isLocalDuelMode = isLocalDuelMode
         self.localDuelMovesPlayed = localDuelMovesPlayed
         self.openingSeed = openingSeed
-        self.searchDeadline = ProcessInfo.processInfo.systemUptime + (playerType == .driveBot ? DriveDuelSearch.timeBudget(level: aiLevel.rawValue, movesPlayed: localDuelMovesPlayed) : aiLevel.searchTimeBudget)
+        self.searchTimeLimitOverride = searchTimeLimitOverride
+        let timeBudget = playerType == .driveBot
+            ? DriveDuelSearch.timeBudget(level: aiLevel.rawValue, movesPlayed: localDuelMovesPlayed,
+                                         timeLimitOverride: searchTimeLimitOverride)
+            : aiLevel.searchTimeBudget
+        self.searchDeadline = ProcessInfo.processInfo.systemUptime + timeBudget
         
         var flat = [SimCell]()
         flat.reserveCapacity(boardSize * boardSize)
@@ -1390,7 +1404,10 @@ struct AISolver: Sendable {
         // games, continue into the shared multiplayer MaxN path instead of
         // returning nil before the bot can place its opening piece.
         if playerType == .driveBot && activePlayers.count == 2 {
-            return DriveDuelSearch.bestMove(board: board, activePlayers: activePlayers, currentPlayer: currentPlayer, hasEntered: hasEntered, level: aiLevel.rawValue, movesPlayed: localDuelMovesPlayed, openingSeed: openingSeed)
+            return DriveDuelSearch.bestMove(board: board, activePlayers: activePlayers, currentPlayer: currentPlayer,
+                                            hasEntered: hasEntered, level: aiLevel.rawValue,
+                                            movesPlayed: localDuelMovesPlayed, openingSeed: openingSeed,
+                                            timeLimitOverride: searchTimeLimitOverride)
         }
         
         var validMoves = getPlayableCells(for: currentPlayer, on: board)
@@ -4966,18 +4983,18 @@ private struct AnalyzerPlayView: View {
     private func runSelfMove() {
         guard analysisStarted, !isPaused, !isThinking else { return }
         isThinking = true
-        let difficulty = game.aiDifficultyLevel
         let solver = AISolver(
             boardSize: boardSize,
             activePlayers: [0, 1],
             currentPlayer: selfColor,
             playerType: .driveBot,
-            aiLevel: difficulty,
+            aiLevel: .extreme,
             board: board,
             hasEntered: [true, true],
             eliminated: [false, false],
             isLocalDuelMode: true,
-            localDuelMovesPlayed: moveCount
+            localDuelMovesPlayed: moveCount,
+            searchTimeLimitOverride: 5.0
         )
         aiTask = Task {
             let move = await solver.calculateBestMove()
@@ -5309,24 +5326,7 @@ struct StartMenuView: View {
                 .fixedSize()
             }
         }
-        ToolbarItemGroup(placement: .topBarTrailing) {
-            Button { game.showArchivePickerSheet = true } label: {
-                Image(systemName: "square.and.arrow.down")
-            }
-            .accessibilityLabel("导入存档")
-            Menu {
-                Button(action: chooseBackground) {
-                    Label("从相册选择背景", systemImage: "photo.on.rectangle")
-                }
-                if game.customBackgroundImage != nil {
-                    Button(role: .destructive) { game.saveCustomBackground(nil) } label: {
-                        Label("清除自定义背景", systemImage: "trash")
-                    }
-                }
-            } label: {
-                Image(systemName: "photo.badge.plus")
-            }
-            .accessibilityLabel("背景")
+        ToolbarItem(placement: .topBarTrailing) {
             Button { game.showControlSheet = true } label: {
                 Image(systemName: "gearshape.fill")
             }
@@ -5387,33 +5387,44 @@ struct StartMenuView: View {
                 .tag(2)
         }
         .background(Color.clear)
+        .toolbar(.hidden, for: .tabBar)
     }
 
     @ToolbarContentBuilder
     private var setupToolbar: some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) {
             Button { game.showArchivePickerSheet = true } label: {
-                Label("导入", systemImage: "square.and.arrow.down")
-                    .font(.system(size: 14, weight: .semibold))
+                Image(systemName: "square.and.arrow.down")
                     .foregroundStyle(.cyan)
             }
+            .accessibilityLabel("导入存档")
+        }
+        ToolbarItem(placement: .principal) {
+            Picker("主导航", selection: $selectedTab) {
+                Text("对弈").tag(0)
+                Text("派对").tag(1)
+                Text("分析器").tag(2)
+            }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 360)
         }
         ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button { showPhotoPicker = true } label: {
-                        Label("从相册选择背景", systemImage: "photo.on.rectangle")
-                    }
-                    if game.customBackgroundImage != nil {
-                        Button(role: .destructive) { game.saveCustomBackground(nil) } label: {
-                            Label("清除自定义背景", systemImage: "trash")
-                        }
-                    }
-                } label: {
-                    Image(systemName: "photo.badge.plus")
-                        .foregroundStyle(.white)
-                        .font(.system(size: 16, weight: .medium))
+            Menu {
+                Button { showPhotoPicker = true } label: {
+                    Label("从相册选择背景", systemImage: "photo.on.rectangle")
                 }
+                if game.customBackgroundImage != nil {
+                    Button(role: .destructive) { game.saveCustomBackground(nil) } label: {
+                        Label("清除自定义背景", systemImage: "trash")
+                    }
+                }
+            } label: {
+                Image(systemName: "photo.badge.plus")
+                    .foregroundStyle(.white)
+                    .font(.system(size: 16, weight: .medium))
             }
+            .accessibilityLabel("背景")
+        }
     }
 
     private var menuSurface: some View {
