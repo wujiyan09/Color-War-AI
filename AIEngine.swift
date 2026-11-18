@@ -254,8 +254,8 @@ private struct DriveDuelSearch {
     static func timeBudget(movesPlayed: Int = 0,
                            timeLimitOverride: TimeInterval? = nil,
                            directBotpickSearch: Bool = false) -> TimeInterval {
-        (directBotpickSearch ? analyzerParameters(timeLimitOverride: timeLimitOverride)
-            : onlineHardParameters(movesPlayed: movesPlayed)).timeMs / 1000
+        directBotpickSearch ? analyzerParameters(timeLimitOverride: timeLimitOverride).timeMs / 1000
+            : Nov15DuelSearch.timeBudget(level: 3, movesPlayed: movesPlayed)
     }
 
     private static func neighbors(_ index: Int, _ size: Int) -> [Int] {
@@ -529,10 +529,10 @@ struct AISolver: Sendable {
         // returning nil before the bot can place its opening piece.
         if playerType == .driveBot && activePlayers.count == 2 {
             if !directBotpickSearch {
-                // Site think delay minus the 150ms every bot already waits in GameModel.
-                let delayMs = DriveDuelSearch.onlineThinkDelayMs(movesPlayed: localDuelMovesPlayed) - 150
-                if delayMs > 0 { try? await Task.sleep(nanoseconds: UInt64(delayMs * 1_000_000)) }
-                if Task.isCancelled { return nil }
+                // Bot 3 = the 2026-11-15 09:33 (build-111) algorithm, see Nov15DuelSearch.swift.
+                return Nov15DuelSearch.bestMove(board: board, activePlayers: activePlayers,
+                                                currentPlayer: currentPlayer, hasEntered: hasEntered,
+                                                level: 3, movesPlayed: localDuelMovesPlayed)
             }
             return DriveDuelSearch.bestMove(board: board, activePlayers: activePlayers,
                                             currentPlayer: currentPlayer,

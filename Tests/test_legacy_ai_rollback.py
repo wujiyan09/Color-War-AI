@@ -154,3 +154,15 @@ class Bot3DriveParityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Bot3Nov15RestoreTests(unittest.TestCase):
+    def test_bot3_routes_to_nov15_search(self):
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parents[1]
+        ai = (root / "AIEngine.swift").read_text()
+        n15 = (root / "Nov15DuelSearch.swift").read_text()
+        self.assertIn("return Nov15DuelSearch.bestMove(board: board", ai)
+        self.assertIn("Nov15DuelSearch.timeBudget(level: 3", ai)
+        self.assertIn("phase = (5000, 600, 80, 32)", n15)
+        self.assertIn("default: difficulty = (6000, 32, false)", n15)
