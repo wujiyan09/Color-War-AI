@@ -19,6 +19,17 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn('Text("联机").tag(1)', SWIFT)
         self.assertIn('Picker("派对模式", selection: $selectedPartyMode)', SWIFT)
 
+    def test_native_tabview_is_the_root_mode_container_without_custom_top_switcher(self):
+        menu = SWIFT[SWIFT.index("struct StartMenuView"):SWIFT.index("private struct AnalyzerLandingView")]
+        root = SWIFT[SWIFT.index("struct ContentView: View"):]
+        self.assertIn("private var setupTabs: some View {\n        TabView(selection: $selectedTab)", menu)
+        self.assertIn("var body: some View {\n        setupTabs", menu)
+        self.assertIn("StartMenuView(", root)
+        self.assertIn(".tabItem { Label(\"对弈\"", menu)
+        self.assertNotIn('Picker("主导航"', menu)
+        self.assertNotIn("setupTabButton", menu)
+        self.assertNotIn("setupTabBar", menu)
+
     def test_analyzer_setup_offers_supported_sizes_and_self_color(self):
         self.assertIn("private let supportedSizes = [6, 9, 12]", SWIFT)
         self.assertIn('Text("红色").tag(0)', SWIFT)
@@ -37,17 +48,26 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn("AnalyzerToolPanel", SWIFT)
         self.assertIn(".glassEffect(.regular.interactive()", SWIFT)
 
-    def test_analyzer_entry_hides_tabs_has_haptics_and_fixed_toolbar_back(self):
+    def test_analyzer_entry_uses_native_tabview_and_system_back_navigation(self):
         setup = SWIFT[SWIFT.index("private struct AnalyzerSetupView"):SWIFT.index("private struct AnalyzerBoardView")]
         self.assertIn("Haptics.shared.lightImpact()", setup)
         menu = SWIFT[SWIFT.index("struct StartMenuView"):SWIFT.index("private struct AnalyzerLandingView")]
         landing = SWIFT[SWIFT.index("private struct AnalyzerLandingView"):SWIFT.index("// MARK: - 21.")]
-        self.assertIn("navigationPath.append(.analyzerPlay)", menu)
-        self.assertIn("NavigationStack(path: $navigationPath)", menu)
+        tabs = menu[menu.index("private var setupTabs"):menu.index("@ToolbarContentBuilder\n    private var setupToolbar")]
+        setup_toolbar = menu[menu.index("private var setupToolbar"):menu.index("var body: some View {", menu.index("private var setupToolbar"))]
+        analyzer_destination = menu[menu.index("case .analyzerPlay:"):menu.index("\n        }", menu.index("case .analyzerPlay:"))]
+        self.assertIn("analyzerNavigationPath.append(.analyzerPlay)", menu)
+        self.assertIn("NavigationStack(path: $analyzerNavigationPath)", menu)
+        self.assertIn("NavigationStack(path: $duelNavigationPath)", menu)
+        self.assertIn("NavigationStack(path: $partyNavigationPath)", menu)
         self.assertIn(".navigationDestination(for: StartMenuDestination.self)", menu)
-        self.assertIn('ToolbarItem(placement: .topBarLeading)', menu)
-        self.assertIn('Label("返回", systemImage: "chevron.left")', menu)
-        self.assertIn('.navigationBarBackButtonHidden(true)', menu)
+        self.assertIn("var body: some View {\n        setupTabs", menu)
+        self.assertNotIn(".toolbar(.hidden, for: .tabBar)", tabs)
+        self.assertNotIn('Picker("主导航"', setup_toolbar)
+        self.assertIn('Image(systemName: "square.and.arrow.down")', setup_toolbar)
+        self.assertIn('.foregroundStyle(.white)', setup_toolbar)
+        self.assertNotIn(".navigationBarBackButtonHidden(true)", analyzer_destination)
+        self.assertNotIn("ToolbarItem", analyzer_destination)
         self.assertIn("onStart: openAnalyzer", menu)
         self.assertIn("AnalyzerSetupView(boardSize: $boardSize, selfColor: $selfColor, onStart: onStart)", landing)
 
@@ -122,6 +142,12 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn("onToggleSide()", panel)
         self.assertIn("onUndo()", panel)
 
+    def test_analyzer_four_primary_controls_have_equal_fixed_height(self):
+        panel = SWIFT[SWIFT.index("private struct AnalyzerToolPanel"):SWIFT.index("private struct AnalyzerPlayView")]
+        self.assertEqual(panel.count(".frame(height: 48)"), 4)
+        for button in ("startButton", "pauseButton", "onToggleSide()", "onUndo()"):
+            self.assertIn(button, panel)
+
     def test_analyzer_uses_deep_search_with_five_second_cap_from_opening(self):
         self.assertIn("timeLimitOverride: TimeInterval? = nil", SWIFT)
         self.assertIn("min(5000, max(80, timeLimitOverride * 1000))", SWIFT)
@@ -160,8 +186,12 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn("case gamePlay", menu)
         self.assertIn("case .gamePlay:", menu)
         self.assertIn("GamePlayView(game: game", menu)
-        self.assertIn("navigationPath.append(.gamePlay)", menu)
+        self.assertIn("partyNavigationPath.append(.gamePlay)", menu)
+        self.assertIn("duelNavigationPath.append(.gamePlay)", menu)
         self.assertIn(".navigationDestination(for: StartMenuDestination.self)", menu)
+        self.assertIn("var body: some View {\n        setupTabs", menu)
+        self.assertIn("StartMenuView(", root)
+        self.assertNotIn("Picker(\"主导航\"", menu)
         self.assertIn("startGame(isLocalDuel: true)", menu)
         self.assertIn("onChange(of: game.shouldNavigateToGame)", menu)
         self.assertNotIn("if isGameStarted", root)
@@ -174,12 +204,14 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertNotIn('Image(systemName: "square.and.arrow.down")', toolbar)
         self.assertNotIn('Image(systemName: "photo.badge.plus")', toolbar)
         self.assertIn('Image(systemName: "gearshape.fill")', toolbar)
-        setup = menu[menu.index("private var setupToolbar"):menu.index("private var menuSurface")]
+        setup = menu[menu.index("private var setupToolbar"):menu.index("var body: some View {", menu.index("private var setupToolbar"))]
         self.assertIn("ToolbarItem(placement: .topBarLeading)", setup)
-        self.assertIn("ToolbarItem(placement: .principal)", setup)
-        self.assertIn('Picker("主导航", selection: $selectedTab)', setup)
-        self.assertIn(".pickerStyle(.segmented)", setup)
+        self.assertNotIn("ToolbarItem(placement: .principal)", setup)
+        self.assertNotIn('Picker("主导航", selection: $selectedTab)', setup)
         self.assertIn('Image(systemName: "square.and.arrow.down")', setup)
+        self.assertIn('.foregroundStyle(.white)', setup)
+        tabs = menu[menu.index("private var setupTabs"):menu.index("@ToolbarContentBuilder\n    private var setupToolbar")]
+        self.assertNotIn(".toolbar(.hidden, for: .tabBar)", tabs)
         self.assertIn(".toolbar(.hidden, for: .tabBar)", menu)
         self.assertNotIn("selectedPartyMode == 0", setup)
         self.assertNotIn("selectedTab == 0", setup)

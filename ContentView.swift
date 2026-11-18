@@ -1964,7 +1964,7 @@ private struct AnalyzerToolPanel: View {
                 .font(compact ? .caption.bold() : .subheadline.bold())
                 .foregroundStyle(.white)
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, compact ? 7 : 11)
+                .frame(height: 48)
                 .contentShape(Capsule())
                 .glassEffect(.regular.interactive().tint(.darkNavyBlue), in: .capsule)
         }
@@ -1982,7 +1982,7 @@ private struct AnalyzerToolPanel: View {
                 .font(compact ? .caption.bold() : .subheadline.bold())
                 .foregroundStyle(.white)
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, compact ? 7 : 11)
+                .frame(height: 48)
                 .contentShape(Capsule())
                 .glassEffect(.regular.interactive(), in: .capsule)
         }
@@ -2044,8 +2044,8 @@ private struct AnalyzerToolPanel: View {
                 Label("我方：\(selfColor == 0 ? "红" : "蓝") · 切换", systemImage: "arrow.left.arrow.right")
                     .font(compact ? .caption.bold() : .subheadline.bold())
                     .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity, minHeight: compact ? 44 : 48)
-                    .padding(.vertical, compact ? 7 : 9)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 48)
                     .contentShape(Rectangle())
                     .glassEffect(.regular.interactive(), in: .capsule)
             }
@@ -2060,8 +2060,8 @@ private struct AnalyzerToolPanel: View {
                 Label("撤销上一步", systemImage: "arrow.uturn.backward")
                     .font(compact ? .caption.bold() : .subheadline.bold())
                     .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity, minHeight: compact ? 44 : 48)
-                    .padding(.vertical, compact ? 7 : 9)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 48)
                     .contentShape(Rectangle())
                     .glassEffect(.regular.interactive(), in: .capsule)
             }
@@ -2342,7 +2342,9 @@ struct StartMenuView: View {
         .flatMap { try? JSONDecoder().decode(PlayerControlType.self, from: $0) } ?? .human
     @State private var duelPlayerTwoType: PlayerControlType = UserDefaults.standard.data(forKey: "CW_Duel_PlayerTwo")
         .flatMap { try? JSONDecoder().decode(PlayerControlType.self, from: $0) } ?? .human
-    @State private var navigationPath: [StartMenuDestination] = []
+    @State private var duelNavigationPath: [StartMenuDestination] = []
+    @State private var partyNavigationPath: [StartMenuDestination] = []
+    @State private var analyzerNavigationPath: [StartMenuDestination] = []
     @State private var showPhotoPicker = false
     @State private var selectedPhotosItem: PhotosPickerItem?
     @State private var analyzerBoardSize = {
@@ -2489,18 +2491,28 @@ struct StartMenuView: View {
     }
 
     private func openAnalyzer() {
-        navigationPath.append(.analyzerPlay)
+        guard !analyzerNavigationPath.contains(.analyzerPlay) else { return }
+        analyzerNavigationPath.append(.analyzerPlay)
     }
 
     private func openGame() {
-        guard !navigationPath.contains(.gamePlay) else { return }
         game.shouldNavigateToGame = false
-        navigationPath.append(.gamePlay)
+        if selectedTab == 1 {
+            guard !partyNavigationPath.contains(.gamePlay) else { return }
+            partyNavigationPath.append(.gamePlay)
+        } else {
+            guard !duelNavigationPath.contains(.gamePlay) else { return }
+            duelNavigationPath.append(.gamePlay)
+        }
     }
 
     private func leaveGame() {
         game.returnToMenuPreservingOnlineSession()
-        if navigationPath.last == .gamePlay { navigationPath.removeLast() }
+        if selectedTab == 1, partyNavigationPath.last == .gamePlay {
+            partyNavigationPath.removeLast()
+        } else if selectedTab != 1, duelNavigationPath.last == .gamePlay {
+            duelNavigationPath.removeLast()
+        }
     }
 
     private func chooseBackground() {
@@ -2574,26 +2586,79 @@ struct StartMenuView: View {
         }
     }
 
-    private var setupTabs: some View {
-        TabView(selection: $selectedTab) {
+    @ViewBuilder
+    private func destinationView(_ destination: StartMenuDestination) -> some View {
+        switch destination {
+        case .gamePlay:
+            GamePlayView(game: game,
+                         isSpinningRandomWheel: $isSpinningRandomWheel,
+                         onExit: leaveGame)
+                .navigationBarBackButtonHidden(true)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbarBackground(.visible, for: .navigationBar)
+                .toolbar(.hidden, for: .tabBar)
+                .toolbar { gameToolbar }
+        case .analyzerPlay:
+            AnalyzerPlayView(game: game, boardSize: analyzerBoardSize,
+                             selfColor: $analyzerSelfColor,
+                             importedArchive: $pendingAnalyzerArchive,
+                             initialArchive: pendingAnalyzerArchive)
+                .toolbar(.hidden, for: .tabBar)
+                .onDisappear { pendingAnalyzerArchive = nil }
+        }
+    }
+
+    private var duelNavigation: some View {
+        NavigationStack(path: $duelNavigationPath) {
             duelTab
                 .background(background)
-                .tabItem { Label("对弈", systemImage: "circle.grid.3x3.fill") }
-                .tag(0)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbarBackground(.visible, for: .navigationBar)
+                .toolbar { setupToolbar }
+                .navigationDestination(for: StartMenuDestination.self) { destinationView($0) }
+        }
+    }
+
+    private var partyNavigation: some View {
+        NavigationStack(path: $partyNavigationPath) {
             partyTab
                 .background(background)
-                .tabItem { Label("派对", systemImage: "party.popper.fill") }
-                .tag(1)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbarBackground(.visible, for: .navigationBar)
+                .toolbar { setupToolbar }
+                .navigationDestination(for: StartMenuDestination.self) { destinationView($0) }
+        }
+    }
+
+    private var analyzerNavigation: some View {
+        NavigationStack(path: $analyzerNavigationPath) {
             AnalyzerLandingView(game: game,
                                 boardSize: $analyzerBoardSize,
                                 selfColor: $analyzerSelfColor,
                                 onStart: openAnalyzer)
                 .background(background)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbarBackground(.visible, for: .navigationBar)
+                .toolbar { setupToolbar }
+                .navigationDestination(for: StartMenuDestination.self) { destinationView($0) }
+        }
+    }
+
+    // The native TabView is the app's root mode navigation. Each tab owns its
+    // own NavigationStack so pushing a game or Analyzer never leaks into another tab.
+    private var setupTabs: some View {
+        TabView(selection: $selectedTab) {
+            duelNavigation
+                .tabItem { Label("对弈", systemImage: "circle.grid.3x3.fill") }
+                .tag(0)
+            partyNavigation
+                .tabItem { Label("派对", systemImage: "party.popper.fill") }
+                .tag(1)
+            analyzerNavigation
                 .tabItem { Label("分析器", systemImage: "wrench.and.screwdriver.fill") }
                 .tag(2)
         }
         .background(Color.clear)
-        .toolbar(.hidden, for: .tabBar)
     }
 
     @ToolbarContentBuilder
@@ -2601,18 +2666,9 @@ struct StartMenuView: View {
         ToolbarItem(placement: .topBarLeading) {
             Button { game.showArchivePickerSheet = true } label: {
                 Image(systemName: "square.and.arrow.down")
-                    .foregroundStyle(.cyan)
+                    .foregroundStyle(.white)
             }
             .accessibilityLabel("导入存档")
-        }
-        ToolbarItem(placement: .principal) {
-            Picker("主导航", selection: $selectedTab) {
-                Text("对弈").tag(0)
-                Text("派对").tag(1)
-                Text("分析器").tag(2)
-            }
-            .pickerStyle(.segmented)
-            .frame(maxWidth: 360)
         }
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
@@ -2633,37 +2689,15 @@ struct StartMenuView: View {
         }
     }
 
-    private var menuSurface: some View {
-        ZStack {
-            background
-            setupTabs
-        }
-        .toolbar { setupToolbar }
-    }
-
-    private var menuWithPickers: some View {
-        menuSurface
-    }
-
-    private var menuWithAppearance: some View {
-        menuWithPickers
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(.visible, for: .navigationBar)
+    var body: some View {
+        setupTabs
             .onAppear(perform: restoreSetupPreferences)
-    }
-
-    private var menuWithModePreferences: some View {
-        menuWithAppearance
             .onChange(of: selectedTab) { oldValue, newValue in
                 handleTabChange(from: oldValue, to: newValue)
             }
             .onChange(of: duelBoardSize) { _, value in save(value, forKey: "CW_Duel_BoardSize") }
             .onChange(of: duelPlayerOneType) { _, value in save(value, forKey: "CW_Duel_PlayerOne") }
             .onChange(of: duelPlayerTwoType) { _, value in save(value, forKey: "CW_Duel_PlayerTwo") }
-    }
-
-    private var menuWithPartyPreferences: some View {
-        menuWithModePreferences
             .onChange(of: partyBoardSize) { _, value in save(value, forKey: "CW_Party_BoardSize") }
             .onChange(of: game.boardSize) { _, value in
                 guard selectedTab == 1 else { return }
@@ -2672,59 +2706,18 @@ struct StartMenuView: View {
             }
             .onChange(of: game.playerTypes) { _, value in savePartyPlayerTypes(value) }
             .onChange(of: selectedPartyMode) { _, value in save(value, forKey: "CW_SelectedPartyMode") }
-    }
-
-    private var menuWithAnalyzerPreferences: some View {
-        menuWithPartyPreferences
             .onChange(of: analyzerBoardSize) { _, value in save(value, forKey: "CW_Analyzer_BoardSize") }
             .onChange(of: analyzerSelfColor) { _, value in save(value, forKey: "CW_Analyzer_SelfColor") }
             .onDisappear { game.flushSetupPreferences() }
-    }
-
-    var body: some View {
-        NavigationStack(path: $navigationPath) {
-            menuWithAnalyzerPreferences
-                .navigationDestination(for: StartMenuDestination.self) { destination in
-                    switch destination {
-                    case .gamePlay:
-                        GamePlayView(game: game,
-                                     isSpinningRandomWheel: $isSpinningRandomWheel,
-                                     onExit: leaveGame)
-                            .navigationBarBackButtonHidden(true)
-                            .navigationBarTitleDisplayMode(.inline)
-                            .toolbarBackground(.visible, for: .navigationBar)
-                            .toolbar(.hidden, for: .tabBar)
-                            .toolbar { gameToolbar }
-                    case .analyzerPlay:
-                        AnalyzerPlayView(game: game, boardSize: analyzerBoardSize,
-                                         selfColor: $analyzerSelfColor,
-                                         importedArchive: $pendingAnalyzerArchive,
-                                         initialArchive: pendingAnalyzerArchive)
-                            .navigationBarBackButtonHidden(true)
-                            .toolbar(.hidden, for: .tabBar)
-                            .toolbar {
-                                ToolbarItem(placement: .topBarLeading) {
-                                    Button {
-                                        if !navigationPath.isEmpty { navigationPath.removeLast() }
-                                        pendingAnalyzerArchive = nil
-                                    } label: {
-                                        Label("返回", systemImage: "chevron.left")
-                                    }
-                                    .accessibilityLabel("返回")
-                                }
-                            }
-                    }
-                }
-        }
-        .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhotosItem, matching: .images)
-        .sheet(isPresented: $game.showArchivePickerSheet) {
-            ArchivePickerSheet(game: game, unsupportedMessage: $unsupportedArchiveMessage,
-                               onSelect: handleArchiveSelection)
-        }
-        .onChange(of: selectedPhotosItem) { _, item in loadSelectedBackground(item) }
-        .onChange(of: game.shouldNavigateToGame) { _, shouldNavigate in
-            if shouldNavigate { openGame() }
-        }
+            .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhotosItem, matching: .images)
+            .sheet(isPresented: $game.showArchivePickerSheet) {
+                ArchivePickerSheet(game: game, unsupportedMessage: $unsupportedArchiveMessage,
+                                   onSelect: handleArchiveSelection)
+            }
+            .onChange(of: selectedPhotosItem) { _, item in loadSelectedBackground(item) }
+            .onChange(of: game.shouldNavigateToGame) { _, shouldNavigate in
+                if shouldNavigate { openGame() }
+            }
     }
 
 }
@@ -3158,14 +3151,12 @@ struct ContentView: View {
     @State private var selectedSetupTab = 0
     
     var body: some View {
-        ZStack {
-            Color(red: 0.03, green: 0.05, blue: 0.10)
-                .ignoresSafeArea()
-            StartMenuView(
-                game: game,
-                selectedTab: $selectedSetupTab,
-                isSpinningRandomWheel: $isSpinningRandomWheel
-            )
+        StartMenuView(
+            game: game,
+            selectedTab: $selectedSetupTab,
+            isSpinningRandomWheel: $isSpinningRandomWheel
+        )
+        .overlay {
             if isSpinningRandomWheel {
                 RandomPlayerWheelOverlay(
                     game: game,
