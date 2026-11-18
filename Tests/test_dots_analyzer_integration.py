@@ -202,12 +202,14 @@ class NativeAnalyzerTests(unittest.TestCase):
 
     def test_analyzer_uses_deep_search_with_five_second_cap_from_opening(self):
         self.assertIn("timeLimitOverride: TimeInterval? = nil", SWIFT)
-        self.assertIn("min(5000, max(80, timeLimitOverride * 1000))", SWIFT)
+        self.assertIn("min(5000, max(20, (timeLimitOverride ?? 5.0) * 1000))", SWIFT)
         self.assertIn("if movesPlayed < 30, ownMoves < 12", SWIFT)
         self.assertIn("DriveOpeningBook.nextOwnedMove", SWIFT)
+        self.assertIn("directBotpickSearch: Bool = false", SWIFT)
         analyzer = SWIFT[SWIFT.index("private func runSelfMove()"):SWIFT.index("private func startOrResume()")]
         self.assertIn("aiLevel: .extreme", analyzer)
         self.assertIn("searchTimeLimitOverride: 5.0", analyzer)
+        self.assertIn("directBotpickSearch: true", analyzer)
 
     def test_analyzer_counter_removed_and_gameplay_header_is_compact(self):
         analyzer = SWIFT[SWIFT.index("private struct AnalyzerPlayView"):SWIFT.index("struct StartMenuView")]

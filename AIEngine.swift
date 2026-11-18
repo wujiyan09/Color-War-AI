@@ -153,8 +153,8 @@ enum TacticalRiskMode {
 }
 
 private enum DriveOpeningBook {
-    // Port of the 13 deterministic opening sequences used by Drive's online bot.
-    // Local games use their session UUID in place of a server room code.
+    // Port of Clock.pretty.js opening patterns used by play.local-DNTan253.js.
+    // The local client seeds the picker per game session (not per room code).
     static func patterns(size: Int) -> [[(Int, Int)]]? {
         guard [6, 9, 12].contains(size) else { return nil }
         let edge = size - 1
@@ -243,45 +243,136 @@ private struct DriveDuelSearch {
 
     fileprivate static func owner(_ code: UInt8) -> Int { code == 0 ? -1 : (code & 0x80 == 0 ? 0 : 1) }
 
-    // Mirrors the Bot 3 wrapper in Drive's default-workspace/dots/online_code.pretty.js.
-    // `worker.pretty.js` supplies the shared Rt/ke search core; Clock.pretty.js supplies
-    // the 13 opening sequences and room-code hash. Local iOS sessions use their UUID seed.
-    private static func parameters(level: Int, movesPlayed: Int,
-                                   timeLimitOverride: TimeInterval?) -> SearchParameters {
-        if let timeLimitOverride {
-            let hard = min(5000, max(80, timeLimitOverride * 1000))
-            return SearchParameters(timeMs: hard, softTimeMs: min(1200, hard),
-                                    minTimeMs: min(60, hard), maxDepth: 32)
-        }
-        if level <= 1 {
-            // Drive's `easy` mode is intentionally a lightweight random legal-move policy.
-            return SearchParameters(timeMs: 80, softTimeMs: nil, minTimeMs: 0, maxDepth: 1)
-        }
+    // The iOS two-player bot follows the local-game policy in
+    // My Drive/temp/dots/play.local-DNTan253.js uses one botpick profile
+    // for either AI side and every configured local difficulty.
+    private static func localParameters(movesPlayed: Int) -> SearchParameters {
         if movesPlayed < 30 {
-            // Both Drive medium and hard Bot 3 use this opening-phase botpick budget.
             return SearchParameters(timeMs: 400, softTimeMs: 120,
                                     minTimeMs: 40, maxDepth: 8)
         }
-        if level == 2 {
-            // online_code.pretty.js caps medium's late-game botpick at 250ms/depth 3.
-            return SearchParameters(timeMs: 250, softTimeMs: nil,
-                                    minTimeMs: 0, maxDepth: 3)
-        }
-        // Unlimited-clock hard Bot 3 profile from online_code.pretty.js.
-        return SearchParameters(timeMs: 5000, softTimeMs: 1200,
+        return SearchParameters(timeMs: 5000, softTimeMs: 600,
+                                minTimeMs: 80, maxDepth: 32)
+    }
+
+    private static func analyzerParameters(timeLimitOverride: TimeInterval?) -> SearchParameters {
+        let hard = min(5000, max(20, (timeLimitOverride ?? 5.0) * 1000))
+        // dots-analyzer.html calls botpick directly; unlike the local-game
+        // wrapper it supplies no softTimeMs/minTimeMs, so use botpick's 60ms default.
+        return SearchParameters(timeMs: hard, softTimeMs: nil,
                                 minTimeMs: 60, maxDepth: 32)
     }
 
-    static func timeBudget(level: Int, movesPlayed: Int = 0,
-                           timeLimitOverride: TimeInterval? = nil) -> TimeInterval {
-        parameters(level: level, movesPlayed: movesPlayed,
-                   timeLimitOverride: timeLimitOverride).timeMs / 1000
+    static func timeBudget(movesPlayed: Int = 0,
+                           timeLimitOverride: TimeInterval? = nil,
+                           directBotpickSearch: Bool = false) -> TimeInterval {
+        (directBotpickSearch ? analyzerParameters(timeLimitOverride: timeLimitOverride)
+            : localParameters(movesPlayed: movesPlayed)).timeMs / 1000
+    }
+
+    private static func neighbors(_ index: Int, _ size: Int) -> [Int] {
+        let row = index / size, column = index % size
+        var result: [Int] = []
+        if column + 1 < size { result.append(index + 1) }
+        if column > 0 { result.append(index - 1) }
+        if row + 1 < size { result.append(index + size) }
+        if row > 0 { result.append(index - size) }
+        return result
+    }
+
+    // Port of DotsBoard-CHX_Vctr.js `et()` used by the local wrapper as its
+    // fallback when worker botpick cannot return a move.
+    private static func localFallback(cells: [UInt8], size: Int, side: Int,
+                                      movesRed: Int, movesBlue: Int) -> Int? {
+        let legal = cells.indices.filter { owner(cells[$0]) == side }
+        guard !legal.isEmpty else { return nil }
+        let own = side
+        let enemy = 1 - side
+        let totalPieces = cells.filter { $0 != 0 }.count
+        let early = totalPieces <= 8
+        let late = totalPieces >= 30
+        var supportCount = 0
+        var supportCharge = 0
+        for index in legal where (cells[index] & 0x0f) == 3 {
+            for neighbor in neighbors(index, size) where owner(cells[neighbor]) == enemy && (cells[neighbor] & 0x0f) == 3 {
+                supportCount += 1
+                supportCharge += Int(cells[neighbor] & 0x0f)
+            }
+        }
+        let hasSupportChain = supportCount > 0
+        var scored: [(Int, Double)] = []
+        for index in legal {
+            let currentCharge = Int(cells[index] & 0x0f)
+            let newCharge = currentCharge + 1
+            let explodes = newCharge >= 4
+            let nearlyCritical = !explodes && newCharge >= 3
+            var ownNeighbors = 0, enemyNeighbors = 0
+            var maxEnemyCharge = 0, enemyCritical = 0, enemyChargeTwo = 0
+            var ownCriticalNeighbors = 0, emptyNeighbors = 0
+            for neighbor in neighbors(index, size) {
+                let value = cells[neighbor]
+                if value == 0 { emptyNeighbors += 1; continue }
+                if owner(value) == own {
+                    ownNeighbors += 1
+                    if Int(value & 0x0f) == 3 { ownCriticalNeighbors += 1 }
+                } else {
+                    let charge = Int(value & 0x0f)
+                    enemyNeighbors += 1
+                    maxEnemyCharge = max(maxEnemyCharge, charge)
+                    if charge == 3 { enemyCritical += 1 }
+                    else if charge == 2 { enemyChargeTwo += 1 }
+                }
+            }
+            var score = 0.0
+            if explodes {
+                guard let transition = DriveBotpickEngine.applyMove(
+                    cells: cells, size: size, side: side,
+                    movesRed: movesRed, movesBlue: movesBlue, move: index
+                ) else { continue }
+                let beforeOwn = cells.filter { owner($0) == own }.count
+                let beforeEnemy = cells.filter { owner($0) == enemy }.count
+                let afterOwn = transition.cells.filter { owner($0) == own }.count
+                let afterEnemy = transition.cells.filter { owner($0) == enemy }.count
+                score += Double(afterOwn - beforeOwn) * 18 + Double(beforeEnemy - afterEnemy) * 26
+                if afterEnemy == 0 && beforeEnemy > 0 { score += 500_000 }
+                score += Double(enemyNeighbors) * 30
+                score += Double(enemyCritical) * 90
+                score += Double(emptyNeighbors) * 0.4
+                if hasSupportChain { score += 280 + Double(supportCharge) * 12 }
+            } else {
+                if enemyCritical > 0 {
+                    var penalty = 95 + newCharge * 24 + maxEnemyCharge * 18
+                    if nearlyCritical { penalty += 250 + ownCriticalNeighbors * 95 }
+                    score -= Double(penalty)
+                }
+                if nearlyCritical && enemyChargeTwo > 0 { score -= Double(105 * enemyChargeTwo) }
+                if nearlyCritical && enemyNeighbors > 0 { score -= Double(30 * enemyNeighbors) }
+                if nearlyCritical && enemyNeighbors == 0 { score += 22 + Double(ownCriticalNeighbors) * 4 }
+                if hasSupportChain { score -= 290 + Double(supportCharge) * 12 }
+                score += Double(newCharge) * 0.5
+                score += Double(4 - 4) * 2.5
+                score += Double(ownNeighbors)
+                score += Double(emptyNeighbors) * 0.25
+                score -= Double(enemyNeighbors) * 2
+                if early {
+                    let x = index % size, y = index / size
+                    let center = size / 2
+                    if side == 0 { score += Double(max(0, center - (x + y))) * 2.5 }
+                    else { score += Double(max(0, center - (2 * (size - 1) - x - y))) * 2.5 }
+                }
+                if late && nearlyCritical { score -= 8 }
+            }
+            // Source `et()` jitters scores by ±0.005 to break exact ties.
+            score += (Double.random(in: 0..<1) - 0.5) * 0.01
+            scored.append((index, score))
+        }
+        return scored.max(by: { $0.1 < $1.1 })?.0 ?? legal.first
     }
 
     static func bestMove(board: AISolver.Board, activePlayers: [Int], currentPlayer: Int,
-                         hasEntered: [Bool], level: Int, movesPlayed: Int,
-                         openingSeed: String,
-                         timeLimitOverride: TimeInterval? = nil) -> (Int, Int)? {
+                         movesPlayed: Int, openingSeed: String,
+                         timeLimitOverride: TimeInterval? = nil,
+                         directBotpickSearch: Bool = false) -> (Int, Int)? {
         guard (2...12).contains(board.size), activePlayers.count == 2,
               let side = activePlayers.firstIndex(of: currentPlayer) else { return nil }
         let size = board.size
@@ -294,31 +385,30 @@ private struct DriveDuelSearch {
         }
         let legalMoves = cells.indices.filter { owner(cells[$0]) == side }
         guard let first = legalMoves.first else { return nil }
-
-        // Drive's online easy wrapper skips its opening book and chooses among legal cells.
-        // Medium/hard query the book before calling the same worker `botpick` core.
-        if level <= 1 {
-            let roll = Double.random(in: 0..<1)
-            let selected: Int
-            if roll < 0.25 && legalMoves.count > 1 {
-                selected = legalMoves.randomElement() ?? first
-            } else if roll < 0.70 && legalMoves.count > 1 {
-                let prefixCount = min(legalMoves.count, max(2, (legalMoves.count + 1) / 2))
-                selected = legalMoves[Int.random(in: 0..<prefixCount)]
-            } else {
-                selected = first
-            }
-            return (selected / size, selected % size)
-        }
-
-        // worker wrapper passes moves_blue to Clock.er; local iOS generalizes this to
-        // the active side's own count so red-first local games and Analyzer behave correctly.
         let firstSide = movesPlayed.isMultiple(of: 2) ? side : 1 - side
         let firstSideMoves = (movesPlayed + 1) / 2
         let secondSideMoves = movesPlayed / 2
-        let movesRed = firstSide == 0 ? firstSideMoves : secondSideMoves
-        let movesBlue = firstSide == 1 ? firstSideMoves : secondSideMoves
-        let ownMoves = side == 0 ? movesRed : movesBlue
+        let actualMovesRed = firstSide == 0 ? firstSideMoves : secondSideMoves
+        let actualMovesBlue = firstSide == 1 ? firstSideMoves : secondSideMoves
+
+        // Analyzer source (`dots-analyzer.html`) calls botpick directly: no
+        // opening-book or fallback policy, and fixed 20/20 move counts.
+        if directBotpickSearch {
+            let profile = analyzerParameters(timeLimitOverride: timeLimitOverride)
+            let result = DriveBotpickEngine.bestMove(
+                cells: cells, size: size, side: side, movesRed: 20, movesBlue: 20,
+                limits: DriveBotpickEngine.Limits(timeMs: profile.timeMs,
+                                                  softTimeMs: nil,
+                                                  minTimeMs: profile.minTimeMs,
+                                                  maxDepth: profile.maxDepth)
+            )
+            let selected = result?.move ?? first
+            return (selected / size, selected % size)
+        }
+
+        // Local two-player policy (`play.local-DNTan253.js`): every AI difficulty
+        // checks its deterministic local opening first, then uses the same botpick.
+        let ownMoves = side == 0 ? actualMovesRed : actualMovesBlue
         if movesPlayed < 30, ownMoves < 12,
            let opening = DriveOpeningBook.nextOwnedMove(cells: cells, size: size,
                                                         side: side, startIndex: ownMoves,
@@ -326,24 +416,18 @@ private struct DriveDuelSearch {
             return (opening / size, opening % size)
         }
 
-        let profile = parameters(level: level, movesPlayed: movesPlayed,
-                                 timeLimitOverride: timeLimitOverride)
-        guard let result = DriveBotpickEngine.bestMove(
+        let profile = localParameters(movesPlayed: movesPlayed)
+        let result = DriveBotpickEngine.bestMove(
             cells: cells, size: size, side: side,
-            movesRed: movesRed, movesBlue: movesBlue,
+            movesRed: actualMovesRed, movesBlue: actualMovesBlue,
             limits: DriveBotpickEngine.Limits(timeMs: profile.timeMs,
                                               softTimeMs: profile.softTimeMs,
                                               minTimeMs: profile.minTimeMs,
                                               maxDepth: profile.maxDepth)
-        ) else { return (first / size, first % size) }
-
-        // The web wrapper deliberately chooses the second row-major legal cell 25% of
-        // the time in medium mode after search; preserve that behavior on iOS.
-        if level == 2 && legalMoves.count > 1 && Double.random(in: 0..<1) < 0.25 {
-            let runnerUp = legalMoves[1]
-            return (runnerUp / size, runnerUp % size)
-        }
-        return (result.move / size, result.move % size)
+        )
+        let selected = result?.move ?? localFallback(cells: cells, size: size, side: side,
+                                                      movesRed: actualMovesRed, movesBlue: actualMovesBlue) ?? first
+        return (selected / size, selected % size)
     }
 }
 
@@ -442,6 +526,7 @@ struct AISolver: Sendable {
     let localDuelMovesPlayed: Int
     let openingSeed: String
     private let searchTimeLimitOverride: TimeInterval?
+    private let directBotpickSearch: Bool
     private let searchDeadline: TimeInterval
     let board: Board
     let hasEntered: [Bool]
@@ -459,7 +544,8 @@ struct AISolver: Sendable {
          isLocalDuelMode: Bool = false,
          localDuelMovesPlayed: Int = 0,
          openingSeed: String = "local",
-         searchTimeLimitOverride: TimeInterval? = nil) {
+         searchTimeLimitOverride: TimeInterval? = nil,
+         directBotpickSearch: Bool = false) {
         self.boardSize = boardSize
         self.activePlayers = activePlayers
         self.currentPlayer = currentPlayer
@@ -469,9 +555,11 @@ struct AISolver: Sendable {
         self.localDuelMovesPlayed = localDuelMovesPlayed
         self.openingSeed = openingSeed
         self.searchTimeLimitOverride = searchTimeLimitOverride
+        self.directBotpickSearch = directBotpickSearch
         let timeBudget = playerType == .driveBot
-            ? DriveDuelSearch.timeBudget(level: aiLevel.rawValue, movesPlayed: localDuelMovesPlayed,
-                                         timeLimitOverride: searchTimeLimitOverride)
+            ? DriveDuelSearch.timeBudget(movesPlayed: localDuelMovesPlayed,
+                                         timeLimitOverride: searchTimeLimitOverride,
+                                         directBotpickSearch: directBotpickSearch)
             : aiLevel.searchTimeBudget
         self.searchDeadline = ProcessInfo.processInfo.systemUptime + timeBudget
 
@@ -508,10 +596,11 @@ struct AISolver: Sendable {
         // games, continue into the shared multiplayer MaxN path instead of
         // returning nil before the bot can place its opening piece.
         if playerType == .driveBot && activePlayers.count == 2 {
-            return DriveDuelSearch.bestMove(board: board, activePlayers: activePlayers, currentPlayer: currentPlayer,
-                                            hasEntered: hasEntered, level: aiLevel.rawValue,
+            return DriveDuelSearch.bestMove(board: board, activePlayers: activePlayers,
+                                            currentPlayer: currentPlayer,
                                             movesPlayed: localDuelMovesPlayed, openingSeed: openingSeed,
-                                            timeLimitOverride: searchTimeLimitOverride)
+                                            timeLimitOverride: searchTimeLimitOverride,
+                                            directBotpickSearch: directBotpickSearch)
         }
 
         var validMoves = getPlayableCells(for: currentPlayer, on: board)

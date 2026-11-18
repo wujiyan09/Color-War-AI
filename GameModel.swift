@@ -1203,7 +1203,17 @@ final class GameModel: ObservableObject {
         let targetPlayer = self.currentPlayer
 
         aiTask = Task(priority: .userInitiated) {
-            try? await Task.sleep(nanoseconds: 150_000_000)
+            let isTempDotsLocalBot = self.isLocalDuelMode && !isP2P && !isWS &&
+                activePlayerIndices.count == 2 && currentType == .driveBot
+            let moveDelayMs: Double
+            if isTempDotsLocalBot {
+                moveDelayMs = self.localDuelMoveCount < 30
+                    ? Double.random(in: 60..<200)
+                    : Double.random(in: 600..<1300)
+            } else {
+                moveDelayMs = 150
+            }
+            try? await Task.sleep(nanoseconds: UInt64(moveDelayMs * 1_000_000))
             if Task.isCancelled { return }
 
             let isCurrentTurnValid = await MainActor.run {
@@ -1225,7 +1235,7 @@ final class GameModel: ObservableObject {
                 eliminated: eliminated,
                 isLocalDuelMode: self.isLocalDuelMode && !isP2P && !isWS && activePlayerIndices.count == 2,
                 localDuelMovesPlayed: self.localDuelMoveCount,
-                openingSeed: self.currentGameSessionID.uuidString
+                openingSeed: "local-\(self.currentGameSessionID.uuidString)"
             )
 
             if let bestMove = await solver.calculateBestMove() {

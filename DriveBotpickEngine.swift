@@ -1,8 +1,8 @@
 import Foundation
 
-/// Faithful Swift port of the Drive worker's `botpick` engine (`Rt`/`ke`/`Et`).
-/// The game-policy wrapper (opening book, level timing and optional mistake rate)
-/// remains outside this search core, as it is in the Drive online client.
+/// Swift port of the `botpick` engine exported by My Drive/temp/dots/DotsBoard-CHX_Vctr.js.
+/// The local-game wrapper in play.local-DNTan253.js supplies openings, phase budgets,
+/// and its `et()` fallback separately from the bitboard search.
 enum DriveBotpickEngine {
     struct Limits {
         let timeMs: Double
@@ -221,7 +221,7 @@ enum DriveBotpickEngine {
         return position.cells.indices.filter { owner(position.cells[$0]) == position.side }
     }
 
-    // Port of worker.pretty.js `rt()` (the bitboard bot evaluation), not `ie()`/`Ce()`.
+    // Port of DotsBoard-CHX_Vctr.js `wt()` (the bitboard bot evaluation).
     private static func evaluate(_ position: Position) -> Int {
         if let winner = position.winner { return winner == position.side ? winScore : -winScore }
         let side = position.side
@@ -257,7 +257,7 @@ enum DriveBotpickEngine {
             + (exposedCharge[side] - exposedCharge[opponent]) * 12
     }
 
-    // Port of worker.pretty.js `Tt()` move ordering, including killers/history.
+    // Port of DotsBoard-CHX_Vctr.js `wn()` move ordering, including killers/history.
     private static func moveOrderScore(_ position: Position, move: Int, ttMove: Int,
                                        ply: Int, context: SearchContext) -> Int {
         if move == ttMove { return 1_000_000_000 }
@@ -299,7 +299,7 @@ enum DriveBotpickEngine {
         context.history[side * 144 + move] += depth * depth
     }
 
-    // Port of worker.pretty.js `ke()` (full negamax/alpha-beta, TT and NMP).
+    // Port of DotsBoard-CHX_Vctr.js `ze()` (full negamax/alpha-beta, TT and NMP).
     private static func search(_ position: inout Position, depth: Int, alpha inputAlpha: Int,
                                beta: Int, ply: Int, context: inout SearchContext,
                                pvNode: Bool) -> NodeResult {

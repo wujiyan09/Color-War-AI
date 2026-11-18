@@ -2218,7 +2218,8 @@ private struct AnalyzerPlayView: View {
             eliminated: [false, false],
             isLocalDuelMode: true,
             localDuelMovesPlayed: moveCount,
-            searchTimeLimitOverride: 5.0
+            searchTimeLimitOverride: 5.0,
+            directBotpickSearch: true
         )
         aiTask = Task {
             let move = await solver.calculateBestMove()

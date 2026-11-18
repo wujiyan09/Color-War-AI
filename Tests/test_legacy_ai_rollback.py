@@ -10,13 +10,13 @@ MODEL = (ROOT / "GameModel.swift").read_text()
 
 class Bot3DriveParityTests(unittest.TestCase):
     def test_drive_source_functions_have_one_shared_swift_port(self):
-        self.assertIn("Drive worker's `botpick` engine (`Rt`/`ke`/`Et`)", DRIVE)
-        for source_fn in ("rt()", "Tt()", "ke()"):
-            self.assertIn(f"worker.pretty.js `{source_fn}`", DRIVE)
+        self.assertIn("My Drive/temp/dots/DotsBoard-CHX_Vctr.js", DRIVE)
+        for source_fn in ("wt()", "wn()", "ze()"):
+            self.assertIn(f"DotsBoard-CHX_Vctr.js `{source_fn}`", DRIVE)
         self.assertIn("static func bestMove(cells inputCells", DRIVE)
         self.assertIn("static func applyMove(cells inputCells", DRIVE)
-        self.assertIn("default-workspace/dots/online_code.pretty.js", AI)
-        self.assertIn("Clock.pretty.js", AI)
+        self.assertIn("My Drive/temp/dots/play.local-DNTan253.js", AI)
+        self.assertIn("DotsBoard-CHX_Vctr.js `et()`", AI)
 
     def test_drive_evaluator_weights_and_terminal_counts_match_source(self):
         for expression in (
@@ -65,7 +65,7 @@ class Bot3DriveParityTests(unittest.TestCase):
 
     def test_search_matches_drive_pruning_order_and_budget_stopping(self):
         for fragment in (
-            "position.side = 1 - oldSide",  # Drive null-move pruning
+            "position.side = 1 - oldSide",  # source bitboard null-move pruning
             "depth >= 6 ? 3 : 2",
             "alpha: -beta, beta: -alpha",
             "context.nodes & 4095 == 0",
@@ -99,20 +99,20 @@ class Bot3DriveParityTests(unittest.TestCase):
             "16_777_619",
             "movesPlayed < 30",
             "ownMoves < 12",
-            "if level <= 1",
-            "if level == 2",
             "timeMs: 400, softTimeMs: 120",
             "minTimeMs: 40, maxDepth: 8",
-            "timeMs: 250, softTimeMs: nil",
-            "maxDepth: 3",
-            "timeMs: 5000, softTimeMs: 1200",
-            "minTimeMs: 60, maxDepth: 32",
-            "Double.random(in: 0..<1) < 0.25",
-            "let runnerUp = legalMoves[1]",
+            "timeMs: 5000, softTimeMs: 600",
+            "minTimeMs: 80, maxDepth: 32",
+            "private static func localFallback",
+            "score += (Double.random(in: 0..<1) - 0.5) * 0.01",
+            "movesRed: 20, movesBlue: 20",
+            "directBotpickSearch",
         ):
             self.assertIn(fragment, wrapper)
-        self.assertIn("let movesRed = firstSide == 0 ? firstSideMoves : secondSideMoves", wrapper)
-        self.assertIn("let movesBlue = firstSide == 1 ? firstSideMoves : secondSideMoves", wrapper)
+        self.assertNotIn("if level <= 1", wrapper)
+        self.assertNotIn("if level == 2", wrapper)
+        self.assertIn("let actualMovesRed = firstSide == 0 ? firstSideMoves : secondSideMoves", wrapper)
+        self.assertIn("let actualMovesBlue = firstSide == 1 ? firstSideMoves : secondSideMoves", wrapper)
 
     def test_analyzer_and_duel_share_search_and_move_transition_with_five_second_cap(self):
         analyzer = APP[APP.index("private struct AnalyzerPlayView"):APP.index("struct StartMenuView")]
@@ -135,8 +135,9 @@ class Bot3DriveParityTests(unittest.TestCase):
 
     def test_analyzer_budget_override_cannot_exceed_drive_hard_cap(self):
         wrapper = AI[AI.index("private struct DriveDuelSearch"):AI.index("// MARK: - 7.")]
-        self.assertIn("min(5000, max(80, timeLimitOverride * 1000))", wrapper)
-        self.assertIn("searchTimeLimitOverride: 5.0", APP)
+        self.assertIn("min(5000, max(20, (timeLimitOverride ?? 5.0) * 1000))", wrapper)
+        self.assertIn("directBotpickSearch: true", APP)
+        self.assertIn("softTimeMs: nil", wrapper)
         self.assertIn("let hardDeadline", DRIVE)
         self.assertIn("limits.timeMs", DRIVE)
 
