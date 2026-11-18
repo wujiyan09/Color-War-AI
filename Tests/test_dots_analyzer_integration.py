@@ -6,6 +6,10 @@ SWIFT = "\n".join((ROOT / name).read_text() for name in ("ContentView.swift", "G
 
 
 class NativeAnalyzerTests(unittest.TestCase):
+    def test_app_forces_dark_appearance_at_the_scene_root(self):
+        app = (ROOT / "MyApp.swift").read_text()
+        self.assertIn("WindowGroup {\n            ContentView()\n                .preferredColorScheme(.dark)", app)
+
     def test_three_native_tabs_and_party_mode_picker(self):
         self.assertIn("TabView(selection: $selectedTab)", SWIFT)
         self.assertIn('Label("对弈", systemImage: "circle.grid.3x3.fill")', SWIFT)
