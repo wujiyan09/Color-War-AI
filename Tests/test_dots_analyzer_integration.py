@@ -2,7 +2,7 @@ from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-SWIFT = "\n".join((ROOT / name).read_text() for name in ("ContentView.swift", "GameModel.swift", "AIEngine.swift", "DriveBotpickEngine.swift"))
+SWIFT = "\n".join((ROOT / name).read_text() for name in ("ContentView.swift", "GameModel.swift", "AIEngine.swift"))
 
 
 class NativeAnalyzerTests(unittest.TestCase):
@@ -15,7 +15,7 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn('Label("对弈", systemImage: "circle.grid.3x3.fill")', SWIFT)
         self.assertIn('Label("派对", systemImage: "party.popper.fill")', SWIFT)
         self.assertIn('Label("分析器", systemImage: "wrench.and.screwdriver.fill")', SWIFT)
-        self.assertIn('.toolbar(.hidden, for: .tabBar)', SWIFT)
+        self.assertIn('.toolbarVisibility(', SWIFT)
         self.assertNotIn('setupTabBar', SWIFT)
         self.assertNotIn('setupTabButton', SWIFT)
         self.assertNotIn('.safeAreaInset(edge: .bottom, spacing: 0)', SWIFT)
@@ -89,20 +89,27 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn("pendingAnalyzerArchive = archive", SWIFT)
         self.assertIn("game.shouldNavigateToGame = true", SWIFT)
 
-    def test_drive_botpick_core_is_used_with_actual_move_counts(self):
-        self.assertIn("DriveBotpickEngine.bestMove", SWIFT)
-        self.assertIn("Port of worker.pretty.js `ke()`", SWIFT)
-        self.assertIn("Port of worker.pretty.js `rt()`", SWIFT)
-        self.assertIn("Port of worker.pretty.js `Tt()`", SWIFT)
-        self.assertIn("movesRed: redMoves, movesBlue: blueMoves", SWIFT)
-        self.assertIn("let firstSide = movesPlayed.isMultiple(of: 2) ? side : 1 - side", SWIFT)
-        self.assertIn("let firstSideMoves = (movesPlayed + 1) / 2", SWIFT)
+    def test_duel_bot3_uses_the_pre_drive_search_path(self):
+        engine = (ROOT / "AIEngine.swift").read_text()
+        self.assertIn("if playerType == .driveBot && activePlayers.count == 2", engine)
+        self.assertIn("DriveDuelSearch.bestMove", engine)
+        self.assertIn("let attempt = search(cells, side, enteredMask, depth, alpha, beta", engine)
+        self.assertIn("if level == 1", engine)
+        self.assertIn("if level == 2 && moves.count > 1", engine)
+        self.assertNotIn("DriveBotpickEngine", engine)
+        self.assertFalse((ROOT / "DriveBotpickEngine.swift").exists())
+        self.assertIn("case .deep: return \"深度 4-6 层 | 置换表+静止搜索\"", engine)
+        self.assertIn("case .extreme: return \"深度 6-8 层 | 全局链图+极限推理\"", engine)
 
     def test_portrait_hides_both_side_player_indicators(self):
         board = SWIFT[SWIFT.index("struct BoardView"):SWIFT.index("private struct AnalyzerToolPanel")]
         self.assertIn("let showPlayerIndicators = proxy.size.width > proxy.size.height", board)
+        self.assertIn("let horizontalSafeInset: CGFloat = 12", board)
+        self.assertIn("proxy.size.width - horizontalSafeInset * 2", board)
         self.assertGreaterEqual(board.count("if showPlayerIndicators {"), 2)
         self.assertIn("let orbWidth: CGFloat = showPlayerIndicators ? 52 : 0", board)
+        self.assertIn("minDim - innerBorderPadding * 2 - gap * CGFloat(game.boardSize - 1)", board)
+        self.assertNotIn(".clipped()", board)
 
     def test_analyzer_import_size_validation_and_native_tabbar_transition(self):
         menu = SWIFT[SWIFT.index("struct StartMenuView"):SWIFT.index("private struct AnalyzerLandingView")]
@@ -255,10 +262,23 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn('.foregroundStyle(.white)', setup)
         tabs = menu[menu.index("private var setupTabs"):menu.index("@ToolbarContentBuilder\n    private var setupToolbar")]
         self.assertNotIn(".toolbar(.hidden, for: .tabBar)", tabs)
-        self.assertIn(".toolbar(.hidden, for: .tabBar)", menu)
+        self.assertIn(".toolbarVisibility(", menu)
         self.assertNotIn("selectedPartyMode == 0", setup)
         self.assertNotIn("selectedTab == 0", setup)
         self.assertIn(".toolbarBackground(.visible, for: .navigationBar)", menu)
+
+    def test_game_tab_bar_visibility_tracks_navigation_path_in_both_directions(self):
+        menu = SWIFT[SWIFT.index("struct StartMenuView"):SWIFT.index("private struct AnalyzerLandingView")]
+        destination = menu[menu.index("private func destinationView"):menu.index("private var duelNavigation")]
+        duel = menu[menu.index("private var duelNavigation:"):menu.index("private var partyNavigation:")]
+        party = menu[menu.index("private var partyNavigation:"):menu.index("private var analyzerNavigation:")]
+        self.assertNotIn(".toolbar(.hidden, for: .tabBar)", destination)
+        self.assertIn(".toolbarVisibility(duelNavigationPath.last == .gamePlay ? .hidden : .visible, for: .tabBar)", duel)
+        self.assertIn(".animation(.easeInOut(duration: 0.32), value: duelNavigationPath.last == .gamePlay)", duel)
+        self.assertIn(".toolbarVisibility(partyNavigationPath.last == .gamePlay ? .hidden : .visible, for: .tabBar)", party)
+        self.assertIn(".animation(.easeInOut(duration: 0.32), value: partyNavigationPath.last == .gamePlay)", party)
+        self.assertIn("duelNavigationPath.removeLast()", menu)
+        self.assertIn("partyNavigationPath.removeLast()", menu)
 
     def test_setup_preferences_are_persisted_per_mode_and_archives_do_not_overwrite_them(self):
         self.assertIn("CW_Duel_BoardSize", SWIFT)

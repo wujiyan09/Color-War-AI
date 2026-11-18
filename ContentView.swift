@@ -705,11 +705,12 @@ struct BoardView: View {
             let showPlayerIndicators = proxy.size.width > proxy.size.height
             let orbWidth: CGFloat = showPlayerIndicators ? 52 : 0
             let sideSpacing: CGFloat = showPlayerIndicators ? 8 : 0
-            let availableWidth = max(10, proxy.size.width - orbWidth * 2 - sideSpacing * 2)
+            let horizontalSafeInset: CGFloat = 12
+            let availableWidth = max(10, proxy.size.width - horizontalSafeInset * 2 - orbWidth * 2 - sideSpacing * 2)
             let availableHeight = max(10, proxy.size.height - 24)
             let minDim = min(availableWidth, availableHeight)
             
-            let side = (minDim - gap * CGFloat(game.boardSize - 1)) / CGFloat(game.boardSize)
+            let side = max(0, (minDim - innerBorderPadding * 2 - gap * CGFloat(game.boardSize - 1)) / CGFloat(game.boardSize))
             let actualBoardDimension = side * CGFloat(game.boardSize) + gap * CGFloat(game.boardSize - 1) + innerBorderPadding * 2
             
             HStack(spacing: sideSpacing) {
@@ -783,7 +784,6 @@ struct BoardView: View {
                 onBoardDimensionCalculated(newDim)
             }
         }
-        .clipped()
     }
 }
 
@@ -2617,7 +2617,6 @@ struct StartMenuView: View {
                 .navigationBarBackButtonHidden(true)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbarBackground(.visible, for: .navigationBar)
-                .toolbar(.hidden, for: .tabBar)
                 .toolbar { gameToolbar }
         case .analyzerPlay:
             AnalyzerPlayView(game: game, boardSize: analyzerBoardSize,
@@ -2637,6 +2636,8 @@ struct StartMenuView: View {
                 .toolbar { setupToolbar }
                 .navigationDestination(for: StartMenuDestination.self) { destinationView($0) }
         }
+        .toolbarVisibility(duelNavigationPath.last == .gamePlay ? .hidden : .visible, for: .tabBar)
+        .animation(.easeInOut(duration: 0.32), value: duelNavigationPath.last == .gamePlay)
     }
 
     private var partyNavigation: some View {
@@ -2648,6 +2649,8 @@ struct StartMenuView: View {
                 .toolbar { setupToolbar }
                 .navigationDestination(for: StartMenuDestination.self) { destinationView($0) }
         }
+        .toolbarVisibility(partyNavigationPath.last == .gamePlay ? .hidden : .visible, for: .tabBar)
+        .animation(.easeInOut(duration: 0.32), value: partyNavigationPath.last == .gamePlay)
     }
 
     private var analyzerNavigation: some View {

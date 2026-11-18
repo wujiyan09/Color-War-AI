@@ -18,10 +18,11 @@ class LegacyAIBaselineTests(unittest.TestCase):
         self.assertIn("final class GameModel: ObservableObject", game_model)
         self.assertNotIn("final class GameModel: ObservableObject", app)
 
-    def test_bot3_uses_drive_search_while_bot1_and_bot2_keep_existing_solvers(self):
+    def test_bot3_restores_pre_drive_two_player_search_without_changing_other_bots(self):
         self.assertIn("case driveBot =", TEXT)
         self.assertIn("if playerType == .driveBot && activePlayers.count == 2", TEXT)
         self.assertIn("DriveDuelSearch.bestMove", TEXT)
+        self.assertNotIn("DriveBotpickEngine", TEXT)
         self.assertIn("Bot 1", TEXT)
         self.assertIn("Bot 2", TEXT)
         self.assertIn("Bot 3", TEXT)
