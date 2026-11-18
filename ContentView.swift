@@ -702,21 +702,25 @@ struct BoardView: View {
     
     var body: some View {
         GeometryReader { proxy in
-            let orbWidth: CGFloat = 52
-            let availableWidth = max(10, proxy.size.width - orbWidth * 2 - 16)
+            let showPlayerIndicators = proxy.size.width > proxy.size.height
+            let orbWidth: CGFloat = showPlayerIndicators ? 52 : 0
+            let sideSpacing: CGFloat = showPlayerIndicators ? 8 : 0
+            let availableWidth = max(10, proxy.size.width - orbWidth * 2 - sideSpacing * 2)
             let availableHeight = max(10, proxy.size.height - 24)
             let minDim = min(availableWidth, availableHeight)
             
             let side = (minDim - gap * CGFloat(game.boardSize - 1)) / CGFloat(game.boardSize)
             let actualBoardDimension = side * CGFloat(game.boardSize) + gap * CGFloat(game.boardSize - 1) + innerBorderPadding * 2
             
-            HStack(spacing: 8) {
-                VStack(spacing: 12) {
-                    ForEach(leftPlayers, id: \.self) { pIdx in
-                        PlayerProgressOrbView(game: game, playerIndex: pIdx)
+            HStack(spacing: sideSpacing) {
+                if showPlayerIndicators {
+                    VStack(spacing: 12) {
+                        ForEach(leftPlayers, id: \.self) { pIdx in
+                            PlayerProgressOrbView(game: game, playerIndex: pIdx)
+                        }
                     }
+                    .frame(width: orbWidth)
                 }
-                .frame(width: orbWidth)
                 
                 ZStack(alignment: .topLeading) {
                     VStack(spacing: gap) {
@@ -764,12 +768,14 @@ struct BoardView: View {
                 .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
                 .frame(width: actualBoardDimension, height: actualBoardDimension)
                 
-                VStack(spacing: 12) {
-                    ForEach(rightPlayers, id: \.self) { pIdx in
-                        PlayerProgressOrbView(game: game, playerIndex: pIdx)
+                if showPlayerIndicators {
+                    VStack(spacing: 12) {
+                        ForEach(rightPlayers, id: \.self) { pIdx in
+                            PlayerProgressOrbView(game: game, playerIndex: pIdx)
+                        }
                     }
+                    .frame(width: orbWidth)
                 }
-                .frame(width: orbWidth)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             .onAppear { onBoardDimensionCalculated(actualBoardDimension) }
@@ -2100,12 +2106,14 @@ private struct AnalyzerPlayView: View {
     init(game: GameModel, boardSize: Int, selfColor: Binding<Int>,
          importedArchive: Binding<GameSaveArchive?>, initialArchive: GameSaveArchive?) {
         self.game = game
-        let initialSize = initialArchive?.boardSize ?? boardSize
+        let validArchive = initialArchive.flatMap { [6, 9, 12].contains($0.boardSize) ? $0 : nil }
+        let requestedSize = validArchive?.boardSize ?? boardSize
+        let initialSize = [6, 9, 12].contains(requestedSize) ? requestedSize : 6
         self._boardSize = State(initialValue: initialSize)
         self._selfColor = selfColor
         self._importedArchive = importedArchive
-        _board = State(initialValue: Self.makeBoard(size: initialSize, selfColor: selfColor.wrappedValue, archive: initialArchive))
-        _moveCount = State(initialValue: initialArchive?.localDuelMoveCount ?? 0)
+        _board = State(initialValue: Self.makeBoard(size: initialSize, selfColor: selfColor.wrappedValue, archive: validArchive))
+        _moveCount = State(initialValue: validArchive?.localDuelMoveCount ?? 0)
     }
 
     private static func makeBoard(size: Int, selfColor: Int, archive: GameSaveArchive?) -> [[Cell]] {
@@ -2129,6 +2137,7 @@ private struct AnalyzerPlayView: View {
     }
 
     private func loadArchiveIntoAnalyzer(_ archive: GameSaveArchive) {
+        guard [6, 9, 12].contains(archive.boardSize) else { return }
         aiTask?.cancel()
         boardSize = archive.boardSize
         board = Self.makeBoard(size: archive.boardSize, selfColor: selfColor, archive: archive)
@@ -2561,6 +2570,10 @@ struct StartMenuView: View {
     }
 
     private func handleArchiveSelection(_ archive: GameSaveArchive) -> Bool {
+        if selectedTab == 2 && ![6, 9, 12].contains(archive.boardSize) {
+            unsupportedArchiveMessage = "分析器只支持导入 6×6、9×9 或 12×12 棋盘。"
+            return false
+        }
         let activeCount = archive.playerTypes.filter { $0.isEnabled }.count
         if (selectedTab == 0 || selectedTab == 2) && activeCount > 2 {
             unsupportedArchiveMessage = selectedTab == 0
@@ -2611,7 +2624,6 @@ struct StartMenuView: View {
                              selfColor: $analyzerSelfColor,
                              importedArchive: $pendingAnalyzerArchive,
                              initialArchive: pendingAnalyzerArchive)
-                .toolbar(.hidden, for: .tabBar)
                 .onDisappear { pendingAnalyzerArchive = nil }
         }
     }
@@ -2650,6 +2662,8 @@ struct StartMenuView: View {
                 .toolbar { setupToolbar }
                 .navigationDestination(for: StartMenuDestination.self) { destinationView($0) }
         }
+        .toolbarVisibility(analyzerNavigationPath.isEmpty ? .visible : .hidden, for: .tabBar)
+        .animation(.easeInOut(duration: 0.32), value: analyzerNavigationPath.isEmpty)
     }
 
     // The native TabView is the app's root mode navigation. Each tab owns its
@@ -2869,6 +2883,14 @@ struct GamePlayView: View {
     @ObservedObject var game: GameModel
     @Binding var isSpinningRandomWheel: Bool
     let onExit: () -> Void
+
+    private var elapsedGameTime: String {
+        let seconds = max(0, Int(Date().timeIntervalSince(game.matchStartedAt)))
+        if seconds >= 3600 {
+            return String(format: "%d:%02d:%02d", seconds / 3600, (seconds % 3600) / 60, seconds % 60)
+        }
+        return String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
     
     var body: some View {
         ZStack {
@@ -2930,6 +2952,10 @@ struct GamePlayView: View {
                         .font(.title)
                         .bold()
                         .foregroundColor(.white)
+
+                    Text("步数 \(game.localDuelMoveCount) · 用时 \(elapsedGameTime)")
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.8))
                     
                     VStack(spacing: 12) {
                         Button(action: {

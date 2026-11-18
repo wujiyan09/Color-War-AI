@@ -2,7 +2,7 @@ from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-SWIFT = "\n".join((ROOT / name).read_text() for name in ("ContentView.swift", "GameModel.swift", "AIEngine.swift"))
+SWIFT = "\n".join((ROOT / name).read_text() for name in ("ContentView.swift", "GameModel.swift", "AIEngine.swift", "DriveBotpickEngine.swift"))
 
 
 class NativeAnalyzerTests(unittest.TestCase):
@@ -84,6 +84,35 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn("switch selectedTab {", SWIFT)
         self.assertIn("pendingAnalyzerArchive = archive", SWIFT)
         self.assertIn("game.shouldNavigateToGame = true", SWIFT)
+
+    def test_drive_botpick_core_is_used_with_actual_move_counts(self):
+        self.assertIn("DriveBotpickEngine.bestMove", SWIFT)
+        self.assertIn("Port of worker.pretty.js `ke()`", SWIFT)
+        self.assertIn("Port of worker.pretty.js `rt()`", SWIFT)
+        self.assertIn("Port of worker.pretty.js `Tt()`", SWIFT)
+        self.assertIn("movesRed: redMoves, movesBlue: blueMoves", SWIFT)
+        self.assertIn("let firstSide = movesPlayed.isMultiple(of: 2) ? side : 1 - side", SWIFT)
+        self.assertIn("let firstSideMoves = (movesPlayed + 1) / 2", SWIFT)
+
+    def test_portrait_hides_both_side_player_indicators(self):
+        board = SWIFT[SWIFT.index("struct BoardView"):SWIFT.index("private struct AnalyzerToolPanel")]
+        self.assertIn("let showPlayerIndicators = proxy.size.width > proxy.size.height", board)
+        self.assertGreaterEqual(board.count("if showPlayerIndicators {"), 2)
+        self.assertIn("let orbWidth: CGFloat = showPlayerIndicators ? 52 : 0", board)
+
+    def test_analyzer_import_size_validation_and_native_tabbar_transition(self):
+        menu = SWIFT[SWIFT.index("struct StartMenuView"):SWIFT.index("private struct AnalyzerLandingView")]
+        self.assertIn("![6, 9, 12].contains(archive.boardSize)", menu)
+        self.assertIn("分析器只支持导入 6×6、9×9 或 12×12 棋盘。", menu)
+        self.assertIn(".toolbarVisibility(analyzerNavigationPath.isEmpty ? .visible : .hidden, for: .tabBar)", menu)
+        self.assertIn(".animation(.easeInOut(duration: 0.32), value: analyzerNavigationPath.isEmpty)", menu)
+
+    def test_game_over_overlay_displays_moves_and_elapsed_time(self):
+        play = SWIFT[SWIFT.index("struct GamePlayView"):]
+        self.assertIn("步数", play)
+        self.assertIn("game.localDuelMoveCount", play)
+        self.assertIn("elapsedGameTime", play)
+        self.assertIn("Date().timeIntervalSince(game.matchStartedAt)", play)
 
     def test_party_mode_picker_keeps_order_and_centers_content(self):
         party = SWIFT[SWIFT.index("private var partyTab: some View"):SWIFT.index("private func restoreSetupPreferences")]

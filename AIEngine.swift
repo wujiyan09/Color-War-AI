@@ -23,8 +23,8 @@ enum AIDifficultyLevel: Int, CaseIterable, Identifiable, Codable {
         switch self {
         case .fast: return "深度 2-3 层 | 基础评估"
         case .balanced: return "深度 3-5 层 | Alpha-Beta 剪枝"
-        case .deep: return "深度 4-6 层 | 置换表+静止搜索"
-        case .extreme: return "深度 6-8 层 | 全局链图+极限推理"
+        case .deep: return "Drive 位板搜索 · 迭代加深与置换表"
+        case .extreme: return "Drive 位板搜索 · 杀手与历史走法排序"
         }
     }
 
@@ -625,6 +625,29 @@ private struct DriveDuelSearch {
                 cells: cells, size: size, side: side, startIndex: movesPlayed / 2, seed: openingSeed
            ) {
             return (opening / size, opening % size)
+        }
+        // Bot 3/4 use the actual Drive worker's bitboard `botpick` search core,
+        // not the separate array-based hint/coach engine used by levels 1/2.
+        if level >= 3 {
+            // Drive's botpick terminal guard counts actual moves per color, not
+            // whether a player has entered the board. Recover the first mover from
+            // the current side and the total ply count (archives preserve this count).
+            let firstSide = movesPlayed.isMultiple(of: 2) ? side : 1 - side
+            let firstSideMoves = (movesPlayed + 1) / 2
+            let secondSideMoves = movesPlayed / 2
+            let redMoves = firstSide == 0 ? firstSideMoves : secondSideMoves
+            let blueMoves = firstSide == 1 ? firstSideMoves : secondSideMoves
+            if let result = DriveBotpickEngine.bestMove(
+                cells: cells, size: size, side: side,
+                movesRed: redMoves, movesBlue: blueMoves,
+                limits: DriveBotpickEngine.Limits(timeMs: searchParameters.timeMs,
+                                                  softTimeMs: searchParameters.softTimeMs,
+                                                  minTimeMs: searchParameters.minTimeMs,
+                                                  maxDepth: searchParameters.maxDepth)
+            ) {
+                return (result.move / size, result.move % size)
+            }
+            return (first / size, first % size)
         }
         if level == 1 {
             let ranked = moves.map { ($0, quietHeuristic(cells, $0, side, enteredMask, size)) }.sorted { $0.1 > $1.1 }
