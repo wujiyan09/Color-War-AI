@@ -15,8 +15,7 @@ class Bot3DriveParityTests(unittest.TestCase):
             self.assertIn(f"DotsBoard-CHX_Vctr.js `{source_fn}`", DRIVE)
         self.assertIn("static func bestMove(cells inputCells", DRIVE)
         self.assertIn("static func applyMove(cells inputCells", DRIVE)
-        self.assertIn("My Drive/temp/dots/play.local-DNTan253.js", AI)
-        self.assertIn("DotsBoard-CHX_Vctr.js `et()`", AI)
+        self.assertIn("online._code-CveaxU4E.js", AI)
 
     def test_drive_evaluator_weights_and_terminal_counts_match_source(self):
         for expression in (
@@ -100,14 +99,19 @@ class Bot3DriveParityTests(unittest.TestCase):
             "2_166_136_261",
             "16_777_619",
             "movesRed: 20, movesBlue: 20",
-            "DotsPickEngine.pickMove(board: engineBoard",
-            "difficulty: .hard",
+            "if movesPlayed < 30, ownMoves < 12",
+            "timeMs: 400, softTimeMs: 120",
+            "minTimeMs: 40, maxDepth: 8",
+            "timeMs: 5000, softTimeMs: 1200",
+            "minTimeMs: 60, maxDepth: 32",
+            "difficulty: .medium, timeMs: 200, maxDepth: 3",
+            "350 + Double.random(in: 0..<1) * 400",
             "directBotpickSearch",
         ):
             self.assertIn(fragment, wrapper)
         self.assertNotIn("if level <= 1", wrapper)
         self.assertNotIn("if level == 2", wrapper)
-        self.assertNotIn("if movesPlayed < 30, ownMoves < 12", wrapper)
+        self.assertIn("let actualMovesRed = firstSide == 0 ? firstSideMoves : secondSideMoves", wrapper)
 
     def test_analyzer_and_duel_share_search_and_move_transition_with_five_second_cap(self):
         analyzer = APP[APP.index("private struct AnalyzerPlayView"):APP.index("struct StartMenuView")]

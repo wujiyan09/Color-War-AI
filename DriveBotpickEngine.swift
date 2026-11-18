@@ -102,6 +102,11 @@ enum DriveBotpickEngine {
         var redCount: Int
         var blueCount: Int
         var hash: UInt64
+        // The JS engine keeps its Zobrist hash in a BigInt and restores it on unmake
+        // from a *signed* BigInt64Array. A restored hash with bit 63 set becomes a
+        // negative BigInt, which is a different Map key from the same unsigned value.
+        // Mirror that so TT hits/misses (and therefore the search) match exactly.
+        var hashNegative = false
         var cellUndo: [CellUndo] = []
         var frames: [Frame] = []
 
@@ -185,6 +190,7 @@ enum DriveBotpickEngine {
             redCount = frame.redCount
             blueCount = frame.blueCount
             hash = frame.hash
+            hashNegative = frame.hash >> 63 == 1
         }
     }
 
@@ -202,11 +208,12 @@ enum DriveBotpickEngine {
         let flag: Int // 0 exact, 1 lower bound, 2 upper bound
         let bestMove: Int
     }
+    private struct TTKey: Hashable { let hash: UInt64; let negative: Bool }
     private struct SearchContext {
         let deadline: Double
         var nodes = 0
         var stopped = false
-        var table: [UInt64: Entry] = [:]
+        var table: [TTKey: Entry] = [:]
         var killers = Array(repeating: [-1, -1], count: maxPly + 4)
         var history = Array(repeating: 0, count: 2 * 144)
     }
@@ -313,7 +320,7 @@ enum DriveBotpickEngine {
             return NodeResult(score: score, bestMove: -1)
         }
 
-        let hash = position.hash
+        let hash = TTKey(hash: position.hash, negative: position.hashNegative)
         let cached = context.table[hash]
         let ttMove = cached?.bestMove ?? -1
         var alpha = inputAlpha

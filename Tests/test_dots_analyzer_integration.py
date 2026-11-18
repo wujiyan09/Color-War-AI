@@ -203,6 +203,8 @@ class NativeAnalyzerTests(unittest.TestCase):
     def test_analyzer_uses_deep_search_with_five_second_cap_from_opening(self):
         self.assertIn("timeLimitOverride: TimeInterval? = nil", SWIFT)
         self.assertIn("min(5000, max(20, (timeLimitOverride ?? 5.0) * 1000))", SWIFT)
+        self.assertIn("if movesPlayed < 30, ownMoves < 12", SWIFT)
+        self.assertIn("DriveOpeningBook.nextOwnedMove", SWIFT)
         self.assertIn("directBotpickSearch: Bool = false", SWIFT)
         analyzer = SWIFT[SWIFT.index("private func runSelfMove()"):SWIFT.index("private func startOrResume()")]
         self.assertIn("aiLevel: .extreme", analyzer)
