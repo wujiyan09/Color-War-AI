@@ -66,7 +66,7 @@ class LegacyAIBaselineTests(unittest.TestCase):
         self.assertIn("ownCapture.best * 18 - enemyCapture.best * 12", TEXT)
         self.assertIn("(ownCapture.second - enemyCapture.second) * 4", TEXT)
         self.assertIn("charge(cells[index]) == 3", TEXT)
-        self.assertIn("let extension = tactical && depth <= 3", TEXT)
+        self.assertIn("let extensionDepth = tactical && depth <= 3", TEXT)
         self.assertIn("reduction = searched >= 6 ? 2 : 1", TEXT)
         self.assertIn("private static func connectedComponentSize", TEXT)
         self.assertIn("private static func topCaptureScores", TEXT)

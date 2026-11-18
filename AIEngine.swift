@@ -552,9 +552,9 @@ private struct DriveDuelSearch {
             let isFirst = enteredMask & (1 << side) == 0
             let nextCharge = charge(cells[move]) + (isFirst ? 3 : 1)
             let tactical = nextCharge >= 4
-            let extension = tactical && depth <= 3 && ply < maxPly - 4 ? 1 : 0
+            let extensionDepth = tactical && depth <= 3 && ply < maxPly - 4 ? 1 : 0
             let next = simulate(cells, move, side, enteredMask, size)
-            let childDepth = depth - 1 + extension
+            let childDepth = depth - 1 + extensionDepth
             var child: Result
             var score: Int
             if searched == 0 {
@@ -563,7 +563,7 @@ private struct DriveDuelSearch {
                 score = -child.score
             } else {
                 var reduction = 0
-                if !tactical && extension == 0 && depth >= 3 && searched >= 3 {
+                if !tactical && extensionDepth == 0 && depth >= 3 && searched >= 3 {
                     reduction = searched >= 6 ? 2 : 1
                     reduction = min(reduction, max(0, depth - 2))
                 }
