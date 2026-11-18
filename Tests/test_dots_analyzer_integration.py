@@ -2,7 +2,7 @@ from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-SWIFT = (ROOT / "ContentView.swift").read_text()
+SWIFT = "\n".join((ROOT / name).read_text() for name in ("ContentView.swift", "GameModel.swift", "AIEngine.swift"))
 
 
 class NativeAnalyzerTests(unittest.TestCase):
@@ -119,7 +119,7 @@ class NativeAnalyzerTests(unittest.TestCase):
     def test_analyzer_uses_deep_search_with_five_second_cap_from_opening(self):
         self.assertIn("timeLimitOverride: TimeInterval? = nil", SWIFT)
         self.assertIn("min(5000, max(80, timeLimitOverride * 1000))", SWIFT)
-        self.assertIn("timeLimitOverride == nil && level != 1 && movesPlayed < 30", SWIFT)
+        self.assertIn("timeLimitOverride == nil && movesPlayed < 30", SWIFT)
         analyzer = SWIFT[SWIFT.index("private func runSelfMove()"):SWIFT.index("private func startOrResume()")]
         self.assertIn("aiLevel: .extreme", analyzer)
         self.assertIn("searchTimeLimitOverride: 5.0", analyzer)

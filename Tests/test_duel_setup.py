@@ -1,8 +1,8 @@
 from pathlib import Path
 import unittest
 
-SOURCE = Path(__file__).resolve().parents[1] / "ContentView.swift"
-TEXT = SOURCE.read_text()
+ROOT = Path(__file__).resolve().parents[1]
+TEXT = "\n".join((ROOT / name).read_text() for name in ("ContentView.swift", "GameModel.swift"))
 
 
 def section(start, end):

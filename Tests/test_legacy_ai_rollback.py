@@ -1,11 +1,23 @@
 from pathlib import Path
 import unittest
 
-SOURCE = Path(__file__).resolve().parents[1] / "ContentView.swift"
-TEXT = SOURCE.read_text()
+ROOT = Path(__file__).resolve().parents[1]
+TEXT = "\n".join((ROOT / name).read_text() for name in ("ContentView.swift", "GameModel.swift", "AIEngine.swift"))
 
 
 class LegacyAIBaselineTests(unittest.TestCase):
+    def test_search_engine_and_application_views_are_separate_sources(self):
+        engine = (ROOT / "AIEngine.swift").read_text()
+        app = (ROOT / "ContentView.swift").read_text()
+        self.assertIn("struct AISolver: Sendable", engine)
+        self.assertIn("private struct DriveDuelSearch", engine)
+        self.assertIn("enum AIDifficultyLevel", engine)
+        self.assertNotIn("struct AISolver: Sendable", app)
+        self.assertNotIn("private struct DriveDuelSearch", app)
+        game_model = (ROOT / "GameModel.swift").read_text()
+        self.assertIn("final class GameModel: ObservableObject", game_model)
+        self.assertNotIn("final class GameModel: ObservableObject", app)
+
     def test_bot3_uses_drive_search_while_bot1_and_bot2_keep_existing_solvers(self):
         self.assertIn("case driveBot =", TEXT)
         self.assertIn("if playerType == .driveBot && activePlayers.count == 2", TEXT)
@@ -37,17 +49,27 @@ class LegacyAIBaselineTests(unittest.TestCase):
         self.assertIn("hash % UInt32(patterns.count)", book)
         self.assertIn("for unit in seed.utf16", book)
         self.assertIn("startIndex: movesPlayed / 2", TEXT)
-        self.assertIn("level != 1 && movesPlayed < 30", TEXT)
+        self.assertIn("if timeLimitOverride == nil && movesPlayed < 30", TEXT)
+        self.assertNotIn("level != 1 && movesPlayed < 30", TEXT)
         self.assertIn("case 1: difficulty = (80, 1)", TEXT)
-        self.assertIn("case 2: difficulty = (250, 3)", TEXT)
-        self.assertIn("default: difficulty = (5000, 32)", TEXT)
+        self.assertIn("case 2: difficulty = (1200, 8)", TEXT)
+        self.assertIn("default: difficulty = (6000, 32)", TEXT)
         self.assertIn("phase = (400, 120, 40, 8)", TEXT)
-        self.assertIn("phase = (5000, 1200, 60, 32)", TEXT)
+        self.assertIn("phase = (5000, 600, 80, 32)", TEXT)
         self.assertIn("guard [6, 9, 12].contains(size) else { return nil }", book)
         self.assertIn("roll < 0.25", TEXT)
         self.assertIn("roll < 0.70", TEXT)
         self.assertIn("if level == 2 && moves.count > 1", TEXT)
         self.assertIn("Double.random(in: 0..<1) < 0.25", TEXT)
+        self.assertIn("context.nodes & 255 == 0", TEXT)
+        self.assertIn("ply > 0 && isPV && depth >= 3 && beta - alpha == 1 && sidePieces >= 3", TEXT)
+        self.assertIn("ownCapture.best * 18 - enemyCapture.best * 12", TEXT)
+        self.assertIn("(ownCapture.second - enemyCapture.second) * 4", TEXT)
+        self.assertIn("charge(cells[index]) == 3", TEXT)
+        self.assertIn("let extension = tactical && depth <= 3", TEXT)
+        self.assertIn("reduction = searched >= 6 ? 2 : 1", TEXT)
+        self.assertIn("private static func connectedComponentSize", TEXT)
+        self.assertIn("private static func topCaptureScores", TEXT)
 
     def test_multiplayer_bot3_falls_through_to_opening_and_maxn_search(self):
         start = TEXT.index("func calculateBestMove() async")
