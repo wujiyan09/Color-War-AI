@@ -116,6 +116,12 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn(".frame(maxHeight: .infinity, alignment: .center)", SWIFT)
 
 
+    def test_analyzer_side_toggle_and_undo_have_full_button_hit_areas(self):
+        panel = SWIFT[SWIFT.index("private struct AnalyzerToolPanel"):SWIFT.index("private struct AnalyzerPlayView")]
+        self.assertEqual(panel.count(".contentShape(Rectangle())"), 2)
+        self.assertIn("onToggleSide()", panel)
+        self.assertIn("onUndo()", panel)
+
     def test_analyzer_uses_deep_search_with_five_second_cap_from_opening(self):
         self.assertIn("timeLimitOverride: TimeInterval? = nil", SWIFT)
         self.assertIn("min(5000, max(80, timeLimitOverride * 1000))", SWIFT)

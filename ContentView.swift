@@ -2044,8 +2044,9 @@ private struct AnalyzerToolPanel: View {
                 Label("我方：\(selfColor == 0 ? "红" : "蓝") · 切换", systemImage: "arrow.left.arrow.right")
                     .font(compact ? .caption.bold() : .subheadline.bold())
                     .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
+                    .frame(maxWidth: .infinity, minHeight: compact ? 44 : 48)
                     .padding(.vertical, compact ? 7 : 9)
+                    .contentShape(Rectangle())
                     .glassEffect(.regular.interactive(), in: .capsule)
             }
             .buttonStyle(.plain)
@@ -2059,8 +2060,9 @@ private struct AnalyzerToolPanel: View {
                 Label("撤销上一步", systemImage: "arrow.uturn.backward")
                     .font(compact ? .caption.bold() : .subheadline.bold())
                     .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
+                    .frame(maxWidth: .infinity, minHeight: compact ? 44 : 48)
                     .padding(.vertical, compact ? 7 : 9)
+                    .contentShape(Rectangle())
                     .glassEffect(.regular.interactive(), in: .capsule)
             }
             .buttonStyle(.plain)
