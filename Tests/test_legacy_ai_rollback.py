@@ -48,11 +48,13 @@ class Bot3DriveParityTests(unittest.TestCase):
         wrapper = AI[wrapper_start:wrapper_end]
         self.assertIn("guard let owner = value.owner", wrapper)
         self.assertNotIn("value.count > 0 else { continue }", wrapper)
-        duel_start = MODEL.index("let driveBotDuelTransition")
-        duel_end = MODEL.index("let isFirst", duel_start)
-        duel_conversion = MODEL[duel_start:duel_end]
-        self.assertIn("guard let owner = cell.owner", duel_conversion)
-        self.assertNotIn("cell.count > 0 else { return 0 }", duel_conversion)
+        # The move search preserves zero-charge ownership; animation is now the
+        # pre-port GameModel path rather than a snapshot-based transition.
+        resolver_start = MODEL.index("private func resolveMove(")
+        resolver_end = MODEL.index("private func updateEliminationStatus()", resolver_start)
+        resolver = MODEL[resolver_start:resolver_end]
+        self.assertIn("flyingOrbs = transfers", resolver)
+        self.assertNotIn("animateDriveBotTransition", MODEL)
 
     def test_drive_transition_uses_source_charge_reset_and_queue_order(self):
         self.assertIn("DriveBotpickEngine.neighbors(explodingIndex, size)", DRIVE)
@@ -127,11 +129,22 @@ class Bot3DriveParityTests(unittest.TestCase):
         self.assertIn("undoStack", analyzer)
         self.assertIn("selectedBrush", analyzer)
 
-        self.assertIn("DriveBotpickEngine.applyMove", MODEL)
-        self.assertIn("driveBotDuelTransition", MODEL)
-        self.assertIn("playerTypes.contains(.driveBot)", MODEL)
-        self.assertIn("animateDriveBotTransition", MODEL)
-        self.assertIn("transition.cascadeFrames", MODEL)
+        self.assertIn("DriveBotpickEngine.bestMove", AI)
+        resolver_start = MODEL.index("private func resolveMove(")
+        resolver_end = MODEL.index("private func updateEliminationStatus()", resolver_start)
+        resolver = MODEL[resolver_start:resolver_end]
+        for fragment in (
+            "Task.sleep(nanoseconds: 210_000_000)",
+            "Task.sleep(nanoseconds: 85_000_000)",
+            "flyingOrbs = transfers",
+            ".easeIn(duration: 0.07)",
+            ".easeOut(duration: 0.16)",
+            ".spring(response: 0.18, dampingFraction: 0.68)",
+            "Task.sleep(nanoseconds: 165_000_000)",
+            "Task.sleep(nanoseconds: 120_000_000)",
+        ):
+            self.assertIn(fragment, resolver)
+        self.assertNotIn("animateDriveBotTransition", MODEL)
 
     def test_analyzer_budget_override_cannot_exceed_drive_hard_cap(self):
         wrapper = AI[AI.index("private struct DriveDuelSearch"):AI.index("// MARK: - 7.")]

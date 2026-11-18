@@ -937,133 +937,107 @@ final class GameModel: ObservableObject {
 
         let boardBackup = self.board
         let hasEnteredBackup = self.hasEntered
-        let driveBotDuelTransition: DriveBotpickEngine.Transition? = {
-            let active = activePlayerIndices
-            guard isLocalDuelMode, !isOnlineMultiplayer, active.count == 2,
-                  playerTypes.contains(.driveBot),
-                  let side = active.firstIndex(of: player) else { return nil }
-            let cells = boardBackup.flatMap { row in
-                row.map { cell -> UInt8 in
-                    guard let owner = cell.owner,
-                          let localSide = active.firstIndex(of: owner) else { return 0 }
-                    return UInt8((localSide == 1 ? 0x80 : 0) | (cell.count & 0x0f))
-                }
-            }
-            let firstMoves = (localDuelMoveCount + 1) / 2
-            let secondMoves = localDuelMoveCount / 2
-            return DriveBotpickEngine.applyMove(
-                cells: cells, size: boardSize, side: side,
-                movesRed: firstMoves, movesBlue: secondMoves, move: row * boardSize + column
-            )
-        }()
         let isFirst = !hasEntered[player]
         hasEntered[player] = true
 
         do {
-            if let transition = driveBotDuelTransition {
-                try await animateDriveBotTransition(
-                    transition, activePlayers: activePlayerIndices,
-                    moveIndex: row * boardSize + column
-                )
-            } else {
-                let addCount = isFirst ? 3 : 1
-                withAnimation(.spring(response: 0.22, dampingFraction: 0.62)) {
-                    if row < board.count && column < board[row].count {
-                        let oldOwner = board[row][column].owner
-                        if oldOwner != player {
-                            adjustOrbCount(for: oldOwner, delta: -board[row][column].count)
-                            adjustOrbCount(for: player, delta: board[row][column].count + addCount)
-                        } else {
-                            adjustOrbCount(for: player, delta: addCount)
-                        }
-
-                        board[row][column].owner = player
-                        board[row][column].count += addCount
-                        emphasizedCells = [row * boardSize + column]
+            let addCount = isFirst ? 3 : 1
+            withAnimation(.spring(response: 0.22, dampingFraction: 0.62)) {
+                if row < board.count && column < board[row].count {
+                    let oldOwner = board[row][column].owner
+                    if oldOwner != player {
+                        adjustOrbCount(for: oldOwner, delta: -board[row][column].count)
+                        adjustOrbCount(for: player, delta: board[row][column].count + addCount)
+                    } else {
+                        adjustOrbCount(for: player, delta: addCount)
                     }
+
+                    board[row][column].owner = player
+                    board[row][column].count += addCount
+                    emphasizedCells = [row * boardSize + column]
                 }
-
-                try await Task.sleep(nanoseconds: 210_000_000)
-
-                var wave: [(Int, Int)] = (row < board.count && column < board[row].count && board[row][column].count >= 4) ? [(row, column)] : []
-                let dirs = [(-1,0), (1,0), (0,-1), (0,1)]
-
-                while !wave.isEmpty {
-                    try Task.checkCancellation()
-                    let exploding = wave
-                    emphasizedCells = Set(exploding.map { $0.0 * boardSize + $0.1 })
-                    try await Task.sleep(nanoseconds: 85_000_000)
-
-                    var transfers: [FlyingOrb] = []
-                    for (r, c) in exploding {
-                        for (dr, dc) in dirs {
-                            let nr = r + dr, nc = c + dc
-                            if (0..<boardSize).contains(nr) && (0..<boardSize).contains(nc) {
-                                transfers.append(FlyingOrb(
-                                    player: player,
-                                    fromRow: r, fromColumn: c,
-                                    toRow: nr, toColumn: nc
-                                ))
-                            }
-                        }
-                    }
-
-                    withAnimation(.easeIn(duration: 0.07)) {
-                        for (r, c) in exploding {
-                            if r < board.count && c < board[r].count {
-                                board[r][c].count -= 4
-                                let newOwner = board[r][c].count == 0 ? nil : player
-                                board[r][c].owner = newOwner
-                                adjustOrbCount(for: player, delta: -4)
-                            }
-                        }
-                        flyingOrbs = transfers
-                    }
-                    try await Task.sleep(nanoseconds: 30_000_000)
-
-                    withAnimation(.easeOut(duration: 0.16)) {
-                        for i in flyingOrbs.indices {
-                            flyingOrbs[i].arrived = true
-                        }
-                    }
-                    try await Task.sleep(nanoseconds: 165_000_000)
-
-                    var changed = Set<Int>()
-                    withAnimation(.spring(response: 0.18, dampingFraction: 0.68)) {
-                        for orb in flyingOrbs {
-                            if orb.toRow < board.count && orb.toColumn < board[orb.toRow].count {
-                                let oldOwner = board[orb.toRow][orb.toColumn].owner
-                                let oldCount = board[orb.toRow][orb.toColumn].count
-
-                                if oldOwner != player {
-                                    adjustOrbCount(for: oldOwner, delta: -oldCount)
-                                    adjustOrbCount(for: player, delta: oldCount + 1)
-                                } else {
-                                    adjustOrbCount(for: player, delta: 1)
-                                }
-
-                                board[orb.toRow][orb.toColumn].owner = player
-                                board[orb.toRow][orb.toColumn].count += 1
-                                changed.insert(orb.toRow * boardSize + orb.toColumn)
-                            }
-                        }
-                        flyingOrbs = []
-                        emphasizedCells = changed
-                    }
-                    try await Task.sleep(nanoseconds: 120_000_000)
-
-                    wave = changed.compactMap {
-                        let r = $0 / boardSize
-                        let c = $0 % boardSize
-                        if r < board.count && c < board[r].count {
-                            return board[r][c].count >= 4 ? (r, c) : nil
-                        }
-                        return nil
-                    }
-                }
-
-                emphasizedCells = []
             }
+
+            try await Task.sleep(nanoseconds: 210_000_000)
+
+            var wave: [(Int, Int)] = (row < board.count && column < board[row].count && board[row][column].count >= 4) ? [(row, column)] : []
+            let dirs = [(-1,0), (1,0), (0,-1), (0,1)]
+
+            while !wave.isEmpty {
+                try Task.checkCancellation()
+                let exploding = wave
+                emphasizedCells = Set(exploding.map { $0.0 * boardSize + $0.1 })
+                try await Task.sleep(nanoseconds: 85_000_000)
+
+                var transfers: [FlyingOrb] = []
+                for (r, c) in exploding {
+                    for (dr, dc) in dirs {
+                        let nr = r + dr, nc = c + dc
+                        if (0..<boardSize).contains(nr) && (0..<boardSize).contains(nc) {
+                            transfers.append(FlyingOrb(
+                                player: player,
+                                fromRow: r, fromColumn: c,
+                                toRow: nr, toColumn: nc
+                            ))
+                        }
+                    }
+                }
+
+                withAnimation(.easeIn(duration: 0.07)) {
+                    for (r, c) in exploding {
+                        if r < board.count && c < board[r].count {
+                            board[r][c].count -= 4
+                            let newOwner = board[r][c].count == 0 ? nil : player
+                            board[r][c].owner = newOwner
+                            adjustOrbCount(for: player, delta: -4)
+                        }
+                    }
+                    flyingOrbs = transfers
+                }
+                try await Task.sleep(nanoseconds: 30_000_000)
+
+                withAnimation(.easeOut(duration: 0.16)) {
+                    for i in flyingOrbs.indices {
+                        flyingOrbs[i].arrived = true
+                    }
+                }
+                try await Task.sleep(nanoseconds: 165_000_000)
+
+                var changed = Set<Int>()
+                withAnimation(.spring(response: 0.18, dampingFraction: 0.68)) {
+                    for orb in flyingOrbs {
+                        if orb.toRow < board.count && orb.toColumn < board[orb.toRow].count {
+                            let oldOwner = board[orb.toRow][orb.toColumn].owner
+                            let oldCount = board[orb.toRow][orb.toColumn].count
+
+                            if oldOwner != player {
+                                adjustOrbCount(for: oldOwner, delta: -oldCount)
+                                adjustOrbCount(for: player, delta: oldCount + 1)
+                            } else {
+                                adjustOrbCount(for: player, delta: 1)
+                            }
+
+                            board[orb.toRow][orb.toColumn].owner = player
+                            board[orb.toRow][orb.toColumn].count += 1
+                            changed.insert(orb.toRow * boardSize + orb.toColumn)
+                        }
+                    }
+                    flyingOrbs = []
+                    emphasizedCells = changed
+                }
+                try await Task.sleep(nanoseconds: 120_000_000)
+
+                wave = changed.compactMap {
+                    let r = $0 / boardSize
+                    let c = $0 % boardSize
+                    if r < board.count && c < board[r].count {
+                        return board[r][c].count >= 4 ? (r, c) : nil
+                    }
+                    return nil
+                }
+            }
+
+            emphasizedCells = []
             updateEliminationStatus()
             recalculateOrbCounts()
 
@@ -1086,50 +1060,6 @@ final class GameModel: ObservableObject {
             flyingOrbs = []
             recalculateOrbCounts()
             isProcessingCascade = false
-        }
-    }
-
-    private func animateDriveBotTransition(
-        _ transition: DriveBotpickEngine.Transition,
-        activePlayers: [Int],
-        moveIndex: Int
-    ) async throws {
-        func makeBoard(_ codes: [UInt8]) -> [[Cell]] {
-            (0..<boardSize).map { row in
-                (0..<boardSize).map { column in
-                    let code = codes[row * boardSize + column]
-                    let side = DriveBotpickEngine.decodedOwner(code)
-                    let owner = side.flatMap { activePlayers.indices.contains($0) ? activePlayers[$0] : nil }
-                    return Cell(owner: owner, count: DriveBotpickEngine.decodedCharge(code))
-                }
-            }
-        }
-
-        withAnimation(.spring(response: 0.22, dampingFraction: 0.62)) {
-            board = makeBoard(transition.placementCells)
-            emphasizedCells = [moveIndex]
-            flyingOrbs = []
-            recalculateOrbCounts()
-        }
-        try await Task.sleep(nanoseconds: 210_000_000)
-
-        for wave in transition.cascadeFrames {
-            try Task.checkCancellation()
-            emphasizedCells = Set(wave.exploding)
-            try await Task.sleep(nanoseconds: 85_000_000)
-            withAnimation(.spring(response: 0.18, dampingFraction: 0.68)) {
-                board = makeBoard(wave.cells)
-                flyingOrbs = []
-                recalculateOrbCounts()
-            }
-            try await Task.sleep(nanoseconds: 80_000_000)
-        }
-        // Snap to Et's exact final state, including elimination during a wave.
-        withAnimation(.easeOut(duration: 0.08)) {
-            board = makeBoard(transition.cells)
-            emphasizedCells = []
-            flyingOrbs = []
-            recalculateOrbCounts()
         }
     }
 
