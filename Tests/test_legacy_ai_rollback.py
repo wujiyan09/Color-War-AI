@@ -99,22 +99,15 @@ class Bot3DriveParityTests(unittest.TestCase):
             "guard [6, 9, 12].contains(size)",
             "2_166_136_261",
             "16_777_619",
-            "movesPlayed < 30",
-            "ownMoves < 12",
-            "timeMs: 400, softTimeMs: 120",
-            "minTimeMs: 40, maxDepth: 8",
-            "timeMs: 5000, softTimeMs: 600",
-            "minTimeMs: 80, maxDepth: 32",
-            "private static func localFallback",
-            "score += (Double.random(in: 0..<1) - 0.5) * 0.01",
             "movesRed: 20, movesBlue: 20",
+            "DotsPickEngine.pickMove(board: engineBoard",
+            "difficulty: .hard",
             "directBotpickSearch",
         ):
             self.assertIn(fragment, wrapper)
         self.assertNotIn("if level <= 1", wrapper)
         self.assertNotIn("if level == 2", wrapper)
-        self.assertIn("let actualMovesRed = firstSide == 0 ? firstSideMoves : secondSideMoves", wrapper)
-        self.assertIn("let actualMovesBlue = firstSide == 1 ? firstSideMoves : secondSideMoves", wrapper)
+        self.assertNotIn("if movesPlayed < 30, ownMoves < 12", wrapper)
 
     def test_analyzer_and_duel_share_search_and_move_transition_with_five_second_cap(self):
         analyzer = APP[APP.index("private struct AnalyzerPlayView"):APP.index("struct StartMenuView")]

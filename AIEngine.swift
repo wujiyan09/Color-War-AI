@@ -266,8 +266,8 @@ private struct DriveDuelSearch {
     static func timeBudget(movesPlayed: Int = 0,
                            timeLimitOverride: TimeInterval? = nil,
                            directBotpickSearch: Bool = false) -> TimeInterval {
-        (directBotpickSearch ? analyzerParameters(timeLimitOverride: timeLimitOverride)
-            : localParameters(movesPlayed: movesPlayed)).timeMs / 1000
+        // Bot 3 uses ENGINE.pickMove 'hard' (timeMs 6000); the analyzer keeps botpick.
+        directBotpickSearch ? analyzerParameters(timeLimitOverride: timeLimitOverride).timeMs / 1000 : 6.0
     }
 
     private static func neighbors(_ index: Int, _ size: Int) -> [Int] {
@@ -406,28 +406,20 @@ private struct DriveDuelSearch {
             return (selected / size, selected % size)
         }
 
-        // Local two-player policy (`play.local-DNTan253.js`): every AI difficulty
-        // checks its deterministic local opening first, then uses the same botpick.
-        let ownMoves = side == 0 ? actualMovesRed : actualMovesBlue
-        if movesPlayed < 30, ownMoves < 12,
-           let opening = DriveOpeningBook.nextOwnedMove(cells: cells, size: size,
-                                                        side: side, startIndex: ownMoves,
-                                                        seed: openingSeed) {
-            return (opening / size, opening % size)
+        // Bot 3 = ENGINE.pickMove (`zn`) from My Drive/temp/dots/engine.standalone.js,
+        // called exactly like the engine API: pickMove(board, side, { difficulty: 'hard' }).
+        // No opening book, no phase budgets, no fallback policy.
+        let engineBoard = cells.map { code -> Int in
+            guard code != 0 else { return 0 }
+            let charge = Int(code & 0x0f)
+            return owner(code) == 0 ? charge : -charge
         }
-
-        let profile = localParameters(movesPlayed: movesPlayed)
-        let result = DriveBotpickEngine.bestMove(
-            cells: cells, size: size, side: side,
-            movesRed: actualMovesRed, movesBlue: actualMovesBlue,
-            limits: DriveBotpickEngine.Limits(timeMs: profile.timeMs,
-                                              softTimeMs: profile.softTimeMs,
-                                              minTimeMs: profile.minTimeMs,
-                                              maxDepth: profile.maxDepth)
-        )
-        let selected = result?.move ?? localFallback(cells: cells, size: size, side: side,
-                                                      movesRed: actualMovesRed, movesBlue: actualMovesBlue) ?? first
-        return (selected / size, selected % size)
+        guard let pick = DotsPickEngine.pickMove(board: engineBoard, size: size,
+                                                 side: side == 0 ? .red : .blue,
+                                                 difficulty: .hard) else {
+            return (first / size, first % size)
+        }
+        return (pick.move.y, pick.move.x)
     }
 }
 
