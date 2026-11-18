@@ -2165,42 +2165,43 @@ private struct AnalyzerPlayView: View {
         Haptics.shared.lightImpact()
         pushUndoSnapshot()
         highlightedCell = nil
-        applyMove(row: row, column: column, owner: 1 - selfColor)
+        guard applyMove(row: row, column: column, owner: 1 - selfColor) else {
+            undoStack.removeLast()
+            return
+        }
         waitingForOpponent = false
         moveCount += 1
         runSelfMove()
     }
 
-    private func applyMove(row: Int, column: Int, owner: Int) {
-        if board[row][column].owner == owner {
-            board[row][column].count += 1
-        } else {
-            board[row][column] = Cell(owner: owner, count: board[row][column].count + 1)
-        }
-        var iterations = 0
-        while iterations < boardSize * boardSize * 8 {
-            iterations += 1
-            let exploding = (0..<boardSize).flatMap { r in
-                (0..<boardSize).compactMap { c -> (Int, Int, Int)? in
-                    let cell = board[r][c]
-                    guard cell.count >= 4, let source = cell.owner else { return nil }
-                    return (r, c, source)
-                }
-            }
-            guard !exploding.isEmpty else { break }
-            for (r, c, _) in exploding {
-                board[r][c].count -= 4
-                if board[r][c].count == 0 { board[r][c].owner = nil }
-            }
-            for (r, c, source) in exploding {
-                for (dr, dc) in [(0, 1), (0, -1), (1, 0), (-1, 0)] {
-                    let nr = r + dr, nc = c + dc
-                    guard (0..<boardSize).contains(nr), (0..<boardSize).contains(nc) else { continue }
-                    board[nr][nc].owner = source
-                    board[nr][nc].count += 1
-                }
+    @discardableResult
+    private func applyMove(row: Int, column: Int, owner: Int) -> Bool {
+        guard (0..<boardSize).contains(row), (0..<boardSize).contains(column),
+              owner == 0 || owner == 1 else { return false }
+        let cells = board.flatMap { row in
+            row.map { cell -> UInt8 in
+                guard let side = cell.owner else { return 0 }
+                return UInt8((side == 1 ? 0x80 : 0) | (cell.count & 0x0f))
             }
         }
+        // Analyzer starts with selfColor, then alternates with the opponent. Keep the
+        // individual color move counts required by Drive's terminal-state logic.
+        let firstMoves = (moveCount + 1) / 2
+        let secondMoves = moveCount / 2
+        let redMoves = selfColor == 0 ? firstMoves : secondMoves
+        let blueMoves = selfColor == 1 ? firstMoves : secondMoves
+        guard let transition = DriveBotpickEngine.applyMove(
+            cells: cells, size: boardSize, side: owner,
+            movesRed: redMoves, movesBlue: blueMoves, move: row * boardSize + column
+        ) else { return false }
+        board = (0..<boardSize).map { r in
+            (0..<boardSize).map { c in
+                let code = transition.cells[r * boardSize + c]
+                return Cell(owner: DriveBotpickEngine.decodedOwner(code),
+                            count: DriveBotpickEngine.decodedCharge(code))
+            }
+        }
+        return true
     }
 
     private func runSelfMove() {
@@ -2231,7 +2232,12 @@ private struct AnalyzerPlayView: View {
                 return
             }
             pushUndoSnapshot()
-            applyMove(row: row, column: column, owner: selfColor)
+            guard applyMove(row: row, column: column, owner: selfColor) else {
+                undoStack.removeLast()
+                isThinking = false
+                waitingForOpponent = false
+                return
+            }
             highlightedCell = row * boardSize + column
             moveCount += 1
             waitingForOpponent = true

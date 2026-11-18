@@ -89,17 +89,19 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn("pendingAnalyzerArchive = archive", SWIFT)
         self.assertIn("game.shouldNavigateToGame = true", SWIFT)
 
-    def test_duel_bot3_uses_the_pre_drive_search_path(self):
+    def test_duel_bot3_and_analyzer_use_the_shared_drive_core(self):
         engine = (ROOT / "AIEngine.swift").read_text()
+        drive = (ROOT / "DriveBotpickEngine.swift").read_text()
         self.assertIn("if playerType == .driveBot && activePlayers.count == 2", engine)
         self.assertIn("DriveDuelSearch.bestMove", engine)
-        self.assertIn("let attempt = search(cells, side, enteredMask, depth, alpha, beta", engine)
-        self.assertIn("if level == 1", engine)
-        self.assertIn("if level == 2 && moves.count > 1", engine)
-        self.assertNotIn("DriveBotpickEngine", engine)
-        self.assertFalse((ROOT / "DriveBotpickEngine.swift").exists())
-        self.assertIn("case .deep: return \"深度 4-6 层 | 置换表+静止搜索\"", engine)
-        self.assertIn("case .extreme: return \"深度 6-8 层 | 全局链图+极限推理\"", engine)
+        self.assertIn("DriveBotpickEngine.bestMove", engine)
+        self.assertNotIn("if level >= 3", engine)
+        self.assertIn("static func applyMove(cells inputCells", drive)
+        self.assertIn("static func bestMove(cells inputCells", drive)
+        analyzer = SWIFT[SWIFT.index("private struct AnalyzerPlayView"):SWIFT.index("struct StartMenuView")]
+        self.assertIn("playerType: .driveBot", analyzer)
+        self.assertIn("DriveBotpickEngine.applyMove", analyzer)
+        self.assertIn("pushUndoSnapshot()", analyzer)
 
     def test_portrait_hides_both_side_player_indicators(self):
         board = SWIFT[SWIFT.index("struct BoardView"):SWIFT.index("private struct AnalyzerToolPanel")]
@@ -201,7 +203,8 @@ class NativeAnalyzerTests(unittest.TestCase):
     def test_analyzer_uses_deep_search_with_five_second_cap_from_opening(self):
         self.assertIn("timeLimitOverride: TimeInterval? = nil", SWIFT)
         self.assertIn("min(5000, max(80, timeLimitOverride * 1000))", SWIFT)
-        self.assertIn("timeLimitOverride == nil && movesPlayed < 30", SWIFT)
+        self.assertIn("if movesPlayed < 30, ownMoves < 12", SWIFT)
+        self.assertIn("DriveOpeningBook.nextOwnedMove", SWIFT)
         analyzer = SWIFT[SWIFT.index("private func runSelfMove()"):SWIFT.index("private func startOrResume()")]
         self.assertIn("aiLevel: .extreme", analyzer)
         self.assertIn("searchTimeLimitOverride: 5.0", analyzer)

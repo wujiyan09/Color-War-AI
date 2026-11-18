@@ -2,114 +2,143 @@ from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-TEXT = "\n".join((ROOT / name).read_text() for name in ("ContentView.swift", "GameModel.swift", "AIEngine.swift"))
+AI = (ROOT / "AIEngine.swift").read_text()
+DRIVE = (ROOT / "DriveBotpickEngine.swift").read_text()
+APP = (ROOT / "ContentView.swift").read_text()
+MODEL = (ROOT / "GameModel.swift").read_text()
 
 
-class LegacyAIBaselineTests(unittest.TestCase):
-    def test_search_engine_and_application_views_are_separate_sources(self):
-        engine = (ROOT / "AIEngine.swift").read_text()
-        app = (ROOT / "ContentView.swift").read_text()
-        self.assertIn("struct AISolver: Sendable", engine)
-        self.assertIn("private struct DriveDuelSearch", engine)
-        self.assertIn("enum AIDifficultyLevel", engine)
-        self.assertNotIn("struct AISolver: Sendable", app)
-        self.assertNotIn("private struct DriveDuelSearch", app)
-        game_model = (ROOT / "GameModel.swift").read_text()
-        self.assertIn("final class GameModel: ObservableObject", game_model)
-        self.assertNotIn("final class GameModel: ObservableObject", app)
+class Bot3DriveParityTests(unittest.TestCase):
+    def test_drive_source_functions_have_one_shared_swift_port(self):
+        self.assertIn("Drive worker's `botpick` engine (`Rt`/`ke`/`Et`)", DRIVE)
+        for source_fn in ("rt()", "Tt()", "ke()"):
+            self.assertIn(f"worker.pretty.js `{source_fn}`", DRIVE)
+        self.assertIn("static func bestMove(cells inputCells", DRIVE)
+        self.assertIn("static func applyMove(cells inputCells", DRIVE)
+        self.assertIn("default-workspace/dots/online_code.pretty.js", AI)
+        self.assertIn("Clock.pretty.js", AI)
 
-    def test_bot3_restores_pre_drive_two_player_search_without_changing_other_bots(self):
-        self.assertIn("case driveBot =", TEXT)
-        self.assertIn("if playerType == .driveBot && activePlayers.count == 2", TEXT)
-        self.assertIn("DriveDuelSearch.bestMove", TEXT)
-        self.assertNotIn("DriveBotpickEngine", TEXT)
-        self.assertIn("Bot 1", TEXT)
-        self.assertIn("Bot 2", TEXT)
-        self.assertIn("Bot 3", TEXT)
+    def test_drive_evaluator_weights_and_terminal_counts_match_source(self):
+        for expression in (
+            "(pieces[side] - pieces[opponent]) * 35",
+            "(totalCharge[side] - totalCharge[opponent]) * 4",
+            "(critical[side] - critical[opponent]) * 8",
+            "(exposedCritical[side] - exposedCritical[opponent]) * 60",
+            "(exposedCharge[side] - exposedCharge[opponent]) * 12",
+        ):
+            self.assertIn(expression, DRIVE)
+        self.assertIn("movesRed >= 1 && movesBlue >= 1", DRIVE)
+        self.assertIn("movesRed += 1", DRIVE)
+        self.assertIn("movesBlue += 1", DRIVE)
+        self.assertIn("if let winner = position.winner", DRIVE)
 
-    def test_all_difficulties_and_legacy_ai_variants_remain_available(self):
-        for level in ("fast", "balanced", "deep", "extreme"):
-            self.assertIn(f"case {level} =", TEXT)
-        self.assertIn("case mathNightmare", TEXT)
-        self.assertIn("case enhancedNightmare", TEXT)
-        start = TEXT.index("func calculateBestMove() async")
-        end = TEXT.index("private func selectOptimalOpeningMove", start)
-        section = TEXT[start:end]
-        self.assertIn("if playerType == .driveBot && activePlayers.count == 2", section)
-        self.assertIn("if isMyFirstTurn {", section)
-        self.assertIn("return selectOptimalOpeningMove(validMoves: validMoves)", section)
-        self.assertIn("alivePlayerCount > 2", section)
-        self.assertLess(section.index("if playerType == .driveBot"), section.index("if isMyFirstTurn {"))
-        self.assertIn("playerType == .enhancedNightmare", section)
+    def test_bitboard_preserves_blue_owner_bit_at_zero_charge(self):
+        encode_start = DRIVE.index("private static func encode(_ side: Int, _ amount: Int)")
+        encode_end = DRIVE.index("\n    }", encode_start) + len("\n    }")
+        encode = DRIVE[encode_start:encode_end]
+        self.assertIn("(side == 1 ? 0x80 : 0) | (amount & 0x0f)", encode)
+        self.assertNotIn("guard amount > 0", encode)
+        # Drive packs blue/zero-charge as 0x80, while red/zero aliases empty.
+        self.assertEqual((0x80 | (0 & 0x0f)), 0x80)
+        self.assertEqual((0x00 | (0 & 0x0f)), 0x00)
+        analyzer = APP[APP.index("private struct AnalyzerPlayView"):APP.index("struct StartMenuView")]
+        self.assertIn("guard let side = cell.owner else { return 0 }", analyzer)
+        wrapper_start = AI.index("static func bestMove(board: AISolver.Board")
+        wrapper_end = AI.index("// MARK: - 7.", wrapper_start)
+        wrapper = AI[wrapper_start:wrapper_end]
+        self.assertIn("guard let owner = value.owner", wrapper)
+        self.assertNotIn("value.count > 0 else { continue }", wrapper)
+        duel_start = MODEL.index("let driveBotDuelTransition")
+        duel_end = MODEL.index("let isFirst", duel_start)
+        duel_conversion = MODEL[duel_start:duel_end]
+        self.assertIn("guard let owner = cell.owner", duel_conversion)
+        self.assertNotIn("cell.count > 0 else { return 0 }", duel_conversion)
 
+    def test_drive_transition_uses_source_charge_reset_and_queue_order(self):
+        self.assertIn("DriveBotpickEngine.neighbors(explodingIndex, size)", DRIVE)
+        self.assertIn("let wave = cells.indices.filter", DRIVE)
+        self.assertIn("setCell(explodingIndex, 0)", DRIVE)
+        self.assertIn("DriveBotpickEngine.charge(cells[adjacent]) + 1", DRIVE)
+        self.assertIn("if redCount == 0 || blueCount == 0", DRIVE)
+        self.assertIn("captureCascade", DRIVE)
+        self.assertIn("cascadeFrames: trace.waves", DRIVE)
 
-    def test_drive_wrapper_openings_difficulty_profiles_and_easy_randomness(self):
-        book = TEXT[TEXT.index("private enum DriveOpeningBook"):TEXT.index("private struct DriveDuelSearch")]
-        self.assertIn("Port of the 13 deterministic opening sequences", book)
-        self.assertIn("return [", book)
-        self.assertIn("hash % UInt32(patterns.count)", book)
-        self.assertIn("for unit in seed.utf16", book)
-        self.assertIn("startIndex: movesPlayed / 2", TEXT)
-        self.assertIn("if timeLimitOverride == nil && movesPlayed < 30", TEXT)
-        self.assertNotIn("level != 1 && movesPlayed < 30", TEXT)
-        self.assertIn("case 1: difficulty = (80, 1)", TEXT)
-        self.assertIn("case 2: difficulty = (1200, 8)", TEXT)
-        self.assertIn("default: difficulty = (6000, 32)", TEXT)
-        self.assertIn("phase = (400, 120, 40, 8)", TEXT)
-        self.assertIn("phase = (5000, 600, 80, 32)", TEXT)
-        self.assertIn("guard [6, 9, 12].contains(size) else { return nil }", book)
-        self.assertIn("roll < 0.25", TEXT)
-        self.assertIn("roll < 0.70", TEXT)
-        self.assertIn("if level == 2 && moves.count > 1", TEXT)
-        self.assertIn("Double.random(in: 0..<1) < 0.25", TEXT)
-        self.assertIn("context.nodes & 255 == 0", TEXT)
-        self.assertIn("ply > 0 && isPV && depth >= 3 && beta - alpha == 1 && sidePieces >= 3", TEXT)
-        self.assertIn("ownCapture.best * 18 - enemyCapture.best * 12", TEXT)
-        self.assertIn("(ownCapture.second - enemyCapture.second) * 4", TEXT)
-        self.assertIn("charge(cells[index]) == 3", TEXT)
-        self.assertIn("let extensionDepth = tactical && depth <= 3", TEXT)
-        self.assertIn("reduction = searched >= 6 ? 2 : 1", TEXT)
-        self.assertIn("private static func connectedComponentSize", TEXT)
-        self.assertIn("private static func topCaptureScores", TEXT)
+    def test_search_matches_drive_pruning_order_and_budget_stopping(self):
+        for fragment in (
+            "position.side = 1 - oldSide",  # Drive null-move pruning
+            "depth >= 6 ? 3 : 2",
+            "alpha: -beta, beta: -alpha",
+            "context.nodes & 4095 == 0",
+            "stable insertion sort",
+            "limits.maxDepth > 0",
+            "context.table[hash] = Entry",
+            "if quiet { recordQuietCutoff",
+        ):
+            self.assertIn(fragment, DRIVE)
+        self.assertNotIn("PVS", DRIVE)
+        self.assertNotIn("LMR", DRIVE)
+        self.assertNotIn("tactical extension", DRIVE)
 
-    def test_multiplayer_bot3_falls_through_to_opening_and_maxn_search(self):
-        start = TEXT.index("func calculateBestMove() async")
-        end = TEXT.index("private func selectOptimalOpeningMove", start)
-        section = TEXT[start:end]
-        drive_route = section.index("if playerType == .driveBot && activePlayers.count == 2")
-        general_moves = section.index("var validMoves = getPlayableCells", drive_route)
-        opening = section.index("if isMyFirstTurn && alivePlayerCount > 2", general_moves)
-        search = section.index("return calculateAspirationNightmareMove(validMoves: validMoves)", opening)
-        self.assertLess(drive_route, general_moves)
-        self.assertLess(general_moves, opening)
-        self.assertLess(opening, search)
-        self.assertIn("isTwoPlayer = (aliveCount == 2)", TEXT)
-        self.assertIn("maxNMultiPlayerSearch(", TEXT)
+    def test_all_two_player_bot3_levels_route_through_drive_wrapper_and_core(self):
+        route_start = AI.index("func calculateBestMove() async")
+        route_end = AI.index("var validMoves = getPlayableCells", route_start)
+        route = AI[route_start:route_end]
+        self.assertIn("playerType == .driveBot && activePlayers.count == 2", route)
+        self.assertIn("DriveDuelSearch.bestMove", route)
+        wrapper = AI[AI.index("private struct DriveDuelSearch"):AI.index("// MARK: - 7.")]
+        self.assertIn("DriveBotpickEngine.bestMove", wrapper)
+        self.assertNotIn("if level >= 3", wrapper)
+        self.assertNotIn("private static func evaluate(_ cells", wrapper)
+        self.assertIn("maxNMultiPlayerSearch(", AI)
 
-    def test_bot3_is_duel_only_not_party_or_online_add_select_ui(self):
-        selectable = TEXT[TEXT.index("func validSelectableTypes("):TEXT.index("private func updateCachedPlayableCells", TEXT.index("func validSelectableTypes("))]
-        self.assertIn("if isOnline { return [] }", selectable)
-        self.assertIn("return [.human, .mathNightmare, .enhancedNightmare, .disabled]", selectable)
-        self.assertNotIn("return [.human, .mathNightmare, .enhancedNightmare, .driveBot", selectable)
+    def test_drive_wrapper_has_opening_modes_move_counts_and_budgets(self):
+        wrapper = AI[AI.index("private enum DriveOpeningBook"):AI.index("// MARK: - 7.")]
+        for fragment in (
+            "guard [6, 9, 12].contains(size)",
+            "2_166_136_261",
+            "16_777_619",
+            "movesPlayed < 30",
+            "ownMoves < 12",
+            "if level <= 1",
+            "if level == 2",
+            "timeMs: 400, softTimeMs: 120",
+            "minTimeMs: 40, maxDepth: 8",
+            "timeMs: 250, softTimeMs: nil",
+            "maxDepth: 3",
+            "timeMs: 5000, softTimeMs: 1200",
+            "minTimeMs: 60, maxDepth: 32",
+            "Double.random(in: 0..<1) < 0.25",
+            "let runnerUp = legalMoves[1]",
+        ):
+            self.assertIn(fragment, wrapper)
+        self.assertIn("let movesRed = firstSide == 0 ? firstSideMoves : secondSideMoves", wrapper)
+        self.assertIn("let movesBlue = firstSide == 1 ? firstSideMoves : secondSideMoves", wrapper)
 
-        remote_add = TEXT[TEXT.index("func addAIToRemoteLobby(type:"):TEXT.index("func updatePlayerType(", TEXT.index("func addAIToRemoteLobby(type:"))]
-        self.assertIn("type != .driveBot", remote_add)
-        party_menu = TEXT[TEXT.index('Menu {', TEXT.index('if isHost {', TEXT.index('struct RemoteWebSocketSetupView'))):]
-        self.assertIn("ForEach([PlayerControlType.mathNightmare, .enhancedNightmare])", party_menu)
-        self.assertNotIn("ForEach([PlayerControlType.mathNightmare, .enhancedNightmare, .driveBot])", party_menu)
+    def test_analyzer_and_duel_share_search_and_move_transition_with_five_second_cap(self):
+        analyzer = APP[APP.index("private struct AnalyzerPlayView"):APP.index("struct StartMenuView")]
+        self.assertIn("playerType: .driveBot", analyzer)
+        self.assertIn("aiLevel: .extreme", analyzer)
+        self.assertIn("activePlayers: [0, 1]", analyzer)
+        self.assertIn("searchTimeLimitOverride: 5.0", analyzer)
+        self.assertIn("DriveBotpickEngine.applyMove", analyzer)
+        self.assertIn("selfColor", analyzer)
+        self.assertIn("moveCount", analyzer)
+        self.assertIn("pushUndoSnapshot()", analyzer)
+        self.assertIn("undoStack", analyzer)
+        self.assertIn("selectedBrush", analyzer)
 
-    def test_multiplayer_opening_avoids_corners_when_possible(self):
-        start = TEXT.index("private func isCornerOpeningMove")
-        end = TEXT.index("private func selectOptimalOpeningMove", start)
-        predicate = TEXT[start:end]
-        self.assertIn("move.0 == 0 || move.0 == boardSize - 1", predicate)
-        self.assertIn("move.1 == 0 || move.1 == boardSize - 1", predicate)
-        self.assertIn("nonCornerMoves.isEmpty ? validMoves : nonCornerMoves", TEXT)
+        self.assertIn("DriveBotpickEngine.applyMove", MODEL)
+        self.assertIn("driveBotDuelTransition", MODEL)
+        self.assertIn("playerTypes.contains(.driveBot)", MODEL)
+        self.assertIn("animateDriveBotTransition", MODEL)
+        self.assertIn("transition.cascadeFrames", MODEL)
 
-    def test_independent_ios_search_time_safety_is_retained(self):
-        self.assertIn("var searchTimeBudget: TimeInterval", TEXT)
-        self.assertIn("ProcessInfo.processInfo.systemUptime >= searchDeadline", TEXT)
-        self.assertIn("if searchStopped { break }\n            bestMove = result.move", TEXT)
+    def test_analyzer_budget_override_cannot_exceed_drive_hard_cap(self):
+        wrapper = AI[AI.index("private struct DriveDuelSearch"):AI.index("// MARK: - 7.")]
+        self.assertIn("min(5000, max(80, timeLimitOverride * 1000))", wrapper)
+        self.assertIn("searchTimeLimitOverride: 5.0", APP)
+        self.assertIn("let hardDeadline", DRIVE)
+        self.assertIn("limits.timeMs", DRIVE)
 
 
 if __name__ == "__main__":

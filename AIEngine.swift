@@ -234,470 +234,118 @@ private enum DriveOpeningBook {
 }
 
 private struct DriveDuelSearch {
-    private static let mask64 = UInt64.max
-    private static func splitmix64(_ value: UInt64) -> UInt64 {
-        var z = value &+ 0x9e3779b97f4a7c15
-        z = (z ^ (z >> 30)) &* 0xbf58476d1ce4e5b9
-        z = (z ^ (z >> 27)) &* 0x94d049bb133111eb
-        return z ^ (z >> 31)
-    }
-    private static let zobrist: [UInt64] = {
-        var seed: UInt64 = 0xc0ffee
-        return (0..<(12 * 12 * 2 * 8)).map { i in
-            seed = splitmix64(seed &+ UInt64(i))
-            return seed
-        }
-    }()
-    private static let sideKey = splitmix64(zobrist.last! &+ 0xabcdef)
-    private static let enteredKeys = [splitmix64(zobrist.last! &+ 0x111111), splitmix64(zobrist.last! &+ 0x222222)]
-    private static let directions = [1, -1] // horizontal; vertical neighbors are appended by index
-    private static let winScore = 1_000_000
-    private static let maxPly = 48
-    private static let infinity = 1_000_000_000
-
-    // Drive's difficulty budgets and local-phase scheduler are independent
-    // constraints. Use the stricter time/depth cap and preserve phase soft limits.
     private struct SearchParameters {
         let timeMs: Double
-        let softTimeMs: Double
+        let softTimeMs: Double?
         let minTimeMs: Double
         let maxDepth: Int
     }
-    private static func parameters(level: Int, movesPlayed: Int, timeLimitOverride: TimeInterval? = nil) -> SearchParameters {
+
+    fileprivate static func owner(_ code: UInt8) -> Int { code == 0 ? -1 : (code & 0x80 == 0 ? 0 : 1) }
+
+    // Mirrors the Bot 3 wrapper in Drive's default-workspace/dots/online_code.pretty.js.
+    // `worker.pretty.js` supplies the shared Rt/ke search core; Clock.pretty.js supplies
+    // the 13 opening sequences and room-code hash. Local iOS sessions use their UUID seed.
+    private static func parameters(level: Int, movesPlayed: Int,
+                                   timeLimitOverride: TimeInterval?) -> SearchParameters {
         if let timeLimitOverride {
-            let timeMs = min(5000, max(80, timeLimitOverride * 1000))
-            return SearchParameters(timeMs: timeMs,
-                                    softTimeMs: timeMs,
-                                    minTimeMs: min(500, timeMs * 0.8),
-                                    maxDepth: 32)
+            let hard = min(5000, max(80, timeLimitOverride * 1000))
+            return SearchParameters(timeMs: hard, softTimeMs: min(1200, hard),
+                                    minTimeMs: min(60, hard), maxDepth: 32)
         }
-        let difficulty: (timeMs: Double, maxDepth: Int)
-        // Match the Drive engine profile; local-game phase limits are applied below.
-        // The online wrapper has a separate 250ms/depth-3 medium cap, but this
-        // two-player local path uses the engine's 1200ms/depth-8 medium profile.
-        switch level {
-        case 1: difficulty = (80, 1)
-        case 2: difficulty = (1200, 8)
-        default: difficulty = (6000, 32)
+        if level <= 1 {
+            // Drive's `easy` mode is intentionally a lightweight random legal-move policy.
+            return SearchParameters(timeMs: 80, softTimeMs: nil, minTimeMs: 0, maxDepth: 1)
         }
-        let phase: (timeMs: Double, softTimeMs: Double, minTimeMs: Double, maxDepth: Int)
         if movesPlayed < 30 {
-            phase = (400, 120, 40, 8)
-        } else {
-            // Values from Drive's local play wrapper.
-            phase = (5000, 600, 80, 32)
+            // Both Drive medium and hard Bot 3 use this opening-phase botpick budget.
+            return SearchParameters(timeMs: 400, softTimeMs: 120,
+                                    minTimeMs: 40, maxDepth: 8)
         }
-        let timeMs = min(difficulty.timeMs, phase.timeMs)
-        let softTimeMs = min(phase.softTimeMs, timeMs)
-        return SearchParameters(
-            timeMs: timeMs,
-            softTimeMs: softTimeMs,
-            minTimeMs: min(phase.minTimeMs, softTimeMs),
-            maxDepth: min(difficulty.maxDepth, phase.maxDepth)
-        )
-    }
-    static func timeBudget(level: Int, movesPlayed: Int = 0, timeLimitOverride: TimeInterval? = nil) -> TimeInterval {
-        parameters(level: level, movesPlayed: movesPlayed, timeLimitOverride: timeLimitOverride).timeMs / 1000
+        if level == 2 {
+            // online_code.pretty.js caps medium's late-game botpick at 250ms/depth 3.
+            return SearchParameters(timeMs: 250, softTimeMs: nil,
+                                    minTimeMs: 0, maxDepth: 3)
+        }
+        // Unlimited-clock hard Bot 3 profile from online_code.pretty.js.
+        return SearchParameters(timeMs: 5000, softTimeMs: 1200,
+                                minTimeMs: 60, maxDepth: 32)
     }
 
-    private struct Entry {
-        var depth: Int
-        var score: Int
-        var flag: Int // 0 exact, 1 lower, 2 upper
-        var move: Int
-    }
-    private struct Context {
-        let deadline: Double
-        var nodes = 0
-        var stopped = false
-        var table: [UInt64: Entry] = [:]
-        var killers = Array(repeating: [-1, -1], count: maxPly + 1)
-        var history = Array(repeating: 0, count: 2 * 144)
-    }
-    private struct Result { var score: Int; var move: Int }
-
-    fileprivate static func owner(_ code: UInt8) -> Int { code == 0 ? -1 : Int(code >> 4) - 1 }
-    private static func charge(_ code: UInt8) -> Int { Int(code & 15) }
-    private static func encode(_ owner: Int, _ charge: Int) -> UInt8 {
-        guard charge > 0 else { return 0 }
-        return UInt8(((owner + 1) << 4) | charge)
-    }
-    private static func neighbors(_ index: Int, _ size: Int) -> [Int] {
-        let row = index / size, column = index % size
-        var result: [Int] = []
-        if column + 1 < size { result.append(index + 1) }
-        if column > 0 { result.append(index - 1) }
-        if row + 1 < size { result.append(index + size) }
-        if row > 0 { result.append(index - size) }
-        return result
-    }
-    private static func key(_ cells: [UInt8], _ side: Int, _ enteredMask: Int) -> UInt64 {
-        var value: UInt64 = 0
-        for (i, code) in cells.enumerated() where code != 0 {
-            let player = owner(code), count = min(8, charge(code))
-            value ^= zobrist[(i * 2 + player) * 8 + count - 1]
-        }
-        if side == 1 { value ^= sideKey }
-        if enteredMask & 1 != 0 { value ^= enteredKeys[0] }
-        if enteredMask & 2 != 0 { value ^= enteredKeys[1] }
-        return value
-    }
-    private static func legalMoves(_ cells: [UInt8], _ side: Int, _ enteredMask: Int, _ size: Int) -> [Int] {
-        if enteredMask & (1 << side) == 0 { return cells.indices.filter { cells[$0] == 0 } }
-        return cells.indices.filter { owner(cells[$0]) == side }
-    }
-    private static func counts(_ cells: [UInt8]) -> [Int] {
-        var value = [0, 0]
-        for code in cells where code != 0 { value[owner(code)] += 1 }
-        return value
-    }
-    private static func terminal(_ cells: [UInt8], _ side: Int, _ enteredMask: Int, _ depth: Int) -> Int? {
-        guard enteredMask == 3 else { return nil }
-        let pieces = counts(cells)
-        if pieces[0] == 0 && pieces[1] > 0 { return side == 1 ? winScore + depth : -winScore - depth }
-        if pieces[1] == 0 && pieces[0] > 0 { return side == 0 ? winScore + depth : -winScore - depth }
-        return nil
-    }
-    private static func connectedComponentSize(_ cells: [UInt8], _ side: Int, _ size: Int) -> Int {
-        var seen = Set<Int>()
-        var largest = 0
-        for start in cells.indices where owner(cells[start]) == side && !seen.contains(start) {
-            var stack = [start]
-            seen.insert(start)
-            var count = 0
-            while let index = stack.popLast() {
-                count += 1
-                for neighbor in neighbors(index, size)
-                where owner(cells[neighbor]) == side && seen.insert(neighbor).inserted {
-                    stack.append(neighbor)
-                }
-            }
-            largest = max(largest, count)
-        }
-        return largest
+    static func timeBudget(level: Int, movesPlayed: Int = 0,
+                           timeLimitOverride: TimeInterval? = nil) -> TimeInterval {
+        parameters(level: level, movesPlayed: movesPlayed,
+                   timeLimitOverride: timeLimitOverride).timeMs / 1000
     }
 
-    private static func captureScore(_ cells: [UInt8], _ move: Int, _ side: Int, _ enteredMask: Int, _ size: Int) -> Double {
-        let before = counts(cells)
-        let after = counts(simulate(cells, move, side, enteredMask, size).cells)
-        let opponent = 1 - side
-        if after[opponent] == 0 && before[opponent] > 0 { return Double(winScore) }
-        let gain = after[side] - before[side]
-        let loss = before[opponent] - after[opponent]
-        return Double(gain) + Double(loss) * 1.4
-    }
-
-    private static func topCaptureScores(_ cells: [UInt8], _ side: Int, _ enteredMask: Int, _ size: Int) -> (best: Double, second: Double) {
-        guard enteredMask & (1 << side) != 0 else { return (0, 0) }
-        var best = 0.0, second = 0.0
-        for index in cells.indices where owner(cells[index]) == side && charge(cells[index]) == 3 {
-            let score = captureScore(cells, index, side, enteredMask, size)
-            if score > best { second = best; best = score }
-            else if score > second { second = score }
-        }
-        return (best, second)
-    }
-
-    private static func evaluate(_ cells: [UInt8], _ side: Int, _ enteredMask: Int) -> Int {
-        if let result = terminal(cells, side, enteredMask, 0) { return result }
-        let opponent = 1 - side
-        let size = Int(Double(cells.count).squareRoot())
-        var totalCharge = [0, 0], critical = [0, 0], nearCritical = [0, 0]
-        for code in cells where code != 0 {
-            let player = owner(code), amount = charge(code)
-            totalCharge[player] += amount
-            if amount >= 3 { critical[player] += 1 }
-            else if amount >= 2 { nearCritical[player] += 1 }
-        }
-        let ownCapture = topCaptureScores(cells, side, enteredMask, size)
-        let enemyCapture = topCaptureScores(cells, opponent, enteredMask, size)
-        // Drive Ce(board, evalSide, sideToMove) uses 18/12 best-capture weights
-        // from the side-to-move perspective, then a 4x second-best risk term.
-        let captureValue = ownCapture.best * 18 - enemyCapture.best * 12
-            + (ownCapture.second - enemyCapture.second) * 4
-        let connected = connectedComponentSize(cells, side, size) - connectedComponentSize(cells, opponent, size)
-        let score = Double(totalCharge[side] - totalCharge[opponent]) * 4
-            + Double(critical[side] - critical[opponent]) * 18
-            + Double(nearCritical[side] - nearCritical[opponent]) * 6
-            + Double(connected) * 3
-            + captureValue + 5
-        return Int(score.rounded())
-    }
-    private static func simulate(_ cells: [UInt8], _ move: Int, _ side: Int, _ enteredMask: Int, _ size: Int) -> (cells: [UInt8], entered: Int) {
-        var next = cells
-        let increment = enteredMask & (1 << side) == 0 ? 3 : 1
-        next[move] = encode(side, charge(next[move]) + increment)
-        var newMask = enteredMask | (1 << side)
-        // Drive bitboard reference resolves queued waves sequentially in flat-index order.
-        for _ in 0..<(size * size * 8) {
-            let wave = next.indices.filter { next[$0] != 0 && charge(next[$0]) >= 4 }
-            if wave.isEmpty { break }
-            for index in wave {
-                let code = next[index]
-                guard code != 0 && charge(code) >= 4 else { continue }
-                let sourceOwner = owner(code)
-                next[index] = encode(sourceOwner, charge(code) - 4)
-                for neighbor in neighbors(index, size) {
-                    next[neighbor] = encode(sourceOwner, charge(next[neighbor]) + 1)
-                }
-            }
-        }
-        return (next, newMask)
-    }
-    private static func criticalChain(_ cells: [UInt8], _ side: Int, _ size: Int) -> (pairs: Int, charge: Int) {
-        let opponent = 1 - side
-        var pairs = 0, chargeTotal = 0
-        for index in cells.indices where owner(cells[index]) == side && charge(cells[index]) >= 3 {
-            for neighbor in neighbors(index, size)
-            where owner(cells[neighbor]) == opponent && charge(cells[neighbor]) >= 3 {
-                pairs += 1
-                chargeTotal += charge(cells[neighbor])
-            }
-        }
-        return (pairs, chargeTotal)
-    }
-
-    private static func moveOrderScore(_ cells: [UInt8], _ move: Int, _ side: Int, _ enteredMask: Int, _ size: Int, _ ply: Int, _ ttMove: Int, _ context: Context) -> Double {
-        let isFirst = enteredMask & (1 << side) == 0
-        let nextCharge = charge(cells[move]) + (isFirst ? 3 : 1)
-        var score = quietHeuristic(cells, move, side, enteredMask, size)
-        if move == ttMove { score += 1_000_000_000 }
-        else if nextCharge >= 4 { score += 1_000_000 }
-        else if context.killers[ply][0] == move || context.killers[ply][1] == move { score += 500_000 }
-        else { score += Double(context.history[side * 144 + move]) }
-        return score
-    }
-    private static func quietHeuristic(_ cells: [UInt8], _ move: Int, _ side: Int, _ enteredMask: Int, _ size: Int) -> Double {
-        let code = cells[move]
-        let isFirst = enteredMask & (1 << side) == 0
-        let newCharge = charge(code) + (isFirst ? 3 : 1)
-        let enemy = 1 - side
-        let adjacent = neighbors(move, size)
-        var enemyCount = 0, enemy3 = 0, maxEnemy = 0, enemy2 = 0, own3 = 0, ownCount = 0, empty = 0, enemyCharge = 0
-        for n in adjacent {
-            let near = cells[n]
-            if near == 0 { empty += 1; continue }
-            let p = owner(near), q = charge(near)
-            if p == side { ownCount += 1; if q == 3 { own3 += 1 } }
-            else { enemyCount += 1; enemyCharge += q; maxEnemy = max(maxEnemy, q); if q == 3 { enemy3 += 1 }; if q == 2 { enemy2 += 1 } }
-        }
-        if newCharge >= 4 {
-            let next = simulate(cells, move, side, enteredMask, size).cells
-            let before = counts(cells), after = counts(next)
-            var score = Double((after[side] - before[side]) * 18 + (before[enemy] - after[enemy]) * 26)
-            if after[enemy] == 0 && before[enemy] > 0 { score += 500_000 }
-            score += Double(enemyCount * 30 + enemy3 * 90) + Double(empty) * 0.4
-            let readyThreat = criticalChain(cells, side, size)
-            if readyThreat.pairs > 0 { score += 280 + Double(readyThreat.charge) * 12 }
-            return score
-        }
-        var score = 0.0
-        if enemy3 > 0 {
-            score -= Double(95 + newCharge * 24 + maxEnemy * 18)
-            if newCharge == 3 { score -= Double(250 + own3 * 95) }
-        }
-        if newCharge == 3 && enemy2 > 0 { score -= Double(105 * enemy2) }
-        if newCharge == 3 && enemyCount > 0 { score -= Double(30 * enemyCount) }
-        if newCharge == 3 && enemyCount == 0 { score += Double(22 + own3 * 4) }
-        let exposed = criticalChain(cells, side, size)
-        if exposed.pairs > 0 { score -= 290 + Double(exposed.charge) * 12 }
-        score += Double(newCharge) * 0.5 + Double(4 - newCharge) * 2.5 + Double(ownCount) + Double(empty) * 0.25 - Double(enemyCount * 2)
-        let total = counts(cells).reduce(0, +)
-        if total <= 8 && !isFirst {
-            let row = move / size, column = move % size, center = size / 2
-            let distance = side == 0 ? row + column : 2 * (size - 1) - row - column
-            score += Double(max(0, center - distance)) * 2.5
-        }
-        if total >= 30 && newCharge == 3 { score -= 8 }
-        return score
-    }
-    private static func search(_ cells: [UInt8], _ side: Int, _ enteredMask: Int, _ depth: Int,
-                               _ alphaIn: Int, _ beta: Int, _ ply: Int,
-                               _ context: inout Context, _ size: Int, isPV: Bool = true) -> Result {
-        context.nodes += 1
-        if context.nodes & 255 == 0 && ProcessInfo.processInfo.systemUptime >= context.deadline {
-            context.stopped = true
-        }
-        if context.stopped || ply >= maxPly { return Result(score: evaluate(cells, side, enteredMask), move: -1) }
-        if let result = terminal(cells, side, enteredMask, depth) { return Result(score: result, move: -1) }
-        let hash = key(cells, side, enteredMask), cached = context.table[hash]
-        let ttMove = cached?.move ?? -1
-        let oldAlpha = alphaIn
-        var alpha = alphaIn
-        if let cached, cached.depth >= depth {
-            if cached.flag == 0 { return Result(score: cached.score, move: cached.move) }
-            if cached.flag == 1 && cached.score >= beta { return Result(score: cached.score, move: cached.move) }
-            if cached.flag == 2 && cached.score <= alpha { return Result(score: cached.score, move: cached.move) }
-        }
-        if depth <= 0 { return Result(score: evaluate(cells, side, enteredMask), move: -1) }
-
-        let sidePieces = cells.reduce(0) { $0 + (owner($1) == side ? 1 : 0) }
-        if ply > 0 && isPV && depth >= 3 && beta - alpha == 1 && sidePieces >= 3 {
-            let reduction = depth >= 6 ? 3 : 2
-            let nullChild = search(cells, 1 - side, enteredMask, depth - 1 - reduction,
-                                   -beta, -beta + 1, ply + 1, &context, size, isPV: false)
-            let nullScore = -nullChild.score
-            if context.stopped { return Result(score: evaluate(cells, side, enteredMask), move: -1) }
-            if nullScore >= beta { return Result(score: nullScore, move: -1) }
-        }
-
-        let moves = legalMoves(cells, side, enteredMask, size).sorted {
-            moveOrderScore(cells, $0, side, enteredMask, size, ply, ttMove, context)
-                > moveOrderScore(cells, $1, side, enteredMask, size, ply, ttMove, context)
-        }
-        guard !moves.isEmpty else { return Result(score: evaluate(cells, side, enteredMask), move: -1) }
-        let originalBeta = beta
-        var best = -infinity, bestMove = moves[0], searched = 0
-        for move in moves {
-            let isFirst = enteredMask & (1 << side) == 0
-            let nextCharge = charge(cells[move]) + (isFirst ? 3 : 1)
-            let tactical = nextCharge >= 4
-            let extensionDepth = tactical && depth <= 3 && ply < maxPly - 4 ? 1 : 0
-            let next = simulate(cells, move, side, enteredMask, size)
-            let childDepth = depth - 1 + extensionDepth
-            var child: Result
-            var score: Int
-            if searched == 0 {
-                child = search(next.cells, 1 - side, next.entered, childDepth,
-                               -beta, -alpha, ply + 1, &context, size, isPV: true)
-                score = -child.score
-            } else {
-                var reduction = 0
-                if !tactical && extensionDepth == 0 && depth >= 3 && searched >= 3 {
-                    reduction = searched >= 6 ? 2 : 1
-                    reduction = min(reduction, max(0, depth - 2))
-                }
-                child = search(next.cells, 1 - side, next.entered, childDepth - reduction,
-                               -alpha - 1, -alpha, ply + 1, &context, size, isPV: true)
-                score = -child.score
-                if !context.stopped && score > alpha && (reduction > 0 || beta - alpha > 1) {
-                    child = search(next.cells, 1 - side, next.entered, childDepth,
-                                   -beta, -alpha, ply + 1, &context, size, isPV: true)
-                    score = -child.score
-                }
-            }
-            if score > best { best = score; bestMove = move }
-            if score > alpha { alpha = score }
-            searched += 1
-            if alpha >= beta {
-                if !tactical {
-                    if context.killers[ply][0] != move {
-                        context.killers[ply][1] = context.killers[ply][0]
-                        context.killers[ply][0] = move
-                    }
-                    let index = side * 144 + move
-                    context.history[index] += depth * depth
-                }
-                break
-            }
-            if context.stopped { break }
-        }
-        guard !context.stopped, best != -infinity else {
-            return Result(score: best == -infinity ? evaluate(cells, side, enteredMask) : best, move: bestMove)
-        }
-        let flag = best <= oldAlpha ? 2 : (best >= originalBeta ? 1 : 0)
-        context.table[hash] = Entry(depth: depth, score: best, flag: flag, move: bestMove)
-        return Result(score: best, move: bestMove)
-    }
-
-    static func bestMove(board: AISolver.Board, activePlayers: [Int], currentPlayer: Int, hasEntered: [Bool], level: Int, movesPlayed: Int, openingSeed: String, timeLimitOverride: TimeInterval? = nil) -> (Int, Int)? {
-        guard (2...12).contains(board.size), activePlayers.count == 2, let side = activePlayers.firstIndex(of: currentPlayer) else { return nil }
+    static func bestMove(board: AISolver.Board, activePlayers: [Int], currentPlayer: Int,
+                         hasEntered: [Bool], level: Int, movesPlayed: Int,
+                         openingSeed: String,
+                         timeLimitOverride: TimeInterval? = nil) -> (Int, Int)? {
+        guard (2...12).contains(board.size), activePlayers.count == 2,
+              let side = activePlayers.firstIndex(of: currentPlayer) else { return nil }
         let size = board.size
         var cells = [UInt8](repeating: 0, count: size * size)
         for index in cells.indices {
             let value = board.cells[index]
-            guard let local = activePlayers.firstIndex(of: value.owner ?? -1), value.count > 0 else { continue }
-            cells[index] = encode(local, min(15, value.count))
+            guard let owner = value.owner,
+                  let local = activePlayers.firstIndex(of: owner) else { continue }
+            cells[index] = UInt8((local == 1 ? 0x80 : 0) | (min(15, value.count) & 0x0f))
         }
-        var enteredMask = 0
-        for sideIndex in 0..<2 {
-            let player = activePlayers[sideIndex]
-            if player < hasEntered.count && hasEntered[player] { enteredMask |= 1 << sideIndex }
-        }
-        let moves = legalMoves(cells, side, enteredMask, size)
-        guard let first = moves.first else { return nil }
-        if terminal(cells, side, enteredMask, 0) != nil { return nil }
-        let searchParameters = parameters(level: level, movesPlayed: movesPlayed, timeLimitOverride: timeLimitOverride)
-        // Drive's opening book applies to ordinary matches. The Analyzer deliberately
-        // skips it so its chosen time budget is spent searching from the first move.
-        if timeLimitOverride == nil && movesPlayed < 30,
-           let opening = DriveOpeningBook.nextOwnedMove(
-                cells: cells, size: size, side: side, startIndex: movesPlayed / 2, seed: openingSeed
-           ) {
-            return (opening / size, opening % size)
-        }
-        if level == 1 {
-            let ranked = moves.map { ($0, quietHeuristic(cells, $0, side, enteredMask, size)) }.sorted { $0.1 > $1.1 }
-            guard let best = ranked.first else { return nil }
+        let legalMoves = cells.indices.filter { owner(cells[$0]) == side }
+        guard let first = legalMoves.first else { return nil }
+
+        // Drive's online easy wrapper skips its opening book and chooses among legal cells.
+        // Medium/hard query the book before calling the same worker `botpick` core.
+        if level <= 1 {
             let roll = Double.random(in: 0..<1)
             let selected: Int
-            if roll < 0.25 && moves.count > 1 {
-                selected = moves.randomElement()!
-            } else if roll < 0.70 && moves.count > 1 {
-                selected = ranked[Int.random(in: 0..<max(2, (ranked.count + 1) / 2))].0
+            if roll < 0.25 && legalMoves.count > 1 {
+                selected = legalMoves.randomElement() ?? first
+            } else if roll < 0.70 && legalMoves.count > 1 {
+                let prefixCount = min(legalMoves.count, max(2, (legalMoves.count + 1) / 2))
+                selected = legalMoves[Int.random(in: 0..<prefixCount)]
             } else {
-                selected = best.0
+                selected = first
             }
             return (selected / size, selected % size)
         }
-        if moves.count == 1 { return (first / size, first % size) }
-        let maxDepth = searchParameters.maxDepth
-        let startTime = ProcessInfo.processInfo.systemUptime
-        var context = Context(deadline: startTime + searchParameters.timeMs / 1000)
-        let ordered = moves.sorted {
-            moveOrderScore(cells, $0, side, enteredMask, size, 0, -1, context)
-                > moveOrderScore(cells, $1, side, enteredMask, size, 0, -1, context)
+
+        // worker wrapper passes moves_blue to Clock.er; local iOS generalizes this to
+        // the active side's own count so red-first local games and Analyzer behave correctly.
+        let firstSide = movesPlayed.isMultiple(of: 2) ? side : 1 - side
+        let firstSideMoves = (movesPlayed + 1) / 2
+        let secondSideMoves = movesPlayed / 2
+        let movesRed = firstSide == 0 ? firstSideMoves : secondSideMoves
+        let movesBlue = firstSide == 1 ? firstSideMoves : secondSideMoves
+        let ownMoves = side == 0 ? movesRed : movesBlue
+        if movesPlayed < 30, ownMoves < 12,
+           let opening = DriveOpeningBook.nextOwnedMove(cells: cells, size: size,
+                                                        side: side, startIndex: ownMoves,
+                                                        seed: openingSeed) {
+            return (opening / size, opening % size)
         }
-        var best = ordered[0], depthCompleted = 0
-        var completedMoves: [Int] = [], completedScores: [Int] = []
-        for depth in 1...maxDepth {
-            if ProcessInfo.processInfo.systemUptime >= context.deadline || Task.isCancelled { break }
-            context.stopped = false
-            var alpha = depth >= 4 ? completedScores.last.map { $0 - 50 } ?? -infinity : -infinity
-            var beta = depth >= 4 ? completedScores.last.map { $0 + 50 } ?? infinity : infinity
-            var window = 50
-            var result: Result?
-            while !context.stopped && !Task.isCancelled {
-                let attempt = search(cells, side, enteredMask, depth, alpha, beta, 0, &context, size)
-                if context.stopped || Task.isCancelled { break }
-                if attempt.score <= alpha && alpha > -infinity {
-                    window *= 2
-                    if window > 4000 { alpha = -infinity; beta = infinity }
-                    else { alpha = attempt.score - window; beta = attempt.score + 1 }
-                    continue
-                }
-                if attempt.score >= beta && beta < infinity {
-                    window *= 2
-                    if window > 4000 { alpha = -infinity; beta = infinity }
-                    else { alpha = attempt.score - 1; beta = attempt.score + window }
-                    continue
-                }
-                result = attempt
-                break
-            }
-            guard let result, !context.stopped, !Task.isCancelled, result.move >= 0 else { break }
-            best = result.move; depthCompleted = depth
-            completedMoves.append(result.move); completedScores.append(result.score)
-            if abs(result.score) >= winScore - 1000 { break }
-            let elapsedMs = (ProcessInfo.processInfo.systemUptime - startTime) * 1000
-            if depth >= 6 && elapsedMs >= searchParameters.softTimeMs && elapsedMs >= searchParameters.minTimeMs && completedMoves.count >= 3 {
-                let recentMoves = completedMoves.suffix(3)
-                let scoreDelta = abs(result.score - completedScores[completedScores.count - 3])
-                if let stableMove = recentMoves.first,
-                   recentMoves.allSatisfy({ $0 == stableMove }), scoreDelta <= 8 { break }
-            }
+
+        let profile = parameters(level: level, movesPlayed: movesPlayed,
+                                 timeLimitOverride: timeLimitOverride)
+        guard let result = DriveBotpickEngine.bestMove(
+            cells: cells, size: size, side: side,
+            movesRed: movesRed, movesBlue: movesBlue,
+            limits: DriveBotpickEngine.Limits(timeMs: profile.timeMs,
+                                              softTimeMs: profile.softTimeMs,
+                                              minTimeMs: profile.minTimeMs,
+                                              maxDepth: profile.maxDepth)
+        ) else { return (first / size, first % size) }
+
+        // The web wrapper deliberately chooses the second row-major legal cell 25% of
+        // the time in medium mode after search; preserve that behavior on iOS.
+        if level == 2 && legalMoves.count > 1 && Double.random(in: 0..<1) < 0.25 {
+            let runnerUp = legalMoves[1]
+            return (runnerUp / size, runnerUp % size)
         }
-        _ = depthCompleted
-        // Drive's Medium mode deliberately plays the heuristic runner-up 25%
-        // of the time; deeper modes keep the best searched move.
-        if level == 2 && moves.count > 1 && Double.random(in: 0..<1) < 0.25 {
-            let ranked = moves.map { ($0, quietHeuristic(cells, $0, side, enteredMask, size)) }.sorted { $0.1 > $1.1 }
-            if ranked.count > 1 { best = ranked[1].0 }
-        }
-        return (best / size, best % size)
+        return (result.move / size, result.move % size)
     }
 }
-
 
 // MARK: - 7. AI 算法引擎
 
@@ -855,7 +503,7 @@ struct AISolver: Sendable {
     }
 
     func calculateBestMove() async -> (Int, Int)? {
-        if searchStopped { return nil }
+        if playerType != .driveBot && searchStopped { return nil }
         // The Drive botpick search is a two-player zero-sum engine. In party
         // games, continue into the shared multiplayer MaxN path instead of
         // returning nil before the bot can place its opening piece.
