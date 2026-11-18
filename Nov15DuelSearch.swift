@@ -2,8 +2,7 @@ import Foundation
 
 // Bot 3 algorithm restored verbatim from commit 644af44 (2026-11-15 09:33 HKT,
 // release build-111), where it lived as `DriveDuelSearch` in ContentView.swift.
-// Only the type name changed. Identical in build-113 (b3c848f). Bot 3 uses level 2,
-// the default of the hidden AI slider in duel mode.
+// Only the type name changed. Bot 3 always uses its level-3+ ("hard") branch.
 struct Nov15DuelSearch {
     private static let mask64 = UInt64.max
     private static func splitmix64(_ value: UInt64) -> UInt64 {
