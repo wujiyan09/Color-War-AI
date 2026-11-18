@@ -144,9 +144,19 @@ class NativeAnalyzerTests(unittest.TestCase):
 
     def test_analyzer_four_primary_controls_have_equal_fixed_height(self):
         panel = SWIFT[SWIFT.index("private struct AnalyzerToolPanel"):SWIFT.index("private struct AnalyzerPlayView")]
-        self.assertEqual(panel.count(".frame(height: 48)"), 4)
+        self.assertEqual(panel.count(".frame(height: compact ? 56 : 48)"), 4)
         for button in ("startButton", "pauseButton", "onToggleSide()", "onUndo()"):
             self.assertIn(button, panel)
+
+    def test_analyzer_portrait_controls_keep_large_legible_contents(self):
+        panel = SWIFT[SWIFT.index("private struct AnalyzerToolPanel"):SWIFT.index("private struct AnalyzerPlayView")]
+        compact_font = ".font(compact ? .system(size: 18, weight: .semibold) : .subheadline.bold())"
+        self.assertEqual(panel.count(compact_font), 4)
+        self.assertEqual(panel.count(".minimumScaleFactor(0.85)"), 4)
+        self.assertEqual(panel.count(".frame(height: compact ? 56 : 48)"), 4)
+        self.assertIn("minHeight: compact ? 40 : 38", panel)
+        self.assertIn("width: compact ? 9 : 6, height: compact ? 9 : 6", panel)
+        self.assertIn("proxy.size.height - 374", SWIFT)
 
     def test_analyzer_uses_deep_search_with_five_second_cap_from_opening(self):
         self.assertIn("timeLimitOverride: TimeInterval? = nil", SWIFT)

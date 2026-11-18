@@ -1939,14 +1939,14 @@ private struct AnalyzerToolPanel: View {
             VStack(spacing: 3) {
                 HStack(spacing: 2) {
                     ForEach(0..<count, id: \.self) { _ in
-                        Circle().fill(color).frame(width: 6, height: 6)
+                        Circle().fill(color).frame(width: compact ? 9 : 6, height: compact ? 9 : 6)
                     }
                 }
                 Text("\(count)点")
-                    .font(.caption2.weight(.semibold))
+                    .font(compact ? .caption.weight(.semibold) : .caption2.weight(.semibold))
                     .foregroundStyle(.white)
             }
-            .frame(maxWidth: .infinity, minHeight: compact ? 32 : 38)
+            .frame(maxWidth: .infinity, minHeight: compact ? 40 : 38)
             .glassEffect(.regular.interactive().tint(selected ? color.opacity(0.20) : .clear), in: .rect(cornerRadius: 10))
             .contentShape(RoundedRectangle(cornerRadius: 10))
         }
@@ -1961,10 +1961,12 @@ private struct AnalyzerToolPanel: View {
         } label: {
             Label(isThinking ? "计算中…" : (isStarted && isPaused ? (compact ? "继续" : "继续分析") : (compact ? "开始" : "开始分析")),
                   systemImage: isThinking ? "hourglass" : "play.fill")
-                .font(compact ? .caption.bold() : .subheadline.bold())
+                .font(compact ? .system(size: 18, weight: .semibold) : .subheadline.bold())
                 .foregroundStyle(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
                 .frame(maxWidth: .infinity)
-                .frame(height: 48)
+                .frame(height: compact ? 56 : 48)
                 .contentShape(Capsule())
                 .glassEffect(.regular.interactive().tint(.darkNavyBlue), in: .capsule)
         }
@@ -1979,10 +1981,12 @@ private struct AnalyzerToolPanel: View {
             onPause()
         } label: {
             Label(compact ? "暂停" : "暂停分析", systemImage: "pause.fill")
-                .font(compact ? .caption.bold() : .subheadline.bold())
+                .font(compact ? .system(size: 18, weight: .semibold) : .subheadline.bold())
                 .foregroundStyle(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
                 .frame(maxWidth: .infinity)
-                .frame(height: 48)
+                .frame(height: compact ? 56 : 48)
                 .contentShape(Capsule())
                 .glassEffect(.regular.interactive(), in: .capsule)
         }
@@ -2016,7 +2020,7 @@ private struct AnalyzerToolPanel: View {
                     Label("橡皮擦", systemImage: "eraser.fill")
                         .font(compact ? .caption.bold() : .subheadline.bold())
                         .foregroundStyle(.white)
-                        .frame(maxWidth: .infinity, minHeight: compact ? 32 : 38)
+                        .frame(maxWidth: .infinity, minHeight: compact ? 40 : 38)
                         .contentShape(Capsule())
                         .glassEffect(.regular.interactive().tint(brush == .eraser ? .gray.opacity(0.35) : .clear), in: .capsule)
                 }
@@ -2042,10 +2046,12 @@ private struct AnalyzerToolPanel: View {
                 onToggleSide()
             } label: {
                 Label("我方：\(selfColor == 0 ? "红" : "蓝") · 切换", systemImage: "arrow.left.arrow.right")
-                    .font(compact ? .caption.bold() : .subheadline.bold())
+                    .font(compact ? .system(size: 18, weight: .semibold) : .subheadline.bold())
                     .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
                     .frame(maxWidth: .infinity)
-                    .frame(height: 48)
+                    .frame(height: compact ? 56 : 48)
                     .contentShape(Rectangle())
                     .glassEffect(.regular.interactive(), in: .capsule)
             }
@@ -2058,10 +2064,12 @@ private struct AnalyzerToolPanel: View {
                 onUndo()
             } label: {
                 Label("撤销上一步", systemImage: "arrow.uturn.backward")
-                    .font(compact ? .caption.bold() : .subheadline.bold())
+                    .font(compact ? .system(size: 18, weight: .semibold) : .subheadline.bold())
                     .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
                     .frame(maxWidth: .infinity)
-                    .frame(height: 48)
+                    .frame(height: compact ? 56 : 48)
                     .contentShape(Rectangle())
                     .glassEffect(.regular.interactive(), in: .capsule)
             }
@@ -2291,7 +2299,7 @@ private struct AnalyzerPlayView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                     .padding(.horizontal, 12)
                 } else {
-                    let boardSide = max(96, min(proxy.size.width - 24, proxy.size.height - 330))
+                    let boardSide = max(96, min(proxy.size.width - 24, proxy.size.height - 374))
                     VStack(spacing: 8) {
                         AnalyzerBoardView(boardSize: boardSize, board: board, highlightedCell: highlightedCell,
                                           maxSide: boardSide) { row, column in tapCell(row: row, column: column) }
