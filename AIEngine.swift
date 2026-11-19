@@ -527,6 +527,24 @@ struct AISolver: Sendable {
         // The Drive botpick search is a two-player zero-sum engine. In party
         // games, continue into the shared multiplayer MaxN path instead of
         // returning nil before the bot can place its opening piece.
+        // Bot 3 in party games (3+ seats): paranoid search while 3+ seats are
+        // alive, then the unchanged Nov15 duel search once two remain.
+        if playerType == .driveBot && activePlayers.count > 2 && !directBotpickSearch {
+            let alive = activePlayers.filter { !isPlayerEliminated($0, in: eliminated) }
+            if alive.count == 2 {
+                if let move = Nov15DuelSearch.bestMove(board: board, activePlayers: alive,
+                                                       currentPlayer: currentPlayer, hasEntered: hasEntered,
+                                                       level: 3, movesPlayed: localDuelMovesPlayed) {
+                    return move
+                }
+            } else if alive.count > 2 {
+                if let move = Nov15ParanoidSearch.bestMove(board: board, players: alive,
+                                                           currentPlayer: currentPlayer, hasEntered: hasEntered,
+                                                           eliminated: eliminated, movesPlayed: localDuelMovesPlayed) {
+                    return move
+                }
+            }
+        }
         if playerType == .driveBot && activePlayers.count == 2 {
             if !directBotpickSearch {
                 // Bot 3 = the 2026-11-15 09:33 (build-111) algorithm, see Nov15DuelSearch.swift.

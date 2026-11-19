@@ -152,9 +152,9 @@ final class GameModel: ObservableObject {
         if isOnline { return [] }
 
         if !isOnline && !isInLobby && !isGameInPlay {
-            // Bot 3 is a two-player duel option only; party and lobby setup
-            // must not offer it as a seat role.
-            return [.human, .mathNightmare, .enhancedNightmare, .disabled]
+            // Bot 3 is offered in local party setup too (paranoid search for
+            // 3+ seats, Nov15 duel search when two remain). Not online.
+            return [.human, .mathNightmare, .enhancedNightmare, .driveBot, .disabled]
         }
 
         let isSeat0 = (idx == 0)
@@ -852,7 +852,7 @@ final class GameModel: ObservableObject {
         if !forceInternal && isOnlineMultiplayer { return }
 
         if !forceInternal {
-            guard newType != .driveBot || (isLocalDuelMode && activePlayerIndices.count == 2) else { return }
+            guard newType != .driveBot || !isOnlineMultiplayer else { return }
             let valids = validSelectableTypes(forPlayerIndex: index, isInLobby: !isGameInPlay)
             guard valids.contains(newType) else { return }
         }
