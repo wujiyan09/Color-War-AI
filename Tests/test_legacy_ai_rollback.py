@@ -93,7 +93,7 @@ class Bot3DriveParityTests(unittest.TestCase):
         self.assertIn("maxNMultiPlayerSearch(", AI)
 
     def test_drive_wrapper_has_opening_modes_move_counts_and_budgets(self):
-        wrapper = AI[AI.index("private enum DriveOpeningBook"):AI.index("// MARK: - 7.")]
+        wrapper = AI[AI.index("enum DriveOpeningBook"):AI.index("// MARK: - 7.")]
         for fragment in (
             "guard [6, 9, 12].contains(size)",
             "2_166_136_261",

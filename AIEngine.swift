@@ -152,7 +152,7 @@ enum TacticalRiskMode {
     case desperate
 }
 
-private enum DriveOpeningBook {
+enum DriveOpeningBook {
     // Port of Clock.pretty.js opening patterns used by play.local-DNTan253.js.
     // The local client seeds the picker per game session (not per room code).
     static func patterns(size: Int) -> [[(Int, Int)]]? {
@@ -456,6 +456,7 @@ struct AISolver: Sendable {
     let aiLevel: AIDifficultyLevel
     let isLocalDuelMode: Bool
     let localDuelMovesPlayed: Int
+    let duelStrength: Int
     let openingSeed: String
     private let searchTimeLimitOverride: TimeInterval?
     private let directBotpickSearch: Bool
@@ -475,6 +476,7 @@ struct AISolver: Sendable {
          eliminated: [Bool],
          isLocalDuelMode: Bool = false,
          localDuelMovesPlayed: Int = 0,
+         duelStrength: Int = Nov15DuelSearch.maxStrength,
          openingSeed: String = "local",
          searchTimeLimitOverride: TimeInterval? = nil,
          directBotpickSearch: Bool = false) {
@@ -485,6 +487,7 @@ struct AISolver: Sendable {
         self.aiLevel = aiLevel
         self.isLocalDuelMode = isLocalDuelMode
         self.localDuelMovesPlayed = localDuelMovesPlayed
+        self.duelStrength = duelStrength
         self.openingSeed = openingSeed
         self.searchTimeLimitOverride = searchTimeLimitOverride
         self.directBotpickSearch = directBotpickSearch
@@ -550,7 +553,9 @@ struct AISolver: Sendable {
                 // Bot 3 = the 2026-11-15 09:33 (build-111) algorithm, see Nov15DuelSearch.swift.
                 return Nov15DuelSearch.bestMove(board: board, activePlayers: activePlayers,
                                                 currentPlayer: currentPlayer, hasEntered: hasEntered,
-                                                level: 3, movesPlayed: localDuelMovesPlayed)
+                                                level: 3, movesPlayed: localDuelMovesPlayed,
+                                                openingSeed: isLocalDuelMode ? openingSeed : nil,
+                                                strength: isLocalDuelMode ? duelStrength : Nov15DuelSearch.maxStrength)
             }
             return DriveDuelSearch.bestMove(board: board, activePlayers: activePlayers,
                                             currentPlayer: currentPlayer,

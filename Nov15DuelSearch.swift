@@ -42,10 +42,11 @@ struct Nov15DuelSearch {
         default: difficulty = (6000, 32, false)
         }
         let phase: (timeMs: Double, softTimeMs: Double, minTimeMs: Double, maxDepth: Int)
+        // Drive / dots-online hard bot phase budgets.
         if movesPlayed < 30 {
             phase = (400, 120, 40, 8)
         } else {
-            phase = (5000, 600, 80, 32)
+            phase = (5000, 1200, 60, 32)
         }
         let timeMs = min(difficulty.timeMs, phase.timeMs)
         let softTimeMs = min(phase.softTimeMs, timeMs)
@@ -56,6 +57,27 @@ struct Nov15DuelSearch {
             maxDepth: min(difficulty.maxDepth, phase.maxDepth),
             randomize: difficulty.randomize
         )
+    }
+    // Duel slider. Each level caps the Drive hard budget (time, soft stop, depth);
+    // the opening phase (<30 plies: 400ms / depth 8) is capped the same way.
+    static let maxStrength = 4
+    private static let strengthCaps: [(timeMs: Double, softTimeMs: Double, maxDepth: Int)] = [
+        (300, 80, 4), (1000, 300, 10), (2500, 700, 20), (5000, 1200, 32)
+    ]
+    static func strengthName(_ strength: Int) -> String {
+        ["简单", "中等", "困难", "Drive 原版"][max(1, min(maxStrength, strength)) - 1]
+    }
+    static func strengthDetail(_ strength: Int) -> String {
+        let cap = strengthCaps[max(1, min(maxStrength, strength)) - 1]
+        return String(format: "每步最多 %.1f 秒 · 深度 %d", cap.timeMs / 1000, cap.maxDepth)
+    }
+    private static func capped(_ p: SearchParameters, strength: Int) -> SearchParameters {
+        let cap = strengthCaps[max(1, min(maxStrength, strength)) - 1]
+        let timeMs = min(p.timeMs, cap.timeMs)
+        let softTimeMs = min(p.softTimeMs, cap.softTimeMs, timeMs)
+        return SearchParameters(timeMs: timeMs, softTimeMs: softTimeMs,
+                                minTimeMs: min(p.minTimeMs, softTimeMs),
+                                maxDepth: min(p.maxDepth, cap.maxDepth), randomize: p.randomize)
     }
     static func timeBudget(level: Int, movesPlayed: Int = 0) -> TimeInterval {
         parameters(level: level, movesPlayed: movesPlayed).timeMs / 1000
@@ -242,11 +264,21 @@ struct Nov15DuelSearch {
         if total >= 30 && newCharge == 3 { score -= 8 }
         return score + Double.random(in: -0.005...0.005)
     }
-    private static func search(_ cells: [UInt8], _ side: Int, _ enteredMask: Int, _ depth: Int, _ alphaIn: Int, _ beta: Int, _ ply: Int, _ context: inout Context, _ size: Int) -> Result {
+    private static func pieceCount(_ cells: [UInt8], _ side: Int) -> Int {
+        var n = 0
+        for code in cells where code != 0 && owner(code) == side { n += 1 }
+        return n
+    }
+    // Search follows Drive's bitboard `ze()`: TT, null-move pruning, stable
+    // move ordering, killers/uncapped history, no TT store when time runs out.
+    // Move rules (subtract-4 bursts, full chain then win check, +3 first move)
+    // stay Color War's via simulate()/terminal().
+    private static func search(_ cells: [UInt8], _ side: Int, _ enteredMask: Int, _ depth: Int, _ alphaIn: Int, _ beta: Int, _ ply: Int, _ context: inout Context, _ size: Int, _ allowNull: Bool) -> Result {
         context.nodes += 1
         if context.nodes & 4095 == 0 && ProcessInfo.processInfo.systemUptime >= context.deadline { context.stopped = true }
-        if context.stopped || ply >= maxPly { return Result(score: evaluate(cells, side, enteredMask), move: -1) }
+        if context.stopped { return Result(score: 0, move: -1) }
         if let result = terminal(cells, side, enteredMask, depth) { return Result(score: result, move: -1) }
+        if ply >= maxPly { return Result(score: evaluate(cells, side, enteredMask), move: -1) }
         let hash = key(cells, side, enteredMask), cached = context.table[hash]
         let ttMove = cached?.move ?? -1, oldAlpha = alphaIn
         var alpha = alphaIn
@@ -256,15 +288,36 @@ struct Nov15DuelSearch {
             if cached.flag == 2 && cached.score <= alpha { return Result(score: cached.score, move: cached.move) }
         }
         if depth <= 0 { return Result(score: evaluate(cells, side, enteredMask), move: -1) }
-        let moves = legalMoves(cells, side, enteredMask, size).sorted {
-            moveOrderScore(cells, $0, side, enteredMask, size, ply, ttMove, context) > moveOrderScore(cells, $1, side, enteredMask, size, ply, ttMove, context)
+        if allowNull && depth >= 3 && beta - alpha == 1 && pieceCount(cells, side) >= 3 {
+            let reduction = depth >= 6 ? 3 : 2
+            let nullScore = -search(cells, 1 - side, enteredMask, depth - 1 - reduction, -beta, -beta + 1, ply + 1, &context, size, false).score
+            if context.stopped { return Result(score: 0, move: -1) }
+            if nullScore >= beta { return Result(score: nullScore, move: -1) }
         }
-        guard !moves.isEmpty else { return Result(score: evaluate(cells, side, enteredMask), move: -1) }
+        var ordered = legalMoves(cells, side, enteredMask, size).map { (move: $0, score: moveOrderScore(cells, $0, side, enteredMask, size, ply, ttMove, context)) }
+        guard !ordered.isEmpty else { return Result(score: evaluate(cells, side, enteredMask), move: -1) }
+        if ordered.count > 1 {
+            for index in 1..<ordered.count {
+                let item = ordered[index]
+                var destination = index - 1
+                while destination >= 0 && ordered[destination].score < item.score {
+                    ordered[destination + 1] = ordered[destination]
+                    destination -= 1
+                }
+                ordered[destination + 1] = item
+            }
+        }
+        let moves = ordered.map(\.move)
         var best = -infinity, bestMove = moves[0]
         for move in moves {
             let next = simulate(cells, move, side, enteredMask, size)
-            let child = search(next.cells, 1 - side, next.entered, depth - 1, -beta, -alpha, ply + 1, &context, size)
-            let score = -child.score
+            let score: Int
+            if let result = terminal(next.cells, 1 - side, next.entered, depth) {
+                score = -result
+            } else {
+                score = -search(next.cells, 1 - side, next.entered, depth - 1, -beta, -alpha, ply + 1, &context, size, true).score
+            }
+            if context.stopped { return Result(score: 0, move: -1) }
             if score > best { best = score; bestMove = move }
             if score > alpha { alpha = score }
             if alpha >= beta {
@@ -274,19 +327,17 @@ struct Nov15DuelSearch {
                         context.killers[ply][1] = context.killers[ply][0]
                         context.killers[ply][0] = move
                     }
-                    let index = side * 144 + move
-                    context.history[index] = min(2_000_000, context.history[index] + depth * depth)
+                    context.history[side * 144 + move] += depth * depth
                 }
                 break
             }
-            if context.stopped { break }
         }
         let flag = best <= oldAlpha ? 2 : (best >= beta ? 1 : 0)
         context.table[hash] = Entry(depth: depth, score: best, flag: flag, move: bestMove)
         return Result(score: best, move: bestMove)
     }
 
-    static func bestMove(board: AISolver.Board, activePlayers: [Int], currentPlayer: Int, hasEntered: [Bool], level: Int, movesPlayed: Int) -> (Int, Int)? {
+    static func bestMove(board: AISolver.Board, activePlayers: [Int], currentPlayer: Int, hasEntered: [Bool], level: Int, movesPlayed: Int, openingSeed: String? = nil, strength: Int = maxStrength) -> (Int, Int)? {
         guard (2...12).contains(board.size), activePlayers.count == 2, let side = activePlayers.firstIndex(of: currentPlayer) else { return nil }
         let size = board.size
         var cells = [UInt8](repeating: 0, count: size * size)
@@ -303,7 +354,7 @@ struct Nov15DuelSearch {
         let moves = legalMoves(cells, side, enteredMask, size)
         guard let first = moves.first else { return nil }
         if terminal(cells, side, enteredMask, 0) != nil { return nil }
-        let searchParameters = parameters(level: level, movesPlayed: movesPlayed)
+        let searchParameters = capped(parameters(level: level, movesPlayed: movesPlayed), strength: strength)
         if searchParameters.randomize {
             let ranked = moves.map { ($0, quietHeuristic(cells, $0, side, enteredMask, size)) }.sorted { $0.1 > $1.1 }
             let candidates = Array(ranked.prefix(3))
@@ -311,6 +362,22 @@ struct Nov15DuelSearch {
             return (selected / size, selected % size)
         }
         if moves.count == 1 { return (first / size, first % size) }
+        // Drive's 12-move opening book (local duel only: both sides start entered
+        // with one piece in opposite corners, exactly like dots-online).
+        if let seed = openingSeed, enteredMask == 3, movesPlayed < 30 {
+            let firstSide = movesPlayed.isMultiple(of: 2) ? side : 1 - side
+            let ownMoves = side == firstSide ? (movesPlayed + 1) / 2 : movesPlayed / 2
+            if ownMoves < 12 {
+                let driveCells = cells.map { code -> UInt8 in
+                    code == 0 ? 0 : UInt8((owner(code) == 1 ? 0x80 : 0) | (Int(code) & 0x0f))
+                }
+                if let opening = DriveOpeningBook.nextOwnedMove(cells: driveCells, size: size, side: side,
+                                                                startIndex: ownMoves, seed: seed),
+                   moves.contains(opening) {
+                    return (opening / size, opening % size)
+                }
+            }
+        }
         let maxDepth = searchParameters.maxDepth
         let startTime = ProcessInfo.processInfo.systemUptime
         var context = Context(deadline: startTime + searchParameters.timeMs / 1000)
@@ -320,11 +387,11 @@ struct Nov15DuelSearch {
         for depth in 1...maxDepth {
             if ProcessInfo.processInfo.systemUptime >= context.deadline || Task.isCancelled { break }
             context.stopped = false
-            let result = search(cells, side, enteredMask, depth, -infinity, infinity, 0, &context, size)
+            let result = search(cells, side, enteredMask, depth, -infinity, infinity, 0, &context, size, true)
             if context.stopped || Task.isCancelled || result.move < 0 { break }
             best = result.move; depthCompleted = depth
             completedMoves.append(result.move); completedScores.append(result.score)
-            if abs(result.score) >= winScore - 1000 { break }
+            if result.score > 900_000 || result.score < -900_000 { break }
             let elapsedMs = (ProcessInfo.processInfo.systemUptime - startTime) * 1000
             if depth >= 6 && elapsedMs >= searchParameters.softTimeMs && elapsedMs >= searchParameters.minTimeMs && completedMoves.count >= 3 {
                 let recentMoves = completedMoves.suffix(3)

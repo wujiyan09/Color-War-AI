@@ -1186,7 +1186,8 @@ struct DualPlayerSetupView: View {
         supportedBoardSizes.min { abs($0 - size) < abs($1 - size) } ?? 6
     }
 
-    private let selectableBotTypes: [PlayerControlType] = [.human, .mathNightmare, .enhancedNightmare, .driveBot]
+    // Duel mode: human or the Drive-method Bot 3 only. Bot 1/2 stay in party mode.
+    private let selectableBotTypes: [PlayerControlType] = [.human, .driveBot]
 
     private func playerCard(title: String, type: Binding<PlayerControlType>, color: Color, icon: String) -> some View {
         Button {
@@ -1240,6 +1241,29 @@ struct DualPlayerSetupView: View {
             .padding(12)
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
 
+            VStack(spacing: 10) {
+                HStack {
+                    Text("Bot 3 难度：\(Nov15DuelSearch.strengthName(game.duelBotStrength))")
+                        .font(.subheadline.bold())
+                        .foregroundColor(.white)
+                    Spacer()
+                    Text(Nov15DuelSearch.strengthDetail(game.duelBotStrength))
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.7))
+                }
+                Slider(
+                    value: Binding<Double>(
+                        get: { Double(game.duelBotStrength) },
+                        set: { game.duelBotStrength = Int($0.rounded()) }
+                    ),
+                    in: 1...Double(Nov15DuelSearch.maxStrength),
+                    step: 1
+                )
+                .tint(Color.darkNavyBlue)
+            }
+            .padding(12)
+            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+
             HStack(spacing: 12) {
                 playerCard(title: "玩家 1", type: $playerOneType, color: .red, icon: "person.fill")
                 playerCard(title: "玩家 2", type: $playerTwoType, color: .cyan, icon: "person.fill")
@@ -1261,6 +1285,8 @@ struct DualPlayerSetupView: View {
         .onAppear {
             let supportedSize = nearestSupportedBoardSize(to: boardSize)
             if boardSize != supportedSize { boardSize = supportedSize }
+            if playerOneType.isAI && playerOneType != .driveBot { playerOneType = .driveBot }
+            if playerTwoType.isAI && playerTwoType != .driveBot { playerTwoType = .driveBot }
         }
     }
 }
@@ -2395,6 +2421,9 @@ struct StartMenuView: View {
         UserDefaults.standard.set(partyBoardSize, forKey: "CW_Party_BoardSize")
         game.isLocalDuelMode = true
         game.boardSize = duelBoardSize
+        // Old saved duel seats may still hold Bot 1/2; duel AI is Bot 3 only.
+        if duelPlayerOneType.isAI && duelPlayerOneType != .driveBot { duelPlayerOneType = .driveBot }
+        if duelPlayerTwoType.isAI && duelPlayerTwoType != .driveBot { duelPlayerTwoType = .driveBot }
         let first = duelPlayerOneType
         let second = duelPlayerTwoType
         game.playerTypes = [first, second] + Array(repeating: .disabled, count: max(0, PlayerPreset.maxPlayers - 2))

@@ -48,7 +48,7 @@ class LocalDuelSetupTests(unittest.TestCase):
         menu = section("struct StartMenuView", "private func startGame(isLocalDuel")
         self.assertIn("@State private var duelPlayerOneType: PlayerControlType = UserDefaults.standard.data(forKey: \"CW_Duel_PlayerOne\")", menu)
         self.assertIn("@State private var duelPlayerTwoType: PlayerControlType = UserDefaults.standard.data(forKey: \"CW_Duel_PlayerTwo\")", menu)
-        self.assertIn("private let selectableBotTypes: [PlayerControlType] = [.human, .mathNightmare, .enhancedNightmare, .driveBot]", TEXT)
+        self.assertIn("private let selectableBotTypes: [PlayerControlType] = [.human, .driveBot]", TEXT)
 
     def test_duel_board_size_is_limited_to_supported_steps(self):
         setup = section("struct DualPlayerSetupView", "// MARK: - 16. Tab 1: 局域网 P2P Setup View")

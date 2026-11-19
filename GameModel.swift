@@ -23,6 +23,13 @@ final class GameModel: ObservableObject {
             }
         }
     }
+    /// Duel-mode Bot 3 strength slider (1...4, 4 = full Drive hard).
+    @Published var duelBotStrength: Int = {
+        let saved = UserDefaults.standard.integer(forKey: "CW_Duel_BotStrength")
+        return (1...Nov15DuelSearch.maxStrength).contains(saved) ? saved : Nov15DuelSearch.maxStrength
+    }() {
+        didSet { UserDefaults.standard.set(duelBotStrength, forKey: "CW_Duel_BotStrength") }
+    }
     @Published var aiDifficultyLevel: AIDifficultyLevel {
         didSet {
             UserDefaults.standard.set(aiDifficultyLevel.rawValue, forKey: "CW_Saved_AIDifficultyLevel")
@@ -1155,6 +1162,7 @@ final class GameModel: ObservableObject {
                 eliminated: eliminated,
                 isLocalDuelMode: self.isLocalDuelMode && !isP2P && !isWS && activePlayerIndices.count == 2,
                 localDuelMovesPlayed: self.localDuelMoveCount,
+                duelStrength: self.duelBotStrength,
                 openingSeed: "local-\(self.currentGameSessionID.uuidString)"
             )
 
