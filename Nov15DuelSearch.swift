@@ -337,6 +337,33 @@ struct Nov15DuelSearch {
         return Result(score: best, move: bestMove)
     }
 
+    /// Applies one move with Color War's local-duel rules (same as GameModel.play):
+    /// +3 on a side's first entry, subtract-4 bursts with leftovers kept, full chain.
+    /// Returns nil for an illegal move. Used by the analyzer so it matches the duel game.
+    static func applyMove(board: [[Cell]], row: Int, column: Int, side: Int, entered: Bool) -> [[Cell]]? {
+        let size = board.count
+        guard (2...12).contains(size), side == 0 || side == 1,
+              (0..<size).contains(row), (0..<size).contains(column) else { return nil }
+        var cells = [UInt8](repeating: 0, count: size * size)
+        for r in 0..<size {
+            for c in 0..<min(size, board[r].count) {
+                let cell = board[r][c]
+                guard let owner = cell.owner, owner == 0 || owner == 1, cell.count > 0 else { continue }
+                cells[r * size + c] = encode(owner, min(15, cell.count))
+            }
+        }
+        let enteredMask = entered ? (1 << side) : 0
+        let index = row * size + column
+        guard legalMoves(cells, side, enteredMask, size).contains(index) else { return nil }
+        let next = simulate(cells, index, side, enteredMask, size).cells
+        return (0..<size).map { r in
+            (0..<size).map { c in
+                let code = next[r * size + c]
+                return code == 0 ? Cell(owner: nil, count: 0) : Cell(owner: owner(code), count: charge(code))
+            }
+        }
+    }
+
     static func bestMove(board: AISolver.Board, activePlayers: [Int], currentPlayer: Int, hasEntered: [Bool], level: Int, movesPlayed: Int, openingSeed: String? = nil, strength: Int = maxStrength) -> (Int, Int)? {
         guard (2...12).contains(board.size), activePlayers.count == 2, let side = activePlayers.firstIndex(of: currentPlayer) else { return nil }
         let size = board.size

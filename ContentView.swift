@@ -2204,29 +2204,11 @@ private struct AnalyzerPlayView: View {
     private func applyMove(row: Int, column: Int, owner: Int) -> Bool {
         guard (0..<boardSize).contains(row), (0..<boardSize).contains(column),
               owner == 0 || owner == 1 else { return false }
-        let cells = board.flatMap { row in
-            row.map { cell -> UInt8 in
-                guard let side = cell.owner else { return 0 }
-                return UInt8((side == 1 ? 0x80 : 0) | (cell.count & 0x0f))
-            }
-        }
-        // Analyzer starts with selfColor, then alternates with the opponent. Keep the
-        // individual color move counts required by Drive's terminal-state logic.
-        let firstMoves = (moveCount + 1) / 2
-        let secondMoves = moveCount / 2
-        let redMoves = selfColor == 0 ? firstMoves : secondMoves
-        let blueMoves = selfColor == 1 ? firstMoves : secondMoves
-        guard let transition = DriveBotpickEngine.applyMove(
-            cells: cells, size: boardSize, side: owner,
-            movesRed: redMoves, movesBlue: blueMoves, move: row * boardSize + column
-        ) else { return false }
-        board = (0..<boardSize).map { r in
-            (0..<boardSize).map { c in
-                let code = transition.cells[r * boardSize + c]
-                return Cell(owner: DriveBotpickEngine.decodedOwner(code),
-                            count: DriveBotpickEngine.decodedCharge(code))
-            }
-        }
+        // Same rules as the local duel game (subtract-4 bursts, leftovers stay).
+        // Both sides start with a piece on the board, exactly like the local duel.
+        guard let next = Nov15DuelSearch.applyMove(board: board, row: row, column: column,
+                                                   side: owner, entered: true) else { return false }
+        board = next
         return true
     }
 
@@ -2242,10 +2224,10 @@ private struct AnalyzerPlayView: View {
             board: board,
             hasEntered: [true, true],
             eliminated: [false, false],
-            isLocalDuelMode: true,
-            localDuelMovesPlayed: moveCount,
-            searchTimeLimitOverride: 5.0,
-            directBotpickSearch: true
+            // Same engine as Bot 3 in the duel game (Nov15DuelSearch), max strength,
+            // no opening book (isLocalDuelMode false => no seed, maxStrength).
+            isLocalDuelMode: false,
+            localDuelMovesPlayed: moveCount
         )
         aiTask = Task {
             let move = await solver.calculateBestMove()
