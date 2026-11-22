@@ -508,8 +508,19 @@ final class GameModel: ObservableObject {
             }
             self.refreshActivePlayers()
             if let firstP = packet.firstPlayerIndex {
+                // After a room resume the server replays the original startGame packet before the
+                // board snapshot. Keep the running match clock instead of restarting it at 0:00.
+                let isResumeReplay = self.isGameInPlay
+                    && (WebSocketNetworkManager.shared.lastResumeStartedAt.map { Date().timeIntervalSince($0) < 30 } ?? false)
+                let keptMatchStart = self.matchStartedAt
+                let keptMoveStart = self.currentMoveStartedAt
                 self.resetGame(chosenFirstPlayer: firstP)
                 self.beginGame()
+                WebSocketNetworkManager.shared.lastResumeStartedAt = nil
+                if isResumeReplay {
+                    self.matchStartedAt = keptMatchStart
+                    self.currentMoveStartedAt = keptMoveStart
+                }
                 self.shouldNavigateToGame = true
             }
 
