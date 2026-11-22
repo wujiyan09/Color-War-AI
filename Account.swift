@@ -1765,8 +1765,8 @@ private struct TipSheet: View {
             VStack(spacing: 16) {
                 if let image {
                     Image(uiImage: image)
-                        .resizable().interpolation(.none).scaledToFit()
-                        .frame(maxWidth: 320)
+                        .resizable().scaledToFit()
+                        .frame(maxWidth: 300)
                         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 } else {
                     Text("收款码还没放进来").foregroundStyle(.secondary)
