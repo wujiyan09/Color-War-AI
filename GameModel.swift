@@ -1140,7 +1140,7 @@ final class GameModel: ObservableObject {
                 board: board,
                 hasEntered: hasEntered,
                 eliminated: eliminated,
-                isLocalDuelMode: self.isLocalDuelMode && !isP2P && !isWS && activePlayerIndices.count == 2,
+                isLocalDuelMode: self.isLocalDuelMode && !isWS && activePlayerIndices.count == 2,
                 localDuelMovesPlayed: self.localDuelMoveCount,
                 duelStrength: self.duelBotStrength,
                 openingSeed: "local-\(self.currentGameSessionID.uuidString)"
