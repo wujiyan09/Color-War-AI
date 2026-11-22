@@ -51,7 +51,7 @@ class LocalDuelSetupTests(unittest.TestCase):
         self.assertIn("private let selectableBotTypes: [PlayerControlType] = [.human, .driveBot]", TEXT)
 
     def test_duel_board_size_is_limited_to_supported_steps(self):
-        setup = section("struct DualPlayerSetupView", "// MARK: - 16. Tab 1: 局域网 P2P Setup View")
+        setup = section("struct DualPlayerSetupView", "// MARK: - 17. Tab 2: 远程 WebSocket Setup View")
         self.assertIn("private let supportedBoardSizes = [6, 9, 12]", setup)
         self.assertIn("in: 6...12", setup)
         self.assertIn("step: 3", setup)

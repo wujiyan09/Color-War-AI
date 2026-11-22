@@ -2,7 +2,6 @@ import SwiftUI
 import Combine
 import UIKit
 import QuartzCore
-import MultipeerConnectivity
 import PhotosUI
 
 // MARK: - 1. 触觉反馈引擎
@@ -149,16 +148,11 @@ struct FlyingOrb: Identifiable, Sendable {
     var arrived: Bool = false
 }
 
-struct DiscoveredDevice: Identifiable, Hashable {
-    let id: MCPeerID
-    var displayName: String { id.displayName }
-}
-
 struct IdentifiableInt: Identifiable {
     let id: Int
 }
 
-// MARK: - 3. 局域网 P2P 网络管理器 (MultipeerConnectivity)
+// MARK: - 3. 联机消息格式与玩家昵称
 
 enum P2PAction: String, Codable {
     case hostConfig
@@ -210,219 +204,21 @@ struct P2PPacket: Codable {
     }
 }
 
-final class P2PNetworkManager: NSObject, ObservableObject, @unchecked Sendable {
-    static let shared = P2PNetworkManager()
-    
-    private let serviceType = "colorwar-p2p"
-    private var myPeerID: MCPeerID!
-    private var serviceAdvertiser: MCNearbyServiceAdvertiser?
-    private var serviceBrowser: MCNearbyServiceBrowser?
-    private var mcSession: MCSession?
-    
-    let packetSubject = PassthroughSubject<P2PPacket, Never>()
-    let disconnectSubject = PassthroughSubject<String, Never>()
-    
+// 玩家昵称（原先存放在已移除的局域网 P2P 管理器中；沿用同一个 UserDefaults key）
+final class PlayerProfile: ObservableObject {
+    static let shared = PlayerProfile()
+
     @Published var myNickname: String {
         didSet {
             guard !myNickname.isEmpty else { return }
             UserDefaults.standard.set(myNickname, forKey: "CW_Saved_MyNickname")
-            if !isConnected && !isConnecting && !WebSocketNetworkManager.shared.isConnected {
-                rebuildPeerID()
-            }
         }
     }
-    
-    @Published var hostDeviceName: String = ""
-    @Published var discoveredDevices: [DiscoveredDevice] = []
-    @Published var connectedPeers: [String] = []
-    @Published var isHost: Bool = false
-    @Published var isConnected: Bool = false
-    @Published var isConnecting: Bool = false
-    @Published var isSearchingTimeout: Bool = false
-    
-    private var sequenceCounter: UInt64 = 0
-    private var searchTimer: Timer?
-    private var heartbeatTimer: Timer?
-    private var lastAckTime: Date = Date()
-    
-    override init() {
-        let savedName = UserDefaults.standard.string(forKey: "CW_Saved_MyNickname")
-        let nameToUse = (savedName == nil || savedName!.isEmpty) ? "玩家\(Int.random(in: 100...999))" : savedName!
-        self.myNickname = nameToUse
-        super.init()
-        rebuildPeerID()
-    }
-    
-    @MainActor
-    func getNextSequenceID() -> UInt64 {
-        sequenceCounter += 1
-        return sequenceCounter
-    }
-    
-    private func rebuildPeerID() {
-        let name = myNickname.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.myPeerID = MCPeerID(displayName: name.isEmpty ? "匿名玩家" : String(name.prefix(63)))
-        setupMCSession()
-    }
-    
-    private func setupMCSession() {
-        mcSession?.disconnect()
-        mcSession = MCSession(peer: myPeerID, securityIdentity: nil, encryptionPreference: .none)
-        mcSession?.delegate = self
-    }
-    
-    @MainActor
-    func startLocalHosting() {
-        rebuildPeerID()
-        isHost = true
-        hostDeviceName = myPeerID.displayName
-        sequenceCounter = 0
-        setupMCSession()
-        
-        serviceAdvertiser = MCNearbyServiceAdvertiser(peer: myPeerID, discoveryInfo: nil, serviceType: serviceType)
-        serviceAdvertiser?.delegate = self
-        serviceAdvertiser?.startAdvertisingPeer()
-        startHeartbeat()
-    }
-    
-    @MainActor
-    func startLocalBrowsing() {
-        rebuildPeerID()
-        isHost = false
-        sequenceCounter = 0
-        discoveredDevices.removeAll()
-        isSearchingTimeout = false
-        isConnecting = false
-        setupMCSession()
-        
-        serviceBrowser = MCNearbyServiceBrowser(peer: myPeerID, serviceType: serviceType)
-        serviceBrowser?.delegate = self
-        serviceBrowser?.startBrowsingForPeers()
-        
-        searchTimer?.invalidate()
-        searchTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) { [weak self] _ in
-            Task { @MainActor in
-                if let self = self, self.discoveredDevices.isEmpty && !self.isConnected {
-                    self.isSearchingTimeout = true
-                }
-            }
-        }
-    }
-    
-    @MainActor
-    func connectToDevice(_ device: DiscoveredDevice) {
-        guard let browser = serviceBrowser, let session = mcSession else { return }
-        isConnecting = true
-        hostDeviceName = device.displayName
-        browser.invitePeer(device.id, to: session, withContext: nil, timeout: 10)
-    }
-    
-    @MainActor
-    func stopP2P() {
-        searchTimer?.invalidate()
-        searchTimer = nil
-        heartbeatTimer?.invalidate()
-        heartbeatTimer = nil
-        
-        serviceAdvertiser?.stopAdvertisingPeer()
-        serviceAdvertiser = nil
-        serviceBrowser?.stopBrowsingForPeers()
-        serviceBrowser = nil
-        
-        mcSession?.disconnect()
-        mcSession = nil
-        
-        isConnected = false
-        isConnecting = false
-        isSearchingTimeout = false
-        connectedPeers.removeAll()
-        discoveredDevices.removeAll()
-        hostDeviceName = ""
-    }
-    
-    private func startHeartbeat() {
-        heartbeatTimer?.invalidate()
-        lastAckTime = Date()
-        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            Task { @MainActor in
-                guard self.isConnected else { return }
-                if Date().timeIntervalSince(self.lastAckTime) > 10.0 {
-                    self.stopP2P()
-                } else {
-                    let packet = P2PPacket(sequenceID: self.getNextSequenceID(), action: .ping, senderID: self.myNickname)
-                    self.sendPacket(packet)
-                }
-            }
-        }
-    }
-    
-    @MainActor
-    func sendPacket(_ packet: P2PPacket) {
-        guard let session = mcSession, !session.connectedPeers.isEmpty else { return }
-        guard let data = try? JSONEncoder().encode(packet) else { return }
-        try? session.send(data, toPeers: session.connectedPeers, with: .reliable)
-    }
-}
 
-extension P2PNetworkManager: MCSessionDelegate, MCNearbyServiceAdvertiserDelegate, MCNearbyServiceBrowserDelegate {
-    nonisolated func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
-        Task { @MainActor [weak self] in
-            guard let self = self else { return }
-            self.connectedPeers = session.connectedPeers.map { $0.displayName }
-            self.isConnected = !session.connectedPeers.isEmpty
-            
-            if state == .notConnected {
-                self.disconnectSubject.send(peerID.displayName)
-            } else if state == .connected {
-                self.isConnecting = false
-                self.startHeartbeat()
-            }
-        }
+    private init() {
+        let savedName = UserDefaults.standard.string(forKey: "CW_Saved_MyNickname")
+        self.myNickname = (savedName == nil || savedName!.isEmpty) ? "玩家\(Int.random(in: 100...999))" : savedName!
     }
-    
-    nonisolated func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
-        if let packet = try? JSONDecoder().decode(P2PPacket.self, from: data) {
-            guard packet.protocolVersion == 2 else { return }
-            
-            Task { @MainActor [weak self] in
-                guard let self = self else { return }
-                self.lastAckTime = Date()
-                if packet.action == .ping {
-                    let ack = P2PPacket(sequenceID: self.getNextSequenceID(), action: .ack, senderID: self.myNickname)
-                    self.sendPacket(ack)
-                }
-                self.packetSubject.send(packet)
-            }
-        }
-    }
-    
-    nonisolated func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didReceiveInvitationFromPeer peerID: MCPeerID, withContext context: Data?, invitationHandler: @escaping (Bool, MCSession?) -> Void) {
-        Task { @MainActor in
-            invitationHandler(true, self.mcSession)
-        }
-    }
-    
-    nonisolated func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String : String]?) {
-        Task { @MainActor [weak self] in
-            guard let self = self else { return }
-            let device = DiscoveredDevice(id: peerID)
-            if !self.discoveredDevices.contains(where: { $0.id == peerID }) {
-                self.discoveredDevices.append(device)
-            }
-        }
-    }
-    
-    nonisolated func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
-        Task { @MainActor [weak self] in
-            guard let self = self else { return }
-            self.discoveredDevices.removeAll(where: { $0.id == peerID })
-        }
-    }
-    
-    nonisolated func session(_ session: MCSession, didReceive stream: InputStream, withName streamName: String, fromPeer peerID: MCPeerID) {}
-    nonisolated func session(_ session: MCSession, didStartReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, with progress: Progress) {}
-    nonisolated func session(_ session: MCSession, didFinishReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, at localURL: URL?, withError error: Error?) {}
 }
 
 // MARK: - 4. 远程 WebSocket 公网中继网络管理器
@@ -1291,110 +1087,12 @@ struct DualPlayerSetupView: View {
     }
 }
 
-// MARK: - 16. Tab 1: 局域网 P2P Setup View
-
-struct LocalDeviceBrowserInlineView: View {
-    @ObservedObject var p2pManager = P2PNetworkManager.shared
-    let onSelectDevice: (DiscoveredDevice) -> Void
-    let onCancel: () -> Void
-    
-    var body: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Text("🌐 附近的 Color War 房间列表")
-                    .font(.subheadline)
-                    .bold()
-                    .foregroundColor(.white)
-                Spacer()
-                Button("取消搜寻", action: onCancel)
-                    .font(.caption)
-                    .foregroundColor(.white.opacity(0.8))
-            }
-            
-            if p2pManager.isConnecting {
-                VStack(spacing: 10) {
-                    ProgressView()
-                        .scaleEffect(1.1)
-                        .tint(Color.darkNavyBlue)
-                    Text("正在加入 \(p2pManager.hostDeviceName) 的房间...")
-                        .font(.caption)
-                        .foregroundColor(.white)
-                }
-                .padding()
-            } else if p2pManager.isSearchingTimeout && p2pManager.discoveredDevices.isEmpty {
-                VStack(spacing: 10) {
-                    Image(systemName: "wifi.exclamationmark")
-                        .font(.title2)
-                        .foregroundColor(.yellow)
-                    Text("未搜寻到附近的 Color War 房间")
-                        .font(.caption)
-                        .foregroundColor(.white)
-                    
-                    Button(action: {
-                        p2pManager.startLocalBrowsing()
-                    }) {
-                        Text("重新搜寻")
-                            .font(.caption)
-                            .bold()
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 6)
-                            .contentShape(Capsule())
-                            .glassEffect(.regular.interactive(), in: .capsule)
-                    }
-                    .buttonStyle(.plain)
-                }
-                .padding()
-            } else {
-                if p2pManager.discoveredDevices.isEmpty {
-                    HStack(spacing: 10) {
-                        ProgressView()
-                            .scaleEffect(0.9)
-                            .tint(Color.darkNavyBlue)
-                        Text("正在扫描局域网房间信号...")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                    }
-                    .padding()
-                } else {
-                    ScrollView(.vertical, showsIndicators: true) {
-                        VStack(spacing: 8) {
-                            ForEach(p2pManager.discoveredDevices) { device in
-                                Button(action: { onSelectDevice(device) }) {
-                                    HStack {
-                                        Image(systemName: "bonjour")
-                                            .foregroundColor(.green)
-                                        Text(device.displayName)
-                                            .bold()
-                                            .foregroundColor(.white)
-                                        Spacer()
-                                        Text("点击加入")
-                                            .font(.caption)
-                                            .foregroundColor(.cyan)
-                                    }
-                                    .padding(10)
-                                    .contentShape(Rectangle())
-                                    .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius - 6))
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                    }
-                    .frame(maxHeight: 180)
-                }
-            }
-        }
-        .padding()
-        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
-    }
-}
-
 // MARK: - 17. Tab 2: 远程 WebSocket Setup View
 
 struct RemoteWebSocketSetupView: View {
     @ObservedObject var game: GameModel
     @ObservedObject var wsManager = WebSocketNetworkManager.shared
-    @ObservedObject var p2pManager = P2PNetworkManager.shared
+    @ObservedObject var profile = PlayerProfile.shared
     let onStartGame: () -> Void
 
     @State private var inputRoomCode: String = ""
@@ -1407,16 +1105,16 @@ struct RemoteWebSocketSetupView: View {
                         .font(.subheadline)
                         .bold()
                         .foregroundColor(.white)
-                    TextField("输入昵称", text: $p2pManager.myNickname)
+                    TextField("输入昵称", text: $profile.myNickname)
                         .textFieldStyle(.roundedBorder)
                         .textInputAutocapitalization(.never)
                         .frame(maxWidth: 180)
                         .submitLabel(.done)
-                        .onSubmit { game.renameMyPlayer(to: p2pManager.myNickname) }
+                        .onSubmit { game.renameMyPlayer(to: profile.myNickname) }
                     Button("更新昵称") {
-                        game.renameMyPlayer(to: p2pManager.myNickname)
+                        game.renameMyPlayer(to: profile.myNickname)
                     }
-                    .disabled(p2pManager.myNickname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(profile.myNickname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
                 .padding(10)
                 .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
@@ -1456,7 +1154,7 @@ struct RemoteWebSocketSetupView: View {
                         game.prepareLobbyForHosting()
                         game.playerTypes[1] = .p2pNetwork
                         game.activeOnlineMode = .remoteWS
-                        wsManager.connectAndJoinRoom(roomCode: randomCode, isHost: true, nickname: P2PNetworkManager.shared.myNickname)
+                        wsManager.connectAndJoinRoom(roomCode: randomCode, isHost: true, nickname: PlayerProfile.shared.myNickname)
                     }) {
                         Text("创建联机房间 (担任房主)")
                             .bold()
@@ -1480,7 +1178,7 @@ struct RemoteWebSocketSetupView: View {
 
                         Button(action: {
                             game.activeOnlineMode = .remoteWS
-                            wsManager.connectAndJoinRoom(roomCode: inputRoomCode, isHost: false, nickname: P2PNetworkManager.shared.myNickname)
+                            wsManager.connectAndJoinRoom(roomCode: inputRoomCode, isHost: false, nickname: PlayerProfile.shared.myNickname)
                         }) {
                             Text("加入房间")
                                 .bold()
@@ -1506,7 +1204,7 @@ struct RemoteWebSocketSetupView: View {
 
 struct RoomLobbyView: View {
     @ObservedObject var game: GameModel
-    @ObservedObject var p2pManager = P2PNetworkManager.shared
+    @ObservedObject var profile = PlayerProfile.shared
     @ObservedObject var wsManager = WebSocketNetworkManager.shared
     
     let onExitLobby: () -> Void
@@ -1515,7 +1213,7 @@ struct RoomLobbyView: View {
     @State private var selectedPlayerForEmoji: IdentifiableInt? = nil
     
     var isHost: Bool {
-        p2pManager.isHost || wsManager.isHost
+        wsManager.isHost
     }
 
     
@@ -1534,15 +1232,15 @@ struct RoomLobbyView: View {
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
 
             HStack(spacing: 8) {
-                TextField("我的玩家昵称", text: $p2pManager.myNickname)
+                TextField("我的玩家昵称", text: $profile.myNickname)
                     .textFieldStyle(.roundedBorder)
                     .textInputAutocapitalization(.never)
                     .submitLabel(.done)
-                    .onSubmit { game.renameMyPlayer(to: p2pManager.myNickname) }
+                    .onSubmit { game.renameMyPlayer(to: profile.myNickname) }
                 Button("更新昵称") {
-                    game.renameMyPlayer(to: p2pManager.myNickname)
+                    game.renameMyPlayer(to: profile.myNickname)
                 }
-                .disabled(p2pManager.myNickname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(profile.myNickname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .padding(.horizontal, 10)
 
@@ -1723,117 +1421,6 @@ enum ActiveOnlineMode {
     case localSearching
     case localJoined
     case remoteWS
-}
-
-struct OnlineGameSetupView: View {
-    @ObservedObject var game: GameModel
-    @ObservedObject var p2pManager = P2PNetworkManager.shared
-    let onStartGame: () -> Void
-    
-    @State private var p2pConnectionSubscription: AnyCancellable? = nil
-    
-    var body: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Text("我的玩家昵称:")
-                    .font(.subheadline)
-                    .bold()
-                    .foregroundColor(.white)
-                
-                TextField("输入昵称", text: $p2pManager.myNickname)
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(p2pManager.isConnecting)
-                    .submitLabel(.done)
-                    .onSubmit { game.renameMyPlayer(to: p2pManager.myNickname) }
-                    .frame(maxWidth: 180)
-                Button("更新昵称") { game.renameMyPlayer(to: p2pManager.myNickname) }
-                    .disabled(p2pManager.isConnecting || p2pManager.myNickname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-            .padding(10)
-            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
-            
-            if game.activeOnlineMode == .localHost || game.activeOnlineMode == .localJoined {
-                RoomLobbyView(
-                    game: game,
-                    onExitLobby: {
-                        game.activeOnlineMode = .none
-                        p2pManager.stopP2P()
-                        p2pConnectionSubscription?.cancel()
-                        p2pConnectionSubscription = nil
-                    },
-                    onStartGame: onStartGame
-                )
-            } else {
-                VStack(spacing: 12) {
-                    HStack {
-                        Text("🌐 本地局域网 P2P 联机")
-                            .font(.headline)
-                            .foregroundColor(.white)
-                        Spacer()
-                    }
-                    
-                    HStack(spacing: 12) {
-                        Button(action: {
-                            p2pManager.startLocalHosting()
-                            game.prepareLobbyForHosting()
-                            game.activeOnlineMode = .localHost
-                        }) {
-                            Text("创建房间")
-                                .bold()
-                                .foregroundColor(.white)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 12)
-                                .contentShape(Capsule())
-                                .glassEffect(.regular.tint(.darkNavyBlue).interactive(), in: .capsule)
-                        }
-                        .buttonStyle(.plain)
-                        
-                        Button(action: {
-                            p2pManager.startLocalBrowsing()
-                            game.activeOnlineMode = .localSearching
-                        }) {
-                            Text("搜索加入")
-                                .bold()
-                                .foregroundColor(.white)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 12)
-                                .contentShape(Capsule())
-                                .glassEffect(.regular.interactive(), in: .capsule)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    
-                    if game.activeOnlineMode == .localSearching {
-                        LocalDeviceBrowserInlineView(
-                            onSelectDevice: { device in
-                                p2pManager.connectToDevice(device)
-                                p2pConnectionSubscription?.cancel()
-                                p2pConnectionSubscription = p2pManager.$isConnected
-                                    .filter { $0 }
-                                    .first()
-                                    .receive(on: DispatchQueue.main)
-                                    .sink { _ in
-                                        game.playerNames[1] = p2pManager.myNickname
-                                        game.myPlayerIndex = 1
-                                        game.activeOnlineMode = .localJoined
-                                        let syncPacket = P2PPacket(sequenceID: p2pManager.getNextSequenceID(), action: .syncRequest, senderID: p2pManager.myNickname)
-                                        p2pManager.sendPacket(syncPacket)
-                                    }
-                            },
-                            onCancel: {
-                                p2pManager.stopP2P()
-                                p2pConnectionSubscription?.cancel()
-                                p2pConnectionSubscription = nil
-                                game.activeOnlineMode = .none
-                            }
-                        )
-                    }
-                }
-                .padding()
-                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
-            }
-        }
-    }
 }
 
 // MARK: - 20. 主菜单与原生标签栏
@@ -3040,19 +2627,19 @@ struct GamePlayView: View {
 
 struct PlayerTakeoverSheet: View {
     @ObservedObject var game: GameModel
-    @ObservedObject var p2pManager = P2PNetworkManager.shared
+    @ObservedObject var profile = PlayerProfile.shared
     @ObservedObject var wsManager = WebSocketNetworkManager.shared
     @Environment(\.dismiss) private var dismiss
     @State private var showSavedToast: Bool = false
     var body: some View {
         NavigationStack {
             List {
-                if p2pManager.isConnected || wsManager.isConnected {
+                if wsManager.isConnected {
                     Section(header: Text("我的联机昵称")) {
                         HStack {
-                            TextField("输入昵称", text: $p2pManager.myNickname)
-                            Button("更新") { game.renameMyPlayer(to: p2pManager.myNickname) }
-                                .disabled(p2pManager.myNickname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            TextField("输入昵称", text: $profile.myNickname)
+                            Button("更新") { game.renameMyPlayer(to: profile.myNickname) }
+                                .disabled(profile.myNickname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         }
                     }
                 }

@@ -93,9 +93,7 @@ final class GameModel: ObservableObject {
     private var onlineSnapshotRetryWorkItem: DispatchWorkItem? = nil
     private var onlineSnapshotRetryCount = 0
 
-    private var p2pCancellable: AnyCancellable? = nil
     private var wsCancellable: AnyCancellable? = nil
-    private var disconnectCancellable: AnyCancellable? = nil
     private var aiTask: Task<Void, Never>? = nil
     private var saveWorkItem: DispatchWorkItem? = nil
     private var isRestoringArchive = false
@@ -127,7 +125,7 @@ final class GameModel: ObservableObject {
 
     func prepareLobbyForHosting() {
         self.playerTypes = [.human, .disabled, .disabled, .disabled, .disabled, .disabled, .disabled, .disabled]
-        self.playerNames[0] = P2PNetworkManager.shared.myNickname
+        self.playerNames[0] = PlayerProfile.shared.myNickname
         self.myPlayerIndex = 0
         self.refreshActivePlayers()
     }
@@ -149,7 +147,7 @@ final class GameModel: ObservableObject {
     }
 
     var isOnlineMultiplayer: Bool {
-        P2PNetworkManager.shared.isConnected || WebSocketNetworkManager.shared.isConnected
+        WebSocketNetworkManager.shared.isConnected
     }
 
     func validSelectableTypes(forPlayerIndex idx: Int, isInLobby: Bool = false) -> [PlayerControlType] {
@@ -281,7 +279,6 @@ final class GameModel: ObservableObject {
         self.activePlayerIndices = self.playerTypes.enumerated().compactMap { $1 != .disabled ? $0 : nil }
         self.playableCells = []
 
-        setupP2PListener()
         setupWebSocketListener()
         resetGame()
     }
@@ -357,38 +354,6 @@ final class GameModel: ObservableObject {
         }
     }
 
-    private func setupP2PListener() {
-        p2pCancellable?.cancel()
-        p2pCancellable = P2PNetworkManager.shared.packetSubject
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] packet in
-                self?.handleIncomingPacket(packet)
-            }
-
-        disconnectCancellable?.cancel()
-        disconnectCancellable = P2PNetworkManager.shared.disconnectSubject
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] disconnectedPeerName in
-                guard let self = self else { return }
-                if P2PNetworkManager.shared.isHost {
-                    for i in 0..<PlayerPreset.maxPlayers {
-                        if self.playerNames[safe: i] == disconnectedPeerName && self.playerTypes[safe: i] == .p2pNetwork {
-                            self.updatePlayerType(at: i, to: .mathNightmare, forceInternal: true)
-                            self.broadcastFullStateSnapshot()
-                            if self.currentPlayer == i && !self.isProcessingCascade {
-                                self.checkAndRunAITurn()
-                            }
-                        }
-                    }
-                } else {
-                    if disconnectedPeerName == P2PNetworkManager.shared.hostDeviceName {
-                        self.showDisconnectedAlert = true
-                        self.exitToMenu()
-                    }
-                }
-            }
-    }
-
     private func setupWebSocketListener() {
         wsCancellable?.cancel()
         wsCancellable = WebSocketNetworkManager.shared.packetSubject
@@ -446,7 +411,6 @@ final class GameModel: ObservableObject {
             if let seat = packet.playerIndex, seat >= 0, seat < self.playerNames.count,
                let nickname = packet.nickname?.trimmingCharacters(in: .whitespacesAndNewlines), !nickname.isEmpty {
                 self.playerNames[seat] = String(nickname.prefix(32))
-                if P2PNetworkManager.shared.isHost { self.syncRoomConfigToPeers() }
             }
 
         case .playerLeft:
@@ -480,7 +444,7 @@ final class GameModel: ObservableObject {
             }
 
         case .syncRequest:
-            if (P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost) && !self.isProcessingCascade {
+            if (WebSocketNetworkManager.shared.isHost) && !self.isProcessingCascade {
                 self.broadcastFullStateSnapshot()
             }
 
@@ -550,7 +514,7 @@ final class GameModel: ObservableObject {
     func renameMyPlayer(to proposedName: String) {
         let name = String(proposedName.trimmingCharacters(in: .whitespacesAndNewlines).prefix(32))
         guard !name.isEmpty else { return }
-        P2PNetworkManager.shared.myNickname = name
+        PlayerProfile.shared.myNickname = name
         let seat = WebSocketNetworkManager.shared.isConnected
             ? WebSocketNetworkManager.shared.playerIndex
             : myPlayerIndex
@@ -562,18 +526,12 @@ final class GameModel: ObservableObject {
             updateLocalPlayerName(at: seat, to: name)
         }
 
-        if P2PNetworkManager.shared.isConnected || WebSocketNetworkManager.shared.isConnected {
-            let sequence = WebSocketNetworkManager.shared.isConnected
-                ? WebSocketNetworkManager.shared.getNextSequenceID()
-                : P2PNetworkManager.shared.getNextSequenceID()
+        if WebSocketNetworkManager.shared.isConnected {
+            let sequence = WebSocketNetworkManager.shared.getNextSequenceID()
             var packet = P2PPacket(sequenceID: sequence, action: .renamePlayer, senderID: name)
             packet.playerIndex = seat
             packet.nickname = name
-            if P2PNetworkManager.shared.isConnected {
-                P2PNetworkManager.shared.sendPacket(packet)
-            } else {
-                WebSocketNetworkManager.shared.sendPacket(packet)
-            }
+            WebSocketNetworkManager.shared.sendPacket(packet)
         }
     }
 
@@ -594,7 +552,7 @@ final class GameModel: ObservableObject {
             var packet = P2PPacket(
                 sequenceID: WebSocketNetworkManager.shared.getNextSequenceID(),
                 action: .syncRequest,
-                senderID: P2PNetworkManager.shared.myNickname
+                senderID: PlayerProfile.shared.myNickname
             )
             packet.roomCode = WebSocketNetworkManager.shared.currentRoomCode
             WebSocketNetworkManager.shared.sendPacket(packet)
@@ -638,18 +596,18 @@ final class GameModel: ObservableObject {
         self.refreshActivePlayers()
         self.recalculateOrbCounts()
         self.currentPlayer = turnP
-        if P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost {
+        if WebSocketNetworkManager.shared.isHost {
             self.checkAndRunAITurn()
         }
     }
 
     func syncRoomConfigToPeers() {
-        let isHost = P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost
-        let isConn = P2PNetworkManager.shared.isConnected || WebSocketNetworkManager.shared.isConnected
+        let isHost = WebSocketNetworkManager.shared.isHost
+        let isConn = WebSocketNetworkManager.shared.isConnected
         guard isHost && isConn else { return }
 
-        let seq = P2PNetworkManager.shared.isConnected ? P2PNetworkManager.shared.getNextSequenceID() : UInt64.random(in: 1...999999)
-        var packet = P2PPacket(sequenceID: seq, action: .hostConfig, senderID: P2PNetworkManager.shared.myNickname)
+        let seq = UInt64.random(in: 1...999999)
+        var packet = P2PPacket(sequenceID: seq, action: .hostConfig, senderID: PlayerProfile.shared.myNickname)
         packet.boardSize = boardSize
         packet.isRandomFirstPlayer = isRandomFirstPlayer
         packet.playerNames = playerNames
@@ -658,16 +616,14 @@ final class GameModel: ObservableObject {
         packet.emojis = emojis
         packet.aiLevelRaw = aiDifficultyLevel.rawValue
 
-        if P2PNetworkManager.shared.isConnected {
-            P2PNetworkManager.shared.sendPacket(packet)
-        } else if WebSocketNetworkManager.shared.isConnected {
+        if WebSocketNetworkManager.shared.isConnected {
             WebSocketNetworkManager.shared.sendPacket(packet)
         }
     }
 
     private func broadcastFullStateSnapshot() {
-        let isHost = P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost
-        let isConn = P2PNetworkManager.shared.isConnected || WebSocketNetworkManager.shared.isConnected
+        let isHost = WebSocketNetworkManager.shared.isHost
+        let isConn = WebSocketNetworkManager.shared.isConnected
         guard isHost && isConn else { return }
 
         var compactList = [CompactCellSnapshot]()
@@ -680,8 +636,8 @@ final class GameModel: ObservableObject {
             }
         }
 
-        let seq = P2PNetworkManager.shared.isConnected ? P2PNetworkManager.shared.getNextSequenceID() : UInt64.random(in: 1...999999)
-        var packet = P2PPacket(sequenceID: seq, action: .stateSnapshot, senderID: P2PNetworkManager.shared.myNickname)
+        let seq = UInt64.random(in: 1...999999)
+        var packet = P2PPacket(sequenceID: seq, action: .stateSnapshot, senderID: PlayerProfile.shared.myNickname)
         packet.playerNames = playerNames
         packet.playerTypes = playerTypes
         packet.compactBoardSnapshot = compactList
@@ -689,9 +645,7 @@ final class GameModel: ObservableObject {
         packet.hasEnteredSnapshot = hasEntered
         packet.eliminatedSnapshot = eliminated
 
-        if P2PNetworkManager.shared.isConnected {
-            P2PNetworkManager.shared.sendPacket(packet)
-        } else if WebSocketNetworkManager.shared.isConnected {
+        if WebSocketNetworkManager.shared.isConnected {
             WebSocketNetworkManager.shared.sendPacket(packet)
         }
     }
@@ -781,16 +735,14 @@ final class GameModel: ObservableObject {
         }
         recalculateOrbCounts()
 
-        let isHost = P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost
-        let isConn = P2PNetworkManager.shared.isConnected || WebSocketNetworkManager.shared.isConnected
+        let isHost = WebSocketNetworkManager.shared.isHost
+        let isConn = WebSocketNetworkManager.shared.isConnected
         if isHost && isConn {
-            let seq = P2PNetworkManager.shared.isConnected ? P2PNetworkManager.shared.getNextSequenceID() : UInt64.random(in: 1...999999)
-            var startPacket = P2PPacket(sequenceID: seq, action: .startGame, senderID: P2PNetworkManager.shared.myNickname)
+            let seq = UInt64.random(in: 1...999999)
+            var startPacket = P2PPacket(sequenceID: seq, action: .startGame, senderID: PlayerProfile.shared.myNickname)
             startPacket.firstPlayerIndex = currentPlayer
             startPacket.boardSize = boardSize
-            if P2PNetworkManager.shared.isConnected {
-                P2PNetworkManager.shared.sendPacket(startPacket)
-            } else if WebSocketNetworkManager.shared.isConnected {
+            if WebSocketNetworkManager.shared.isConnected {
                 WebSocketNetworkManager.shared.sendPacket(startPacket)
             }
         }
@@ -824,7 +776,6 @@ final class GameModel: ObservableObject {
         shouldNavigateToGame = false
         winnerIndex = nil
         activeOnlineMode = .none
-        P2PNetworkManager.shared.stopP2P()
         WebSocketNetworkManager.shared.disconnect()
     }
 
@@ -887,22 +838,20 @@ final class GameModel: ObservableObject {
         let player = currentPlayer
         // Board taps are human input; they must never impersonate the AI during its turn.
         guard playerTypes[player].isAI == isAIMove else { return }
-        let isConn = P2PNetworkManager.shared.isConnected || WebSocketNetworkManager.shared.isConnected
-        let isHost = P2PNetworkManager.shared.isHost || WebSocketNetworkManager.shared.isHost
+        let isConn = WebSocketNetworkManager.shared.isConnected
+        let isHost = WebSocketNetworkManager.shared.isHost
 
         if isConn {
             let isMyTurnToControl = (playerTypes[player] == .human && myPlayerIndex == player) || (isHost && playerTypes[player].isAI)
             guard isMyTurnToControl else { return }
 
-            let seq = P2PNetworkManager.shared.isConnected ? P2PNetworkManager.shared.getNextSequenceID() : UInt64.random(in: 1...999999)
-            var packet = P2PPacket(sequenceID: seq, action: .playerMove, senderID: P2PNetworkManager.shared.myNickname)
+            let seq = UInt64.random(in: 1...999999)
+            var packet = P2PPacket(sequenceID: seq, action: .playerMove, senderID: PlayerProfile.shared.myNickname)
             packet.row = row
             packet.col = column
             packet.playerIndex = player
 
-            if P2PNetworkManager.shared.isConnected {
-                P2PNetworkManager.shared.sendPacket(packet)
-            } else if WebSocketNetworkManager.shared.isConnected {
+            if WebSocketNetworkManager.shared.isConnected {
                 WebSocketNetworkManager.shared.sendPacket(packet)
                 if !WebSocketNetworkManager.shared.isHost { beginOnlineSnapshotRecovery() }
             }
@@ -1125,9 +1074,8 @@ final class GameModel: ObservableObject {
 
         guard isGameInPlay else { return }
 
-        let isP2P = P2PNetworkManager.shared.isConnected
         let isWS = WebSocketNetworkManager.shared.isConnected
-        if (isP2P && !P2PNetworkManager.shared.isHost) || (isWS && !WebSocketNetworkManager.shared.isHost) {
+        if isWS && !WebSocketNetworkManager.shared.isHost {
             return
         }
 
