@@ -65,7 +65,7 @@ struct Nov15DuelSearch {
         (300, 80, 4), (1000, 300, 10), (2500, 700, 20), (5000, 1200, 32)
     ]
     static func strengthName(_ strength: Int) -> String {
-        ["简单", "中等", "困难", "Drive 原版"][max(1, min(maxStrength, strength)) - 1]
+        ["简单", "中等", "困难", "困难+"][max(1, min(maxStrength, strength)) - 1]
     }
     static func strengthDetail(_ strength: Int) -> String {
         let cap = strengthCaps[max(1, min(maxStrength, strength)) - 1]

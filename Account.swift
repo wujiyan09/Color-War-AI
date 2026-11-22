@@ -70,7 +70,7 @@ struct MatchRecord: Codable, Identifiable, Equatable {
 
     var summary: String {
         var parts = ["\(modeText)", "\(players)人", "\(boardSize)×\(boardSize)"]
-        if let aiLabel, !aiLabel.isEmpty { parts.append(aiLabel) }
+        if let aiLabel, !aiLabel.isEmpty { parts.append(displayAILabel(aiLabel)) }
         parts.append("\(moves)步")
         return parts.joined(separator: " · ")
     }
@@ -166,6 +166,11 @@ enum LeaderboardPeriod: String, CaseIterable, Identifiable {
         case .year: return "年榜"
         }
     }
+}
+
+/// 只改显示：Bot 3 强度 4（原 Drive 原版）显示为“困难+”，存储的 aiKey/aiLabel 不变
+func displayAILabel(_ label: String) -> String {
+    label.replacingOccurrences(of: "Bot 3 · 强度 4", with: "Bot 3 · 困难+")
 }
 
 // MARK: - 账号：网络请求
@@ -1506,7 +1511,7 @@ private struct LeaderboardControls: View {
                 HStack(spacing: 8) {
                     ForEach(levels) { level in
                         Button { aiKey = level.aiKey; boardSize = nil } label: {
-                            Text(level.aiLabel ?? level.aiKey)
+                            Text(displayAILabel(level.aiLabel ?? level.aiKey))
                                 .font(.caption.bold())
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 10).padding(.vertical, 6)
@@ -1825,8 +1830,13 @@ private struct TipSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     private var image: UIImage? {
-        guard let url = Bundle.module.url(forResource: "wechat-pay", withExtension: "png") else { return nil }
-        return UIImage(contentsOfFile: url.path)
+        // 不用 Bundle.module：资源包没打进 IPA 时它会直接 fatalError 闪退。手动找，找不到就显示提示。
+        if let url = Bundle.main.url(forResource: "wechat-pay", withExtension: "png") { return UIImage(contentsOfFile: url.path) }
+        let bundles = (try? FileManager.default.contentsOfDirectory(at: Bundle.main.bundleURL, includingPropertiesForKeys: nil)) ?? []
+        for dir in bundles where dir.pathExtension == "bundle" {
+            if let url = Bundle(url: dir)?.url(forResource: "wechat-pay", withExtension: "png") { return UIImage(contentsOfFile: url.path) }
+        }
+        return nil
     }
 
     var body: some View {
