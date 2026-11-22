@@ -838,7 +838,7 @@ final class GameModel: ObservableObject {
 
     @discardableResult
     func addAIToRemoteLobby(type: PlayerControlType) -> Bool {
-        guard type.isAI, type != .driveBot,
+        guard type.isAI,
               activeOnlineMode == .remoteWS,
               WebSocketNetworkManager.shared.isConnected,
               WebSocketNetworkManager.shared.isHost,
