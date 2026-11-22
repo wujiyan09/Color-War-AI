@@ -1600,6 +1600,7 @@ private struct FriendsPreviewCard: View {
 private struct FriendsView: View {
     @ObservedObject var store = AccountStore.shared
     @State private var newFriend = ""
+    @State private var recordFriend: FriendUser?
 
     var body: some View {
         List {
@@ -1643,8 +1644,15 @@ private struct FriendsView: View {
                 }
                 ForEach(store.friends.friends) { user in
                     HStack {
-                        AvatarView(avatar: user.avatar, name: user.username, size: 32)
-                        Text(user.username)
+                        Button { recordFriend = user } label: {
+                            HStack {
+                                AvatarView(avatar: user.avatar, name: user.username, size: 32)
+                                Text(user.username).foregroundStyle(.primary)
+                                Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.borderless)
                         Spacer()
                         Button {
                             store.requestHostAndInvite(user)
@@ -1674,6 +1682,7 @@ private struct FriendsView: View {
         }
         .scrollContentBackground(.hidden)
         .navigationTitle("好友")
+        .navigationDestination(item: $recordFriend) { FriendRecordView(friend: $0) }
         .refreshable { await store.refreshFriends() }
         .task {
             store.errorMessage = nil
@@ -1779,5 +1788,70 @@ private struct TipSheet: View {
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
         }
         .presentationDetents([.medium, .large])
+    }
+}
+
+
+// MARK: 好友近一个月战绩
+struct FriendMatchStats: Codable { var games: Int; var wins: Int; var losses: Int }
+struct FriendMatchesResponse: Codable {
+    var user: FriendUser
+    var stats: FriendMatchStats
+    var matches: [MatchRecord]
+}
+
+private struct FriendRecordView: View {
+    let friend: FriendUser
+    @State private var data: FriendMatchesResponse?
+    @State private var error: String?
+
+    var body: some View {
+        List {
+            Section {
+                HStack(spacing: 14) {
+                    AvatarView(avatar: friend.avatar, name: friend.username, size: 48)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(friend.username).font(.headline)
+                        if let st = data?.stats {
+                            Text("\(st.games) 局 · \(st.wins) 胜 \(st.losses) 负").font(.subheadline).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            Section("近一个月") {
+                if let error {
+                    Text(error).foregroundStyle(.orange)
+                } else if let matches = data?.matches {
+                    if matches.isEmpty { Text("近一个月没有对局").foregroundStyle(.secondary) }
+                    ForEach(matches) { m in
+                        HStack(spacing: 10) {
+                            Text(m.resultText).font(.subheadline.bold()).foregroundStyle(.white)
+                                .padding(.horizontal, 9).padding(.vertical, 2)
+                                .background(m.resultColor, in: Capsule())
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(m.summary)
+                                Text(m.date.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                } else {
+                    Text("加载中…").foregroundStyle(.secondary)
+                }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .navigationTitle("\(friend.username) 的战绩")
+        .task { await load() }
+        .refreshable { await load() }
+    }
+
+    private func load() async {
+        do {
+            let id = friend.id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? friend.id
+            data = try await AccountAPI.send("GET", "/api/friends/\(id)/matches", token: AccountStore.shared.token)
+            error = nil
+        } catch {
+            self.error = error.localizedDescription
+        }
     }
 }
