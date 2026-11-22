@@ -96,10 +96,18 @@ struct LeaderboardLevel: Codable, Identifiable, Hashable {
     var id: String { aiKey }
 }
 
+struct LeaderboardBoardSize: Codable, Identifiable, Hashable {
+    var boardSize: Int
+    var games: Int
+    var id: Int { boardSize }
+}
+
 struct LeaderboardResponse: Codable {
     var period: String
     var aiKey: String?
     var levels: [LeaderboardLevel]
+    var boardSize: Int?
+    var boardSizes: [LeaderboardBoardSize]?
     var entries: [LeaderboardEntry]
     var rule: String?
 }
@@ -457,11 +465,12 @@ final class AccountStore: ObservableObject {
 
     // 排行榜
 
-    func leaderboard(period: LeaderboardPeriod, aiKey: String?, limit: Int) async throws -> LeaderboardResponse {
+    func leaderboard(period: LeaderboardPeriod, aiKey: String?, boardSize: Int? = nil, limit: Int) async throws -> LeaderboardResponse {
         var path = "/api/leaderboard?period=\(period.rawValue)&limit=\(limit)"
         if let aiKey, let encoded = aiKey.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
             path += "&aiKey=\(encoded)"
         }
+        if let boardSize { path += "&boardSize=\(boardSize)" }
         return try await AccountAPI.send("GET", path)
     }
 
@@ -924,6 +933,7 @@ struct AccountTabView: View {
                 Button { path.append(.history) } label: { HistoryPreviewCard(path: $path) }.buttonStyle(.plain)
                 Button { path.append(.leaderboard) } label: { LeaderboardPreviewCard() }.buttonStyle(.plain)
                 Button { path.append(.friends) } label: { FriendsPreviewCard() }.buttonStyle(.plain)
+                TipCard()
             }
             .frame(maxWidth: 560)
             .padding(20)
@@ -1378,9 +1388,9 @@ private struct ReplayBoard: View {
                             .overlay {
                                 // 只在复盘里用方框标出这一步下的格子
                                 if lastMove?.row == r && lastMove?.column == c {
-                                    Rectangle()
-                                        .stroke(Color.white, lineWidth: 2)
-                                        .padding(-1)
+                                    RoundedRectangle(cornerRadius: side * 0.22, style: .continuous)
+                                        .stroke(Color.white.opacity(0.45), lineWidth: 2)
+                                        .padding(1)
                                 }
                             }
                         }
@@ -1421,24 +1431,44 @@ private struct LeaderboardRow: View {
 private struct LeaderboardControls: View {
     @Binding var period: LeaderboardPeriod
     @Binding var aiKey: String?
+    @Binding var boardSize: Int?
     let levels: [LeaderboardLevel]
+    let boardSizes: [LeaderboardBoardSize]
 
     var body: some View {
         Picker("", selection: $period) {
             ForEach(LeaderboardPeriod.allCases) { Text($0.title).tag($0) }
         }
         .pickerStyle(.segmented)
+        .onChange(of: period) { boardSize = nil }
         if !levels.isEmpty {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(levels) { level in
-                        Button { aiKey = level.aiKey } label: {
+                        Button { aiKey = level.aiKey; boardSize = nil } label: {
                             Text(level.aiLabel ?? level.aiKey)
                                 .font(.caption.bold())
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 10).padding(.vertical, 6)
                                 .contentShape(Capsule())
                                 .glassEffect(.regular.tint(aiKey == level.aiKey ? .darkNavyBlue : .clear).interactive(), in: .capsule)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        if !boardSizes.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(boardSizes) { size in
+                        Button { boardSize = size.boardSize } label: {
+                            Text("\(size.boardSize)×\(size.boardSize)")
+                                .font(.caption.bold())
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 10).padding(.vertical, 6)
+                                .contentShape(Capsule())
+                                .glassEffect(.regular.tint(boardSize == size.boardSize ? .darkNavyBlue : .clear).interactive(), in: .capsule)
                         }
                         .buttonStyle(.plain)
                     }
@@ -1452,6 +1482,7 @@ private struct LeaderboardPreviewCard: View {
     @ObservedObject var store = AccountStore.shared
     @State private var period: LeaderboardPeriod = .week
     @State private var aiKey: String?
+    @State private var boardSize: Int?
     @State private var data: LeaderboardResponse?
     @State private var error: String?
 
@@ -1462,7 +1493,7 @@ private struct LeaderboardPreviewCard: View {
                 Spacer()
                 Image(systemName: "chevron.right").foregroundStyle(.white.opacity(0.5))
             }
-            LeaderboardControls(period: $period, aiKey: $aiKey, levels: data?.levels ?? [])
+            LeaderboardControls(period: $period, aiKey: $aiKey, boardSize: $boardSize, levels: data?.levels ?? [], boardSizes: data?.boardSizes ?? [])
             if let entries = data?.entries, !entries.isEmpty {
                 ForEach(entries.prefix(5)) { LeaderboardRow(entry: $0) }
             } else if let error {
@@ -1472,14 +1503,15 @@ private struct LeaderboardPreviewCard: View {
                     .font(.subheadline).foregroundStyle(.white.opacity(0.7))
             }
         }
-        .task(id: "\(period.rawValue)-\(aiKey ?? "")") { await load() }
+        .task(id: "\(period.rawValue)-\(aiKey ?? "")-\(boardSize ?? 0)") { await load() }
     }
 
     private func load() async {
         do {
-            let response = try await store.leaderboard(period: period, aiKey: aiKey, limit: 5)
+            let response = try await store.leaderboard(period: period, aiKey: aiKey, boardSize: boardSize, limit: 5)
             data = response
             if aiKey == nil { aiKey = response.aiKey }
+                if boardSize == nil { boardSize = response.boardSize }
             error = nil
         } catch {
             self.error = error.localizedDescription
@@ -1491,6 +1523,7 @@ private struct LeaderboardFullView: View {
     @ObservedObject var store = AccountStore.shared
     @State private var period: LeaderboardPeriod = .week
     @State private var aiKey: String?
+    @State private var boardSize: Int?
     @State private var data: LeaderboardResponse?
     @State private var error: String?
 
@@ -1498,7 +1531,7 @@ private struct LeaderboardFullView: View {
         ScrollView {
             VStack(spacing: 12) {
                 AccountGlassCard {
-                    LeaderboardControls(period: $period, aiKey: $aiKey, levels: data?.levels ?? [])
+                    LeaderboardControls(period: $period, aiKey: $aiKey, boardSize: $boardSize, levels: data?.levels ?? [], boardSizes: data?.boardSizes ?? [])
                     if let rule = data?.rule {
                         Text(rule).font(.caption2).foregroundStyle(.white.opacity(0.6))
                     }
@@ -1521,11 +1554,12 @@ private struct LeaderboardFullView: View {
             .frame(maxWidth: .infinity)
         }
         .navigationTitle("排行榜 · 前 100 名")
-        .task(id: "\(period.rawValue)-\(aiKey ?? "")") {
+        .task(id: "\(period.rawValue)-\(aiKey ?? "")-\(boardSize ?? 0)") {
             do {
-                let response = try await store.leaderboard(period: period, aiKey: aiKey, limit: 100)
+                let response = try await store.leaderboard(period: period, aiKey: aiKey, boardSize: boardSize, limit: 100)
                 data = response
                 if aiKey == nil { aiKey = response.aiKey }
+                if boardSize == nil { boardSize = response.boardSize }
                 error = nil
             } catch {
                 self.error = error.localizedDescription
@@ -1692,5 +1726,58 @@ struct AccountOverlay: View {
         .padding(.top, 8)
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: store.incomingInvite)
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: store.toast)
+    }
+}
+
+
+// MARK: 打赏（微信收款码）
+// 换图：把 Resources/wechat-pay.png 替换成你的微信收款码（文件名不变）。
+private struct TipCard: View {
+    @State private var showing = false
+
+    var body: some View {
+        Button { showing = true } label: {
+            AccountGlassCard {
+                HStack {
+                    Label("打赏作者", systemImage: "heart.fill").font(.headline).foregroundStyle(.white)
+                    Spacer()
+                    Image(systemName: "chevron.right").foregroundStyle(.white.opacity(0.5))
+                }
+                Text("喜欢 Color War 的话，可以用微信扫码请作者喝杯奶茶。")
+                    .font(.subheadline).foregroundStyle(.white.opacity(0.7))
+            }
+        }
+        .buttonStyle(.plain)
+        .sheet(isPresented: $showing) { TipSheet() }
+    }
+}
+
+private struct TipSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    private var image: UIImage? {
+        guard let url = Bundle.module.url(forResource: "wechat-pay", withExtension: "png") else { return nil }
+        return UIImage(contentsOfFile: url.path)
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 16) {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable().interpolation(.none).scaledToFit()
+                        .frame(maxWidth: 320)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                } else {
+                    Text("收款码还没放进来").foregroundStyle(.secondary)
+                }
+                Text("微信扫一扫，或截图后在微信里识别").font(.footnote).foregroundStyle(.secondary)
+            }
+            .padding(24)
+            .navigationTitle("微信收款码")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
+        }
+        .presentationDetents([.medium, .large])
     }
 }
