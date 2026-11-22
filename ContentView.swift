@@ -2455,7 +2455,13 @@ struct StartMenuView: View {
             handleAccountRoomRequest(request)
         }
         .onChange(of: scenePhaseForAccount) { _, phase in
-            if phase == .active, accountStore.isLoggedIn { Task { await accountStore.pollOnce() } }
+            if phase == .active, accountStore.isLoggedIn, !accountStore.gameActive { Task { await accountStore.pollOnce() } }
+        }
+        .onChange(of: game.isGameInPlay) { _, _ in
+            accountStore.gameActive = game.isGameInPlay && game.winnerIndex == nil
+        }
+        .onChange(of: game.winnerIndex) { _, _ in
+            accountStore.gameActive = game.isGameInPlay && game.winnerIndex == nil
         }
     }
 

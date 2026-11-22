@@ -592,12 +592,21 @@ final class AccountStore: ObservableObject {
 
     // 轮询通知（App 在前台时每 20 秒一次）
 
+    /// 对局进行中（任何模式）暂停通知轮询；对局结束或离开对局后立刻补一次（顺带补传战绩）。
+    var gameActive = false {
+        didSet {
+            if oldValue && !gameActive, isLoggedIn, UIApplication.shared.applicationState == .active {
+                Task { await pollOnce() }
+            }
+        }
+    }
+
     func startPolling() {
         pollTask?.cancel()
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 // 只在前台轮询；切到后台/锁屏时跳过，回到前台由 scenePhase 立刻补一次
-                if UIApplication.shared.applicationState == .active { await self?.pollOnce() }
+                if UIApplication.shared.applicationState == .active, self?.gameActive == false { await self?.pollOnce() }
                 try? await Task.sleep(nanoseconds: 20_000_000_000)
             }
         }
