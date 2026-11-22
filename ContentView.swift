@@ -559,6 +559,27 @@ struct PlayerProgressOrbView: View {
         game.eliminated[safe: playerIndex] ?? false
     }
     
+    /// 只有能确定是“我”的座位才显示账号头像：联机时是自己的座位；本地只有一个真人座位时就是那个座位。
+    /// 只用照片头像；表情/字母头像、Bot、其他真人都保持原来的颜色或表情圆点。
+    private var avatarImage: UIImage? {
+        let isMine: Bool
+        if game.isOnlineMultiplayer {
+            isMine = playerIndex == game.myPlayerIndex
+        } else {
+            let humans = game.playerTypes.indices.filter { game.playerTypes[$0] == .human }
+            isMine = humans.count == 1 && humans[0] == playerIndex
+        }
+        guard isMine, game.playerTypes[safe: playerIndex] == .human || game.isOnlineMultiplayer,
+              let avatar = AccountStore.shared.user?.avatar, avatar.hasPrefix("data:image") else { return nil }
+        if let cached = Self.avatarCache, cached.key == avatar { return cached.image }
+        guard let comma = avatar.firstIndex(of: ","),
+              let data = Data(base64Encoded: String(avatar[avatar.index(after: comma)...])),
+              let image = UIImage(data: data) else { return nil }
+        Self.avatarCache = (avatar, image)
+        return image
+    }
+    @MainActor private static var avatarCache: (key: String, image: UIImage)?
+
     var body: some View {
         let percent = game.playerOrbPercentage(for: playerIndex)
         let color = game.colors[safe: playerIndex] ?? .gray
@@ -579,7 +600,14 @@ struct PlayerProgressOrbView: View {
                     .rotationEffect(.degrees(-90))
                     .padding(3)
                 
-                if let em = emoji, !em.isEmpty {
+                if let img = avatarImage {
+                    Image(uiImage: img)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: size - 15, height: size - 15)
+                        .clipShape(Circle())
+                        .opacity(isEliminated ? 0.3 : 1.0)
+                } else if let em = emoji, !em.isEmpty {
                     Text(em)
                         .font(.system(size: size * 0.42))
                         .opacity(isEliminated ? 0.3 : 1.0)
