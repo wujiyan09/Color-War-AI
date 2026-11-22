@@ -1831,6 +1831,7 @@ private struct TipSheet: View {
 
     private var image: UIImage? {
         // 不用 Bundle.module：资源包没打进 IPA 时它会直接 fatalError 闪退。手动找，找不到就显示提示。
+        if let data = Data(base64Encoded: WeChatPayImage.base64), let image = UIImage(data: data) { return image }
         if let url = Bundle.main.url(forResource: "wechat-pay", withExtension: "png") { return UIImage(contentsOfFile: url.path) }
         let bundles = (try? FileManager.default.contentsOfDirectory(at: Bundle.main.bundleURL, includingPropertiesForKeys: nil)) ?? []
         for dir in bundles where dir.pathExtension == "bundle" {
