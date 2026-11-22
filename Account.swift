@@ -894,7 +894,7 @@ struct AccountTabView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(background)
-            .navigationTitle("账号")
+            .navigationTitle("我的")
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.visible, for: .navigationBar)
             .navigationDestination(for: AccountRoute.self) { route in
@@ -917,6 +917,7 @@ struct AccountTabView: View {
     }
 
     private var loggedInHome: some View {
+        GeometryReader { proxy in
         ScrollView {
             VStack(spacing: 16) {
                 Button { path.append(.profile) } label: { ProfileCard() }.buttonStyle(.plain)
@@ -927,6 +928,8 @@ struct AccountTabView: View {
             .frame(maxWidth: 560)
             .padding(20)
             .frame(maxWidth: .infinity)
+            .frame(minHeight: proxy.size.height)
+        }
         }
         .refreshable {
             await store.refreshMe()
@@ -963,6 +966,7 @@ private struct AccountAuthView: View {
     }
 
     var body: some View {
+        GeometryReader { proxy in
         ScrollView {
             VStack(spacing: 16) {
                 Text("COLOR WAR")
@@ -1024,6 +1028,8 @@ private struct AccountAuthView: View {
             .frame(maxWidth: 440)
             .padding(20)
             .frame(maxWidth: .infinity)
+            .frame(minHeight: proxy.size.height)
+        }
         }
         .onChange(of: isRegister) { _, _ in store.errorMessage = nil }
     }
