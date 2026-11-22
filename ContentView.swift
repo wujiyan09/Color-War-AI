@@ -2421,7 +2421,7 @@ struct StartMenuView: View {
                 .tabItem { Label("分析器", systemImage: "wrench.and.screwdriver.fill") }
                 .tag(2)
             AccountTabView(background: AnyView(background))
-                .tabItem { Label("账号", systemImage: "person.crop.circle.fill") }
+                .tabItem { Label("我的", systemImage: "person.crop.circle.fill") }
                 .tag(3)
         }
         .background(Color.clear)
