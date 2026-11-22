@@ -173,11 +173,13 @@ enum LeaderboardPeriod: String, CaseIterable, Identifiable {
 enum AccountAPIError: LocalizedError {
     case server(String)
     case network
+    case unauthorized(String)
 
     var errorDescription: String? {
         switch self {
         case .server(let message): return message
         case .network: return "网络连接失败，请稍后再试"
+        case .unauthorized(let message): return message
         }
     }
 }
@@ -203,6 +205,12 @@ enum AccountAPI {
         }
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else {
+            if status == 401 {
+                // 只有真正用到联网功能时才会发现登录失效，这时再要求重新登录
+                let message = (try? JSONDecoder().decode(ErrorResponse.self, from: data))?.error ?? "登录已过期，请重新登录"
+                if let token { await AccountStore.shared.sessionExpired(token: token, message: message) }
+                throw AccountAPIError.unauthorized(message)
+            }
             if let err = try? JSONDecoder().decode(ErrorResponse.self, from: data) { throw AccountAPIError.server(err.error) }
             throw AccountAPIError.server("服务器错误 (\(status))")
         }
@@ -303,6 +311,8 @@ final class AccountStore: ObservableObject {
     private var seenFriendRequestIDs = Set<String>()
     private let pendingKey = "CW_Account_PendingMatches"
     private let localHistoryKey = "CW_Local_MatchHistory"
+    /// 上次登录成功时的账号信息，打开 App 时直接用它恢复登录状态，不联网
+    private let cachedUserKey = "CW_Account_CachedUser"
 
     var isLoggedIn: Bool { user != nil && token != nil }
 
@@ -310,8 +320,32 @@ final class AccountStore: ObservableObject {
         history = loadLocalHistory()
         if let saved = AccountKeychain.load() {
             token = saved
-            Task { await self.refreshMe() }
+            if let data = UserDefaults.standard.data(forKey: cachedUserKey),
+               let cached = try? JSONDecoder().decode(AccountUser.self, from: data) {
+                // 默认保持登录：不请求 /api/me，等真正联网操作时再校验
+                user = cached
+                startPolling()
+                Task { await self.uploadPendingMatches() }
+            } else {
+                // 旧版本升级上来还没有缓存，只校验这一次
+                Task { await self.refreshMe() }
+            }
         }
+    }
+
+    private func cacheUser() {
+        if let user, let data = try? JSONEncoder().encode(user) {
+            UserDefaults.standard.set(data, forKey: cachedUserKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: cachedUserKey)
+        }
+    }
+
+    /// 服务器返回 401：清掉登录状态，但保留还没上传的战绩，重新登录后会补传。
+    func sessionExpired(token expired: String, message: String) {
+        guard token == expired else { return }
+        clearSession()
+        errorMessage = message
     }
 
     // 登录 / 注册 / 退出
@@ -338,6 +372,7 @@ final class AccountStore: ObservableObject {
             token = response.token
             AccountKeychain.save(response.token)
             user = response.user
+            cacheUser()
             didLogin()
         } catch {
             errorMessage = error.localizedDescription
@@ -352,6 +387,10 @@ final class AccountStore: ObservableObject {
     func logout() {
         let oldToken = token
         Task { let _: EmptyResponse? = try? await AccountAPI.send("POST", "/api/logout", token: oldToken) }
+        clearSession()
+    }
+
+    private func clearSession() {
         pollTask?.cancel()
         pollTask = nil
         token = nil
@@ -361,6 +400,7 @@ final class AccountStore: ObservableObject {
         incomingInvite = nil
         history = loadLocalHistory()
         AccountKeychain.save(nil)
+        UserDefaults.standard.removeObject(forKey: cachedUserKey)
     }
 
     private func didLogin() {
@@ -376,13 +416,14 @@ final class AccountStore: ObservableObject {
     func refreshMe() async {
         guard let token else { return }
         do {
+            let firstCheck = user == nil
             let response: UserResponse = try await AccountAPI.send("GET", "/api/me", token: token)
             user = response.user
-            didLogin()
-        } catch AccountAPIError.server(let message) {
-            // 会话失效时退出；网络问题保持本地登录状态
-            if message.contains("登录") || message.contains("账号") { logout() }
-        } catch {}
+            cacheUser()
+            if firstCheck { didLogin() }
+        } catch {
+            // 401 已在 AccountAPI 里处理；网络问题保持本地登录状态
+        }
     }
 
     func updateProfile(username: String? = nil, avatar: String? = nil, barkKey: String? = nil) async -> Bool {
@@ -396,6 +437,7 @@ final class AccountStore: ObservableObject {
         do {
             let response: UserResponse = try await AccountAPI.send("PATCH", "/api/me", body: body, token: token)
             user = response.user
+            cacheUser()
             return true
         } catch {
             errorMessage = error.localizedDescription
@@ -563,6 +605,8 @@ final class AccountStore: ObservableObject {
     func pollOnce() async {
         guard let token else { return }
         guard let response: NotificationsResponse = try? await AccountAPI.send("GET", "/api/notifications", token: token) else { return }
+        // 网络恢复后顺便补传离线时下的对局
+        if !loadPending().isEmpty { await uploadPendingMatches() }
         for invite in response.invites where !seenInviteIDs.contains(invite.id) {
             seenInviteIDs.insert(invite.id)
             incomingInvite = invite
