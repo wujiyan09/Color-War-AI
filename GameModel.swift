@@ -70,6 +70,8 @@ final class GameModel: ObservableObject {
     @Published var flyingOrbs: [FlyingOrb] = []
     @Published var emphasizedCells: Set<Int> = []
     @Published var showDisconnectedAlert: Bool = false
+    /// Guest-side lock while the server reports the host as temporarily disconnected.
+    @Published var isWaitingForHost: Bool = false
     @Published var disconnectedMessage: String = "房主已断开连接，对局已自动结束。"
     @Published var activeOnlineMode: ActiveOnlineMode = .none
     var isLocalDuelMode = false
@@ -390,6 +392,20 @@ final class GameModel: ObservableObject {
             }
             self.refreshActivePlayers()
             if WebSocketNetworkManager.shared.isHost { self.syncRoomConfigToPeers() }
+            if WebSocketNetworkManager.shared.isHost {
+                self.isWaitingForHost = false
+                // After a host resume, continue any AI turn that was interrupted by the suspension.
+                if self.isGameInPlay && !self.isProcessingCascade { self.checkAndRunAITurn() }
+            }
+
+        case .hostDisconnected:
+            // A temporarily suspended host is recoverable; keep the guest's match on screen.
+            self.disconnectedMessage = packet.message ?? "房主暂时断线，棋局等待恢复。"
+            self.isWaitingForHost = true
+
+        case .hostReconnected:
+            self.disconnectedMessage = packet.message ?? "房主已恢复连接，正在同步棋局。"
+            self.isWaitingForHost = false
 
         case .roomRoster:
             if let names = packet.playerNames {
@@ -423,6 +439,7 @@ final class GameModel: ObservableObject {
             }
 
         case .roomClosed:
+            self.isWaitingForHost = false
             self.disconnectedMessage = packet.message ?? "房主已断开连接，对局已自动结束。"
             self.showDisconnectedAlert = true
             self.exitToMenu()
@@ -762,7 +779,19 @@ final class GameModel: ObservableObject {
         exitToMenu()
     }
 
+    private var isRemoteSessionSuspended: Bool {
+        guard activeOnlineMode == .remoteWS else { return false }
+        return WebSocketNetworkManager.shared.isAwaitingReconnect
+            || (isWaitingForHost && !WebSocketNetworkManager.shared.isHost)
+    }
+
+    func resumeRemoteRoomIfNeeded() {
+        guard activeOnlineMode == .remoteWS, isGameInPlay else { return }
+        WebSocketNetworkManager.shared.reconnectAfterForegroundIfNeeded()
+    }
+
     func exitToMenu() {
+        isWaitingForHost = false
         currentGameSessionID = UUID()
         stopOnlineSnapshotRecovery()
         pendingStateSnapshot = nil
@@ -838,6 +867,8 @@ final class GameModel: ObservableObject {
         let player = currentPlayer
         // Board taps are human input; they must never impersonate the AI during its turn.
         guard playerTypes[player].isAI == isAIMove else { return }
+        // No moves while the remote session is reconnecting or the host is away.
+        guard !isRemoteSessionSuspended else { return }
         let isConn = WebSocketNetworkManager.shared.isConnected
         let isHost = WebSocketNetworkManager.shared.isHost
 
@@ -1073,6 +1104,7 @@ final class GameModel: ObservableObject {
         aiTask?.cancel()
 
         guard isGameInPlay else { return }
+        guard !isRemoteSessionSuspended else { return }
 
         let isWS = WebSocketNetworkManager.shared.isConnected
         if isWS && !WebSocketNetworkManager.shared.isHost {
