@@ -245,6 +245,9 @@ final class WebSocketNetworkManager: ObservableObject {
     private var lastNickname = "玩家"
     private var hostResumeToken: String?
     private var isResumeAttempt = false
+    /// When the last room-resume reconnect began. The server replays the room's startGame
+    /// packet to a resumed socket; GameModel uses this to keep the running match clock.
+    var lastResumeStartedAt: Date?
     private var resumeRetryCount = 0
     private var resumeRetryWorkItem: DispatchWorkItem?
     private static let hostTokenService = "com.colorwarai.room-resume"
@@ -308,6 +311,7 @@ final class WebSocketNetworkManager: ObservableObject {
             }
         }
         self.isResumeAttempt = resuming
+        self.lastResumeStartedAt = resuming ? Date() : nil
         self.isConnecting = true
         self.lastError = nil
         sequenceCounter = 0
