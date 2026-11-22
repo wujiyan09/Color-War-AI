@@ -715,6 +715,7 @@ final class GameModel: ObservableObject {
     }
 
     func resetGame(chosenFirstPlayer: Int? = nil) {
+        defer { MatchRecorder.shared.begin(self) }
         currentGameSessionID = UUID()
         stopOnlineSnapshotRecovery()
         pendingStateSnapshot = nil
@@ -1031,9 +1032,11 @@ final class GameModel: ObservableObject {
             isProcessingCascade = false
             localDuelMoveCount += 1
             currentMoveStartedAt = Date()
+            MatchRecorder.shared.recordMove(self, row: row, column: column, player: player)
 
             if checkGameOver() {
                 endGame()
+                MatchRecorder.shared.finish(self)
             } else {
                 advanceToNextTurn()
             }

@@ -2071,6 +2071,8 @@ struct StartMenuView: View {
     @ObservedObject var game: GameModel
     @Binding var selectedTab: Int
     @Binding var isSpinningRandomWheel: Bool
+    @ObservedObject private var accountStore = AccountStore.shared
+    @Environment(\.scenePhase) private var scenePhaseForAccount
     @State private var selectedPartyMode = UserDefaults.standard.integer(forKey: "CW_SelectedPartyMode")
     @State private var duelBoardSize: Int = {
         let value = UserDefaults.standard.integer(forKey: "CW_Duel_BoardSize")
@@ -2414,8 +2416,57 @@ struct StartMenuView: View {
             analyzerNavigation
                 .tabItem { Label("分析器", systemImage: "wrench.and.screwdriver.fill") }
                 .tag(2)
+            AccountTabView(background: AnyView(background))
+                .tabItem { Label("账号", systemImage: "person.crop.circle.fill") }
+                .tag(3)
         }
         .background(Color.clear)
+        .overlay(alignment: .top) { AccountOverlay() }
+        .onChange(of: accountStore.roomRequest) { _, request in
+            guard let request else { return }
+            accountStore.roomRequest = nil
+            handleAccountRoomRequest(request)
+        }
+        .onChange(of: scenePhaseForAccount) { _, phase in
+            if phase == .active, accountStore.isLoggedIn { Task { await accountStore.pollOnce() } }
+        }
+    }
+
+    /// 账号页的“邀请联机”和收到邀请后的“加入”，复用现有的 WebSocket 房间流程。
+    private func handleAccountRoomRequest(_ request: AccountRoomRequest) {
+        let ws = WebSocketNetworkManager.shared
+        guard !game.isGameInPlay else {
+            accountStore.toast = "请先结束当前对局"
+            return
+        }
+        selectedTab = 1
+        selectedPartyMode = 1
+        partyNavigationPath.removeAll()
+        switch request.kind {
+        case .join(let code):
+            if ws.isConnected { ws.disconnect() }
+            game.activeOnlineMode = .remoteWS
+            ws.connectAndJoinRoom(roomCode: code, isHost: false, nickname: PlayerProfile.shared.myNickname)
+        case .hostAndInvite(let friend):
+            if !(ws.isConnected && ws.isHost) {
+                if ws.isConnected { ws.disconnect() }
+                let code = String(Int.random(in: 100000...999999))
+                game.prepareLobbyForHosting()
+                game.playerTypes[1] = .p2pNetwork
+                game.activeOnlineMode = .remoteWS
+                ws.connectAndJoinRoom(roomCode: code, isHost: true, nickname: PlayerProfile.shared.myNickname)
+            }
+            Task { @MainActor in
+                for _ in 0..<40 where !(ws.isConnected && !ws.currentRoomCode.isEmpty) {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                }
+                guard ws.isConnected, !ws.currentRoomCode.isEmpty else {
+                    accountStore.toast = "房间创建失败，没能发出邀请"
+                    return
+                }
+                await accountStore.sendInvite(to: friend, roomCode: ws.currentRoomCode, boardSize: game.boardSize)
+            }
+        }
     }
 
     @ToolbarContentBuilder
