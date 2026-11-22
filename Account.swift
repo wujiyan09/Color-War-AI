@@ -259,8 +259,27 @@ struct AccountRoomRequest: Equatable {
 final class AccountStore: ObservableObject {
     static let shared = AccountStore()
 
-    @Published private(set) var user: AccountUser?
+    @Published private(set) var user: AccountUser? {
+        didSet { syncOnlineNickname(old: oldValue) }
+    }
     @Published private(set) var token: String?
+
+    /// 登录后联机昵称用账号用户名；退出后恢复登录前手动设置的昵称。
+    private static let manualNicknameKey = "CW_Account_ManualNickname"
+    private func syncOnlineNickname(old: AccountUser?) {
+        let profile = PlayerProfile.shared
+        if let name = user?.username, !name.isEmpty {
+            if old == nil, UserDefaults.standard.string(forKey: Self.manualNicknameKey) == nil {
+                UserDefaults.standard.set(profile.myNickname, forKey: Self.manualNicknameKey)
+            }
+            if profile.myNickname != name { profile.myNickname = name }
+        } else if old != nil {
+            if let manual = UserDefaults.standard.string(forKey: Self.manualNicknameKey), !manual.isEmpty {
+                profile.myNickname = manual
+            }
+            UserDefaults.standard.removeObject(forKey: Self.manualNicknameKey)
+        }
+    }
     @Published var isBusy = false
     @Published var errorMessage: String?
     @Published var toast: String?
@@ -1046,7 +1065,7 @@ private struct ProfileEditView: View {
     private let emojiChoices = ["🙂", "😎", "🐯", "🐼", "🦊", "🐸", "🐙", "🦄", "🔥", "⚡️", "🌈", "🎯", "🎻", "🚀", "👾", "🍀"]
 
     private var previewAvatar: String? {
-        if useEmoji { return "emoji:\(emoji):\(String(emojiColor.toHex().prefix(7)))" }
+        if useEmoji { return "emoji:\(emoji):\(Self.avatarHex(emojiColor))" }
         return photoAvatar ?? store.user?.avatar
     }
 
@@ -1063,6 +1082,7 @@ private struct ProfileEditView: View {
                         Label("从相册选择头像", systemImage: "photo")
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 10)
+                            .contentShape(Capsule())
                             .glassEffect(.regular.interactive(), in: .capsule)
                     }
                     .buttonStyle(.plain)
@@ -1076,6 +1096,7 @@ private struct ProfileEditView: View {
                                 Text(item).font(.title2)
                                     .frame(width: 36, height: 36)
                                     .background(Circle().fill(useEmoji && emoji == item ? Color.white.opacity(0.25) : .clear))
+                                    .contentShape(Circle())
                             }
                             .buttonStyle(.plain)
                         }
@@ -1141,6 +1162,15 @@ private struct ProfileEditView: View {
                 useEmoji = false
             }
         }
+    }
+
+    /// 表情头像底色转成 #RRGGBB。ColorPicker 可能给出 Display P3 的颜色，分量会超出 0...1，
+    /// 先夹到合法范围，否则服务器会拒绝这个头像。
+    static func avatarHex(_ color: Color) -> String {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        UIColor(color).getRed(&r, green: &g, blue: &b, alpha: &a)
+        func c(_ v: CGFloat) -> Int { Int((min(max(v, 0), 1) * 255).rounded()) }
+        return String(format: "#%02X%02X%02X", c(r), c(g), c(b))
     }
 
     /// 裁成 160×160 的 JPEG，控制在服务器的大小限制内。
@@ -1301,6 +1331,7 @@ private struct ReplayView: View {
         Button(action: action) {
             Image(systemName: icon).font(.title3).foregroundStyle(.white)
                 .frame(width: 48, height: 48)
+                .contentShape(Circle())
                 .glassEffect(.regular.interactive(), in: .circle)
         }
         .buttonStyle(.plain)
@@ -1390,6 +1421,7 @@ private struct LeaderboardControls: View {
                                 .font(.caption.bold())
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 10).padding(.vertical, 6)
+                                .contentShape(Capsule())
                                 .glassEffect(.regular.tint(aiKey == level.aiKey ? .darkNavyBlue : .clear).interactive(), in: .capsule)
                         }
                         .buttonStyle(.plain)
@@ -1531,6 +1563,8 @@ private struct FriendsView: View {
                         newFriend = ""
                         Task { await store.addFriend(username: name) }
                     }
+                    .buttonStyle(.glassProminent)
+                    .tint(.darkNavyBlue)
                     .disabled(newFriend.trimmingCharacters(in: .whitespaces).count < 2)
                 }
                 if let error = store.errorMessage {
@@ -1545,9 +1579,10 @@ private struct FriendsView: View {
                             Text(user.username)
                             Spacer()
                             Button("接受") { Task { await store.respondFriend(user, accept: true) } }
-                                .buttonStyle(.borderedProminent)
+                                .buttonStyle(.glassProminent)
+                                .tint(.darkNavyBlue)
                             Button("拒绝") { Task { await store.respondFriend(user, accept: false) } }
-                                .buttonStyle(.bordered)
+                                .buttonStyle(.glass)
                         }
                     }
                 }
@@ -1566,7 +1601,8 @@ private struct FriendsView: View {
                         } label: {
                             Label("邀请联机", systemImage: "paperplane.fill")
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.glassProminent)
+                        .tint(.darkNavyBlue)
                     }
                     .swipeActions {
                         Button(role: .destructive) { Task { await store.removeFriend(user) } } label: {
@@ -1612,9 +1648,10 @@ struct AccountOverlay: View {
                     }
                     Spacer()
                     Button("加入") { Task { await store.respondInvite(invite, accept: true) } }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.glassProminent)
+                        .tint(.darkNavyBlue)
                     Button("拒绝") { Task { await store.respondInvite(invite, accept: false) } }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.glass)
                 }
                 .padding(12)
                 .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
