@@ -669,6 +669,7 @@ struct MatchReplay: Codable, Identifiable, Equatable {
     var frames: [String]        // 每一步后的棋盘，每格 2 位十六进制：(owner+1)*16 + count
     var moves: [ReplayMove]
     var isSaved: Bool
+    var emojis: [String?]? = nil  // 表情棋子（旧复盘没有这个字段）
 
     static func encode(_ board: [[Cell]]) -> String {
         var out = ""
@@ -720,7 +721,8 @@ final class MatchRecorder: ObservableObject {
         let colors = game.colors.map { String($0.toHex().dropFirst().prefix(6)) }
         current = MatchReplay(id: UUID().uuidString, playedAt: Date().timeIntervalSince1970 * 1000, title: "",
                               boardSize: game.boardSize, names: game.playerNames, colors: colors,
-                              frames: [MatchReplay.encode(game.board)], moves: [], isSaved: false)
+                              frames: [MatchReplay.encode(game.board)], moves: [], isSaved: false,
+                              emojis: game.emojis)
     }
 
     /// 一步（含连锁）结算完成后调用。
@@ -1342,39 +1344,47 @@ private struct ReplayBoard: View {
     let replay: MatchReplay
     let frame: Int
 
+    // 与对局棋盘 BoardView / 分析器棋盘相同的间距、边框和玻璃底板，格子直接复用 CellView。
+    private let gap: CGFloat = 3
+    private let border: CGFloat = 6
+
     var body: some View {
         GeometryReader { proxy in
             let n = max(replay.boardSize, 1)
-            let side = min(proxy.size.width, proxy.size.height) / CGFloat(n)
+            let maxSide = min(proxy.size.width, proxy.size.height)
+            let side = max(0, (maxSide - border * 2 - gap * CGFloat(n - 1)) / CGFloat(n))
+            let boardDimension = side * CGFloat(n) + gap * CGFloat(n - 1) + border * 2
             let lastMove = frame > 0 ? replay.moves[safe: frame - 1] : nil
-            VStack(spacing: 0) {
+            VStack(spacing: gap) {
                 ForEach(0..<n, id: \.self) { r in
-                    HStack(spacing: 0) {
+                    HStack(spacing: gap) {
                         ForEach(0..<n, id: \.self) { c in
-                            let cell = replay.cell(frame: frame, row: r, column: c)
-                            ZStack {
-                                RoundedRectangle(cornerRadius: side * 0.18)
-                                    .fill(Color.white.opacity(0.06))
-                                    .padding(side * 0.04)
+                            let raw = replay.cell(frame: frame, row: r, column: c)
+                            let cell = Cell(owner: raw.count > 0 ? raw.owner : nil, count: raw.count)
+                            CellView(
+                                cell: cell,
+                                color: cell.owner.flatMap { replay.colors[safe: $0] }.map { Color(hex: $0) },
+                                emoji: cell.owner.flatMap { replay.emojis?[safe: $0] ?? nil },
+                                active: false
+                            )
+                            .equatable()
+                            .frame(width: side, height: side)
+                            .overlay {
+                                // 只在复盘里用方框标出这一步下的格子
                                 if lastMove?.row == r && lastMove?.column == c {
-                                    RoundedRectangle(cornerRadius: side * 0.18)
-                                        .stroke(Color.white.opacity(0.8), lineWidth: 2)
-                                        .padding(side * 0.04)
-                                }
-                                if let owner = cell.owner, cell.count > 0 {
-                                    Circle()
-                                        .fill(Color(hex: replay.colors[safe: owner] ?? "808080"))
-                                        .padding(side * 0.16)
-                                    Text("\(cell.count)")
-                                        .font(.system(size: side * 0.34, weight: .bold, design: .rounded))
-                                        .foregroundStyle(.white)
+                                    Rectangle()
+                                        .stroke(Color.white, lineWidth: 2)
+                                        .padding(-1)
                                 }
                             }
-                            .frame(width: side, height: side)
                         }
                     }
                 }
             }
+            .padding(border)
+            .glassEffect(.regular, in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
+            .frame(width: boardDimension, height: boardDimension)
+            .allowsHitTesting(false)
             .frame(width: proxy.size.width, height: proxy.size.height)
         }
     }
