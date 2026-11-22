@@ -99,6 +99,9 @@ final class GameModel: ObservableObject {
     private var aiTask: Task<Void, Never>? = nil
     private var saveWorkItem: DispatchWorkItem? = nil
     private var isRestoringArchive = false
+    /// Set while re-applying the server's replayed startGame after a room resume, so the
+    /// match recorder keeps the replay/record it already started for this match.
+    private var suppressReplayRestart = false
 
     var validPlayerCount: Int {
         playerTypes.filter { $0.isEnabled }.count
@@ -514,7 +517,9 @@ final class GameModel: ObservableObject {
                     && (WebSocketNetworkManager.shared.lastResumeStartedAt.map { Date().timeIntervalSince($0) < 30 } ?? false)
                 let keptMatchStart = self.matchStartedAt
                 let keptMoveStart = self.currentMoveStartedAt
+                self.suppressReplayRestart = isResumeReplay
                 self.resetGame(chosenFirstPlayer: firstP)
+                self.suppressReplayRestart = false
                 self.beginGame()
                 WebSocketNetworkManager.shared.lastResumeStartedAt = nil
                 if isResumeReplay {
@@ -726,7 +731,7 @@ final class GameModel: ObservableObject {
     }
 
     func resetGame(chosenFirstPlayer: Int? = nil) {
-        defer { MatchRecorder.shared.begin(self) }
+        defer { if !suppressReplayRestart { MatchRecorder.shared.begin(self) } }
         currentGameSessionID = UUID()
         stopOnlineSnapshotRecovery()
         pendingStateSnapshot = nil
