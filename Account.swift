@@ -344,6 +344,11 @@ final class AccountStore: ObservableObject {
         }
     }
 
+    func deleteAccount(password: String) async throws {
+        let _: EmptyResponse = try await AccountAPI.send("POST", "/api/me/delete", body: ["password": password], token: token)
+        logout()
+    }
+
     func logout() {
         let oldToken = token
         Task { let _: EmptyResponse? = try? await AccountAPI.send("POST", "/api/logout", token: oldToken) }
@@ -933,6 +938,7 @@ struct AccountTabView: View {
                 Button { path.append(.history) } label: { HistoryPreviewCard(path: $path) }.buttonStyle(.plain)
                 Button { path.append(.leaderboard) } label: { LeaderboardPreviewCard() }.buttonStyle(.plain)
                 Button { path.append(.friends) } label: { FriendsPreviewCard() }.buttonStyle(.plain)
+                DeleteAccountCard()
                 TipCard()
             }
             .frame(maxWidth: 560)
@@ -1852,6 +1858,49 @@ private struct FriendRecordView: View {
             error = nil
         } catch {
             self.error = error.localizedDescription
+        }
+    }
+}
+
+
+// MARK: 注销账号
+private struct DeleteAccountCard: View {
+    @ObservedObject var store = AccountStore.shared
+    @State private var showWarning = false
+    @State private var showPassword = false
+    @State private var password = ""
+    @State private var error: String?
+    @State private var busy = false
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Button(role: .destructive) { showWarning = true } label: {
+                Label("注销账号", systemImage: "person.crop.circle.badge.xmark")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.glass)
+            .tint(.red)
+            .disabled(busy)
+            if let error { Text(error).font(.caption).foregroundStyle(.orange) }
+        }
+        .alert("注销账号？", isPresented: $showWarning) {
+            Button("取消", role: .cancel) {}
+            Button("继续", role: .destructive) { password = ""; showPassword = true }
+        } message: {
+            Text("注销后会永久删除你的账号、全部战绩、好友和邀请，也会从排行榜上移除。别人战绩里你的名字会显示为“已注销用户”。此操作无法撤销。")
+        }
+        .alert("输入密码确认", isPresented: $showPassword) {
+            SecureField("密码", text: $password)
+            Button("取消", role: .cancel) {}
+            Button("永久注销", role: .destructive) {
+                let pw = password
+                Task {
+                    busy = true
+                    do { try await store.deleteAccount(password: pw); error = nil }
+                    catch { self.error = error.localizedDescription }
+                    busy = false
+                }
+            }
         }
     }
 }
