@@ -59,6 +59,8 @@ final class GameModel: ObservableObject {
         didSet { updateCachedPlayableCells() }
     }
     @Published var myPlayerIndex: Int = 0
+    /// 联机房间里每个座位的账号头像（服务器 roomRoster 带来；旧服务器没有这个字段时为空）
+    @Published var playerAvatars: [String?] = []
     @Published var hasEntered: [Bool] = Array(repeating: false, count: PlayerPreset.maxPlayers)
     @Published var eliminated: [Bool] = Array(repeating: false, count: PlayerPreset.maxPlayers) {
         didSet { updateCachedPlayableCells() }
@@ -388,6 +390,7 @@ final class GameModel: ObservableObject {
                 self.playerTypes[seat] = .human
             }
             if let names = packet.playerNames { self.playerNames = names }
+            self.sendMyAvatarToRoom()
             if let types = packet.playerTypes {
                 for i in 0..<min(types.count, self.playerTypes.count) where i != seat {
                     if WebSocketNetworkManager.shared.isHost, types[i] == .p2pNetwork { self.playerTypes[i] = .p2pNetwork }
@@ -411,6 +414,7 @@ final class GameModel: ObservableObject {
             self.isWaitingForHost = false
 
         case .roomRoster:
+            if let avatars = packet.playerAvatars { self.playerAvatars = avatars }
             if let names = packet.playerNames {
                 for i in 0..<min(names.count, self.playerNames.count) where !names[i].isEmpty { self.playerNames[i] = names[i] }
             }
@@ -566,6 +570,14 @@ final class GameModel: ObservableObject {
             packet.nickname = name
             WebSocketNetworkManager.shared.sendPacket(packet)
         }
+    }
+
+    /// 把自己的账号头像告诉房间（只发照片或表情头像；没登录就发空，清掉旧的）
+    func sendMyAvatarToRoom() {
+        let avatar = AccountStore.shared.user?.avatar ?? ""
+        var packet = P2PPacket(sequenceID: WebSocketNetworkManager.shared.getNextSequenceID(), action: .setAvatar, senderID: PlayerProfile.shared.myNickname)
+        packet.avatar = (avatar.hasPrefix("data:image") || avatar.hasPrefix("emoji:")) && avatar.count <= 48_000 ? avatar : ""
+        WebSocketNetworkManager.shared.sendPacket(packet)
     }
 
     private func beginOnlineSnapshotRecovery() {
@@ -808,6 +820,7 @@ final class GameModel: ObservableObject {
     }
 
     func exitToMenu() {
+        playerAvatars = []
         isWaitingForHost = false
         currentGameSessionID = UUID()
         stopOnlineSnapshotRecovery()

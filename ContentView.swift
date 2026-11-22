@@ -173,6 +173,7 @@ enum P2PAction: String, Codable {
     case hostReconnected
     case roomError
     case roomClosed
+    case setAvatar
 }
 
 struct P2PPacket: Codable {
@@ -200,6 +201,8 @@ struct P2PPacket: Codable {
     var message: String? = nil
     var nickname: String? = nil
     var hostResumeToken: String? = nil
+    var playerAvatars: [String?]? = nil
+    var avatar: String? = nil
 
     init(sequenceID: UInt64, action: P2PAction, senderID: String) {
         self.sequenceID = sequenceID
@@ -559,26 +562,22 @@ struct PlayerProgressOrbView: View {
         game.eliminated[safe: playerIndex] ?? false
     }
     
-    /// 只有能确定是“我”的座位才显示账号头像：联机时是自己的座位；本地只有一个真人座位时就是那个座位。
-    /// 只用照片头像；表情/字母头像、Bot、其他真人都保持原来的颜色或表情圆点。
-    private var avatarImage: UIImage? {
-        let isMine: Bool
+    /// 内圈头像：联机时用房间里每个真人座位同步来的账号头像（照片或表情头像）；
+    /// 本地对局只有一个真人座位时用自己的账号头像。Bot 和没有头像的座位保持原来的颜色/表情圆点。
+    private var seatAvatar: String? {
+        let type = game.playerTypes[safe: playerIndex]
+        if type == .mathNightmare || type == .enhancedNightmare || type == .driveBot || type == .disabled { return nil }
+        let raw: String?
         if game.isOnlineMultiplayer {
-            isMine = playerIndex == game.myPlayerIndex
+            let synced: String? = game.playerAvatars[safe: playerIndex] ?? nil
+            raw = synced ?? (playerIndex == game.myPlayerIndex ? AccountStore.shared.user?.avatar : nil)
         } else {
             let humans = game.playerTypes.indices.filter { game.playerTypes[$0] == .human }
-            isMine = humans.count == 1 && humans[0] == playerIndex
+            raw = (humans.count == 1 && humans[0] == playerIndex) ? AccountStore.shared.user?.avatar : nil
         }
-        guard isMine, game.playerTypes[safe: playerIndex] == .human || game.isOnlineMultiplayer,
-              let avatar = AccountStore.shared.user?.avatar, avatar.hasPrefix("data:image") else { return nil }
-        if let cached = Self.avatarCache, cached.key == avatar { return cached.image }
-        guard let comma = avatar.firstIndex(of: ","),
-              let data = Data(base64Encoded: String(avatar[avatar.index(after: comma)...])),
-              let image = UIImage(data: data) else { return nil }
-        Self.avatarCache = (avatar, image)
-        return image
+        guard let raw, raw.hasPrefix("data:image") || raw.hasPrefix("emoji:") else { return nil }
+        return raw
     }
-    @MainActor private static var avatarCache: (key: String, image: UIImage)?
 
     var body: some View {
         let percent = game.playerOrbPercentage(for: playerIndex)
@@ -600,12 +599,8 @@ struct PlayerProgressOrbView: View {
                     .rotationEffect(.degrees(-90))
                     .padding(3)
                 
-                if let img = avatarImage {
-                    Image(uiImage: img)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: size - 15, height: size - 15)
-                        .clipShape(Circle())
+                if let avatar = seatAvatar {
+                    AvatarView(avatar: avatar, name: name, size: size - 15)
                         .opacity(isEliminated ? 0.3 : 1.0)
                 } else if let em = emoji, !em.isEmpty {
                     Text(em)
