@@ -590,14 +590,15 @@ final class AccountStore: ObservableObject {
         }
     }
 
-    // 轮询通知（App 打开时每 8 秒一次）
+    // 轮询通知（App 在前台时每 30 秒一次）
 
     func startPolling() {
         pollTask?.cancel()
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
-                await self?.pollOnce()
-                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                // 只在前台轮询；切到后台/锁屏时跳过，回到前台由 scenePhase 立刻补一次
+                if UIApplication.shared.applicationState == .active { await self?.pollOnce() }
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
             }
         }
     }
