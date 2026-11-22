@@ -1202,7 +1202,7 @@ private struct MatchHistoryView: View {
 
     var body: some View {
         List {
-            let savedOnly = recorder.replays.filter { $0.isSaved && !store.history.contains(where: { m in m.id == $0.id }) }
+            let savedOnly = recorder.replays.filter { replay in replay.isSaved && !store.history.contains(where: { $0.id == replay.id }) }
             if !savedOnly.isEmpty {
                 Section("已保存的复盘") {
                     ForEach(savedOnly) { replay in
