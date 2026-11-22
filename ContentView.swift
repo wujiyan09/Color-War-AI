@@ -1495,7 +1495,7 @@ struct RoomLobbyView: View {
             if isHost {
                 if !game.isOnlineMultiplayer || (game.activeOnlineMode == .remoteWS && wsManager.isHost) {
                     Menu {
-                        ForEach([PlayerControlType.mathNightmare, .enhancedNightmare]) { type in
+                        ForEach(game.isOnlineMultiplayer ? [PlayerControlType.mathNightmare, .enhancedNightmare, .driveBot] : [PlayerControlType.mathNightmare, .enhancedNightmare]) { type in
                             Button(type.displayName) {
                                 Haptics.shared.lightImpact()
                                 if game.isOnlineMultiplayer {
