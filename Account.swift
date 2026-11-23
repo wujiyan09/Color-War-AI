@@ -396,6 +396,12 @@ final class AccountStore: ObservableObject {
         logout()
     }
 
+    /// 修改密码：服务器验证原密码，成功后其他设备的登录失效，这台保持登录。
+    func changePassword(old: String, new: String, confirm: String) async throws {
+        let _: EmptyResponse = try await AccountAPI.send("POST", "/api/me/password",
+                                                         body: ["oldPassword": old, "password": new, "confirmPassword": confirm], token: token)
+    }
+
     func logout() {
         let oldToken = token
         Task { let _: EmptyResponse? = try? await AccountAPI.send("POST", "/api/logout", token: oldToken) }
@@ -1036,6 +1042,7 @@ struct AccountTabView: View {
                 Button { path.append(.history) } label: { HistoryPreviewCard(path: $path) }.buttonStyle(.plain)
                 Button { path.append(.leaderboard) } label: { LeaderboardPreviewCard() }.buttonStyle(.plain)
                 Button { path.append(.friends) } label: { FriendsPreviewCard() }.buttonStyle(.plain)
+                ChangePasswordCard()
                 DeleteAccountCard()
                 TipCard()
             }
@@ -2009,6 +2016,54 @@ private struct FriendRecordView: View {
     }
 }
 
+
+// MARK: 修改密码
+private struct ChangePasswordCard: View {
+    @ObservedObject var store = AccountStore.shared
+    @State private var showing = false
+    @State private var oldPassword = ""
+    @State private var newPassword = ""
+    @State private var confirmPassword = ""
+    @State private var message: String?
+    @State private var isError = false
+    @State private var busy = false
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Button {
+                oldPassword = ""; newPassword = ""; confirmPassword = ""
+                showing = true
+            } label: {
+                Label("修改密码", systemImage: "key.fill").frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.glass)
+            .disabled(busy)
+            if let message { Text(message).font(.caption).foregroundStyle(isError ? .orange : .green) }
+        }
+        .alert("修改密码", isPresented: $showing) {
+            SecureField("原密码", text: $oldPassword)
+            SecureField("新密码（至少 6 位）", text: $newPassword)
+            SecureField("再次输入新密码", text: $confirmPassword)
+            Button("取消", role: .cancel) {}
+            Button("确定") {
+                let (o, n, c) = (oldPassword, newPassword, confirmPassword)
+                guard n == c else { message = "两次输入的新密码不一致"; isError = true; return }
+                Task {
+                    busy = true
+                    do {
+                        try await store.changePassword(old: o, new: n, confirm: c)
+                        message = "密码已修改，其他设备需要重新登录"; isError = false
+                    } catch {
+                        message = error.localizedDescription; isError = true
+                    }
+                    busy = false
+                }
+            }
+        } message: {
+            Text("修改后，其他设备上的登录会失效，这台设备保持登录。")
+        }
+    }
+}
 
 // MARK: 注销账号
 private struct DeleteAccountCard: View {

@@ -30,3 +30,9 @@ class FriendsCacheTests(unittest.TestCase):
         self.assertIn('forKey: "CW_Account_CachedFriends"', ACC)
         self.assertIn("decode(FriendsResponse.self, from: data)", ACC)
         self.assertIn("await store.refreshHistory()\n            await store.refreshFriends()", ACC)
+
+class ChangePasswordTests(unittest.TestCase):
+    def test_change_password_ui_and_call(self):
+        self.assertIn('"/api/me/password"', ACC)
+        self.assertIn('"oldPassword": old, "password": new, "confirmPassword": confirm', ACC)
+        self.assertIn("ChangePasswordCard()\n                DeleteAccountCard()", ACC)
