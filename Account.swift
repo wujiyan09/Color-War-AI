@@ -40,6 +40,10 @@ struct MatchRecord: Codable, Identifiable, Equatable {
     var result: String            // win / loss / draw / none
     var duration: Int
     var detail: MatchDetail?
+    // 防刷（可选字段，服务器返回的战绩里没有）：完整棋步 [座位, 行, 列]、终局棋盘、是否从存档恢复
+    var moveList: [[Int]]? = nil
+    var finalBoard: String? = nil
+    var restored: Bool? = nil
 
     var date: Date { Date(timeIntervalSince1970: playedAt / 1000) }
 
@@ -466,16 +470,20 @@ final class AccountStore: ObservableObject {
     // 战绩
 
     func submit(_ record: MatchRecord) {
+        // 棋步和终局棋盘只随上传发送，本地战绩里不存，省空间
+        var slim = record
+        slim.moveList = nil
+        slim.finalBoard = nil
         var local = loadLocalHistory()
         local.removeAll { $0.id == record.id }
-        local.insert(record, at: 0)
+        local.insert(slim, at: 0)
         saveLocalHistory(Array(local.prefix(500)))
         var pending = loadPending()
         pending.append(record)
         savePending(pending)
         if isLoggedIn {
             history.removeAll { $0.id == record.id }
-            history.insert(record, at: 0)
+            history.insert(slim, at: 0)
             Task { await uploadPendingMatches() }
         } else {
             history = local
@@ -815,6 +823,7 @@ final class MatchRecorder: ObservableObject {
 
     private var current: MatchReplay?
     private var startedAt = Date()
+    private var currentRestored = false
     private let fileURL: URL = {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -831,11 +840,18 @@ final class MatchRecorder: ObservableObject {
     /// 新一局开始（GameModel.resetGame 末尾调用）。
     func begin(_ game: GameModel) {
         startedAt = Date()
+        currentRestored = false
         let colors = game.colors.map { String($0.toHex().dropFirst().prefix(6)) }
         current = MatchReplay(id: UUID().uuidString, playedAt: Date().timeIntervalSince1970 * 1000, title: "",
                               boardSize: game.boardSize, names: game.playerNames, colors: colors,
                               frames: [MatchReplay.encode(game.board)], moves: [], isSaved: false,
                               emojis: game.emojis)
+    }
+
+    /// 从历史存档恢复时调用：重新开始记录，并标记为恢复的对局（服务器保留但不进排行榜）。
+    func beginRestored(_ game: GameModel) {
+        begin(game)
+        currentRestored = true
     }
 
     /// 一步（含连锁）结算完成后调用。
@@ -895,7 +911,10 @@ final class MatchRecorder: ObservableObject {
         let record = MatchRecord(id: replay.id, playedAt: replay.playedAt, mode: mode, players: active.count,
                                  boardSize: replay.boardSize, aiKey: aiKey, aiLabel: aiLabel,
                                  moves: replay.moves.count, myMoves: myMoves, result: result,
-                                 duration: Int(Date().timeIntervalSince(startedAt)), detail: detail)
+                                 duration: Int(Date().timeIntervalSince(startedAt)), detail: detail,
+                                 moveList: replay.moves.map { [$0.player, $0.row, $0.column] },
+                                 finalBoard: replay.frames.last,
+                                 restored: currentRestored ? true : nil)
 
         replay.title = "\(record.resultText) · \(record.summary)"
         replays.insert(replay, at: 0)

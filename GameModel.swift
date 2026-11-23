@@ -388,6 +388,7 @@ final class GameModel: ObservableObject {
         self.recalculateOrbCounts()
         self.refreshActivePlayers()
         self.updateCachedPlayableCells()
+        MatchRecorder.shared.beginRestored(self)
         self.beginGame()
     }
 
