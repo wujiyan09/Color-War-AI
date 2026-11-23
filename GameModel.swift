@@ -863,6 +863,22 @@ final class GameModel: ObservableObject {
         return true
     }
 
+    /// 联机大厅：房主在开局前删掉一个 Bot 座位。和网页一样，发 hostConfig 把该座位设为未加入，服务器再把名单同步给所有人。
+    @discardableResult
+    func removeAIFromRemoteLobby(at seat: Int) -> Bool {
+        guard seat > 0, seat < playerTypes.count,
+              playerTypes[seat].isAI,
+              activeOnlineMode == .remoteWS,
+              WebSocketNetworkManager.shared.isConnected,
+              WebSocketNetworkManager.shared.isHost,
+              !isGameInPlay else { return false }
+        playerTypes[seat] = .disabled
+        playerNames[seat] = PlayerPreset.defaultNames[seat]
+        refreshActivePlayers()
+        syncRoomConfigToPeers()
+        return true
+    }
+
     func updatePlayerType(at index: Int, to newType: PlayerControlType, forceInternal: Bool = false) {
         guard index >= 0 && index < PlayerPreset.maxPlayers else { return }
         // Protect the model as well as the UI. Internal disconnect/recovery handling may still update a seat.

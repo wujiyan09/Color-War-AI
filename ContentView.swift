@@ -1497,12 +1497,17 @@ struct RoomLobbyView: View {
                                 }
                             }
                             .listRowBackground(Color.white.opacity(0.06))
+                            // 联机房间：只有房主能在开局前左划删掉 Bot 座位，真人座位不能删
+                            .deleteDisabled(game.isOnlineMultiplayer
+                                            && !(isHost && game.playerTypes[idx].isAI && !game.isGameInPlay))
                         }
                     }
                     .onDelete { indexSet in
-                        guard isHost, !game.isOnlineMultiplayer else { return }
+                        guard isHost else { return }
                         for idx in indexSet {
-                            if idx != game.myPlayerIndex {
+                            if game.isOnlineMultiplayer {
+                                game.removeAIFromRemoteLobby(at: idx)
+                            } else if idx != game.myPlayerIndex {
                                 game.updatePlayerType(at: idx, to: .disabled)
                             }
                         }
