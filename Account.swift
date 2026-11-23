@@ -40,6 +40,12 @@ struct MatchRecord: Codable, Identifiable, Equatable {
     var result: String            // win / loss / draw / none
     var duration: Int
     var detail: MatchDetail?
+    // 防作弊：上传完整棋步让服务器复盘核对（服务器返回的战绩里没有这些字段）
+    var moveList: [[Int]]? = nil      // [行, 列, 玩家座位]
+    var seats: [Int]? = nil           // 参战座位，按轮流顺序
+    var mySeat: Int? = nil
+    var start: String? = nil          // "duel" = 对弈两角开局，"empty" = 空棋盘
+    var roomCode: String? = nil       // 联机房间号：服务器用房间里记录的棋步核对
 
     var date: Date { Date(timeIntervalSince1970: playedAt / 1000) }
 
@@ -895,7 +901,12 @@ final class MatchRecorder: ObservableObject {
         let record = MatchRecord(id: replay.id, playedAt: replay.playedAt, mode: mode, players: active.count,
                                  boardSize: replay.boardSize, aiKey: aiKey, aiLabel: aiLabel,
                                  moves: replay.moves.count, myMoves: myMoves, result: result,
-                                 duration: Int(Date().timeIntervalSince(startedAt)), detail: detail)
+                                 duration: Int(Date().timeIntervalSince(startedAt)), detail: detail,
+                                 moveList: replay.moves.map { [$0.row, $0.column, $0.player] },
+                                 seats: active,
+                                 mySeat: mySeat,
+                                 start: game.gameMode == .duel && active.count == 2 ? "duel" : "empty",
+                                 roomCode: isOnline ? WebSocketNetworkManager.shared.currentRoomCode : nil)
 
         replay.title = "\(record.resultText) · \(record.summary)"
         replays.insert(replay, at: 0)
