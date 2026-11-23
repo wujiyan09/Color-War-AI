@@ -76,7 +76,36 @@ final class GameModel: ObservableObject {
     @Published var isWaitingForHost: Bool = false
     @Published var disconnectedMessage: String = "房主已断开连接，对局已自动结束。"
     @Published var activeOnlineMode: ActiveOnlineMode = .none
-    var isLocalDuelMode = false
+    /// 唯一的“当前是哪种对局”来源。开始任何对局都要显式设置；
+    /// WebSocket 连接状态只管网络（为重连保留的会话不代表在联机模式）。
+    @Published private(set) var gameMode: GameMode = .duel
+
+    var isLocalDuelMode: Bool { gameMode == .duel }
+
+    /// 本地对弈 / 派对：如果还留着联机会话，先正式离开房间，保证本地棋步不会发到房间里。
+    func enterLocalMode(_ mode: GameMode) {
+        precondition(mode != .online, "use enterOnlineMode()")
+        if gameMode == .online || activeOnlineMode != .none || WebSocketNetworkManager.shared.isConnected {
+            leaveOnlineMode()
+        }
+        gameMode = mode
+    }
+
+    /// 创建 / 加入联机房间时调用。
+    func enterOnlineMode() {
+        lastLocalMode = gameMode == .online ? lastLocalMode : gameMode
+        activeOnlineMode = .remoteWS
+        gameMode = .online
+    }
+
+    /// 离开房间（断开网络、退出联机模式，回到之前的本地模式）。
+    func leaveOnlineMode() {
+        activeOnlineMode = .none
+        WebSocketNetworkManager.shared.disconnect()
+        if gameMode == .online { gameMode = lastLocalMode }
+    }
+
+    private var lastLocalMode: GameMode = .duel
     @Published private(set) var localDuelMoveCount = 0
     @Published private(set) var matchStartedAt: Date = Date()
     @Published private(set) var currentMoveStartedAt: Date = Date()
@@ -153,9 +182,11 @@ final class GameModel: ObservableObject {
         playerNames = localPlayerNames
     }
 
-    var isOnlineMultiplayer: Bool {
-        WebSocketNetworkManager.shared.isConnected
-    }
+    /// 是否在联机对局 / 房间里：只看 gameMode，不看连接状态（重连期间仍算联机）。
+    var isOnlineMultiplayer: Bool { gameMode == .online }
+
+    /// 真正能收发房间消息：联机模式且连接着。
+    var isOnlineLinked: Bool { gameMode == .online && WebSocketNetworkManager.shared.isConnected }
 
     func validSelectableTypes(forPlayerIndex idx: Int, isInLobby: Bool = false) -> [PlayerControlType] {
         guard idx >= 0 && idx < playerTypes.count else { return [] }
@@ -371,6 +402,8 @@ final class GameModel: ObservableObject {
     }
 
     private func handleIncomingPacket(_ packet: P2PPacket) {
+        // 不在联机模式（比如已经开了本地对局）时，房间消息一律不碰本地棋盘。
+        guard gameMode == .online else { return }
         if packet.action == .roomJoined {
             // A new room has a new sequence stream; reset before applying its first packet.
             lastReceivedSeqID = 0
@@ -459,7 +492,7 @@ final class GameModel: ObservableObject {
                pIdx == self.currentPlayer,
                r >= 0, r < self.boardSize, c >= 0, c < self.boardSize,
                self.playableCells.contains(r * self.boardSize + c) {
-                if WebSocketNetworkManager.shared.isConnected && !WebSocketNetworkManager.shared.isHost {
+                if isOnlineLinked && !WebSocketNetworkManager.shared.isHost {
                     self.beginOnlineSnapshotRecovery()
                 }
                 self.enqueueNetworkMove(row: r, column: c, player: pIdx)
@@ -478,7 +511,7 @@ final class GameModel: ObservableObject {
             isApplyingRoomConfiguration = true
             if let names = packet.playerNames { self.playerNames = names }
             if let types = packet.playerTypes { self.playerTypes = types }
-            if WebSocketNetworkManager.shared.isConnected && !WebSocketNetworkManager.shared.isHost,
+            if isOnlineLinked && !WebSocketNetworkManager.shared.isHost,
                self.myPlayerIndex >= 0, self.myPlayerIndex < self.playerTypes.count {
                 self.playerTypes[self.myPlayerIndex] = .human
             }
@@ -487,7 +520,7 @@ final class GameModel: ObservableObject {
             // WebSocket hosts own their pending lobby selection. The server echoes each
             // canonical hostConfig to everyone, including the host; a delayed older echo
             // must not roll the host's slider back while guests still consume that config.
-            if !(WebSocketNetworkManager.shared.isConnected && WebSocketNetworkManager.shared.isHost),
+            if !(isOnlineLinked && WebSocketNetworkManager.shared.isHost),
                let sz = packet.boardSize, (5...12).contains(sz) {
                 self.boardSize = sz
             }
@@ -508,7 +541,7 @@ final class GameModel: ObservableObject {
             }
             // The server roster describes connected remote seats as network players;
             // locally, this device must control its own seat as a human.
-            if WebSocketNetworkManager.shared.isConnected,
+            if isOnlineLinked,
                !WebSocketNetworkManager.shared.isHost,
                self.myPlayerIndex >= 0, self.myPlayerIndex < self.playerTypes.count {
                 self.playerTypes[self.myPlayerIndex] = .human
@@ -552,7 +585,7 @@ final class GameModel: ObservableObject {
         let name = String(proposedName.trimmingCharacters(in: .whitespacesAndNewlines).prefix(32))
         guard !name.isEmpty else { return }
         PlayerProfile.shared.myNickname = name
-        let seat = WebSocketNetworkManager.shared.isConnected
+        let seat = isOnlineLinked
             ? WebSocketNetworkManager.shared.playerIndex
             : myPlayerIndex
         guard seat >= 0 && seat < playerNames.count else { return }
@@ -563,7 +596,7 @@ final class GameModel: ObservableObject {
             updateLocalPlayerName(at: seat, to: name)
         }
 
-        if WebSocketNetworkManager.shared.isConnected {
+        if isOnlineLinked {
             let sequence = WebSocketNetworkManager.shared.getNextSequenceID()
             var packet = P2PPacket(sequenceID: sequence, action: .renamePlayer, senderID: name)
             packet.playerIndex = seat
@@ -581,17 +614,17 @@ final class GameModel: ObservableObject {
     }
 
     private func beginOnlineSnapshotRecovery() {
-        guard WebSocketNetworkManager.shared.isConnected, !WebSocketNetworkManager.shared.isHost else { return }
+        guard isOnlineLinked, !WebSocketNetworkManager.shared.isHost else { return }
         onlineSnapshotRetryWorkItem?.cancel()
         onlineSnapshotRetryCount = 0
         scheduleOnlineSnapshotRetry()
     }
 
     private func scheduleOnlineSnapshotRetry() {
-        guard WebSocketNetworkManager.shared.isConnected, !WebSocketNetworkManager.shared.isHost,
+        guard isOnlineLinked, !WebSocketNetworkManager.shared.isHost,
               onlineSnapshotRetryCount < 6 else { return }
         let work = DispatchWorkItem { [weak self] in
-            guard let self, WebSocketNetworkManager.shared.isConnected,
+            guard let self, isOnlineLinked,
                   !WebSocketNetworkManager.shared.isHost else { return }
             self.onlineSnapshotRetryCount += 1
             var packet = P2PPacket(
@@ -623,7 +656,7 @@ final class GameModel: ObservableObject {
         }
         if let names = packet.playerNames { self.playerNames = names }
         if let types = packet.playerTypes { self.playerTypes = types }
-        if WebSocketNetworkManager.shared.isConnected && !WebSocketNetworkManager.shared.isHost,
+        if isOnlineLinked && !WebSocketNetworkManager.shared.isHost,
            self.myPlayerIndex >= 0, self.myPlayerIndex < self.playerTypes.count {
             self.playerTypes[self.myPlayerIndex] = .human
         }
@@ -648,7 +681,7 @@ final class GameModel: ObservableObject {
 
     func syncRoomConfigToPeers() {
         let isHost = WebSocketNetworkManager.shared.isHost
-        let isConn = WebSocketNetworkManager.shared.isConnected
+        let isConn = isOnlineLinked
         guard isHost && isConn else { return }
 
         let seq = UInt64.random(in: 1...999999)
@@ -661,14 +694,14 @@ final class GameModel: ObservableObject {
         packet.emojis = emojis
         packet.aiLevelRaw = aiDifficultyLevel.rawValue
 
-        if WebSocketNetworkManager.shared.isConnected {
+        if isOnlineLinked {
             WebSocketNetworkManager.shared.sendPacket(packet)
         }
     }
 
     private func broadcastFullStateSnapshot() {
         let isHost = WebSocketNetworkManager.shared.isHost
-        let isConn = WebSocketNetworkManager.shared.isConnected
+        let isConn = isOnlineLinked
         guard isHost && isConn else { return }
 
         var compactList = [CompactCellSnapshot]()
@@ -690,7 +723,7 @@ final class GameModel: ObservableObject {
         packet.hasEnteredSnapshot = hasEntered
         packet.eliminatedSnapshot = eliminated
 
-        if WebSocketNetworkManager.shared.isConnected {
+        if isOnlineLinked {
             WebSocketNetworkManager.shared.sendPacket(packet)
         }
     }
@@ -763,7 +796,7 @@ final class GameModel: ObservableObject {
 
         let active = activePlayerIndices
         guard !active.isEmpty else { return }
-        let isLocalTwoPlayerDuel = isLocalDuelMode && active.count == 2 && !isOnlineMultiplayer
+        let isLocalTwoPlayerDuel = gameMode == .duel && active.count == 2
         if isLocalTwoPlayerDuel {
             let first = active[0]
             let second = active[1]
@@ -782,13 +815,13 @@ final class GameModel: ObservableObject {
         recalculateOrbCounts()
 
         let isHost = WebSocketNetworkManager.shared.isHost
-        let isConn = WebSocketNetworkManager.shared.isConnected
+        let isConn = isOnlineLinked
         if isHost && isConn {
             let seq = UInt64.random(in: 1...999999)
             var startPacket = P2PPacket(sequenceID: seq, action: .startGame, senderID: PlayerProfile.shared.myNickname)
             startPacket.firstPlayerIndex = currentPlayer
             startPacket.boardSize = boardSize
-            if WebSocketNetworkManager.shared.isConnected {
+            if isOnlineLinked {
                 WebSocketNetworkManager.shared.sendPacket(startPacket)
             }
         }
@@ -834,14 +867,13 @@ final class GameModel: ObservableObject {
         endGame()
         shouldNavigateToGame = false
         winnerIndex = nil
-        activeOnlineMode = .none
-        WebSocketNetworkManager.shared.disconnect()
+        leaveOnlineMode()
     }
 
     @discardableResult
     func addAIToRemoteLobby() -> Bool {
         guard activeOnlineMode == .remoteWS,
-              WebSocketNetworkManager.shared.isConnected,
+              isOnlineLinked,
               WebSocketNetworkManager.shared.isHost,
               !isGameInPlay,
               let seat = playerTypes.firstIndex(of: .disabled) else { return false }
@@ -853,7 +885,7 @@ final class GameModel: ObservableObject {
     func addAIToRemoteLobby(type: PlayerControlType) -> Bool {
         guard type.isAI,
               activeOnlineMode == .remoteWS,
-              WebSocketNetworkManager.shared.isConnected,
+              isOnlineLinked,
               WebSocketNetworkManager.shared.isHost,
               !isGameInPlay,
               let seat = playerTypes.firstIndex(of: .disabled) else { return false }
@@ -869,7 +901,7 @@ final class GameModel: ObservableObject {
         guard seat > 0, seat < playerTypes.count,
               playerTypes[seat].isAI,
               activeOnlineMode == .remoteWS,
-              WebSocketNetworkManager.shared.isConnected,
+              isOnlineLinked,
               WebSocketNetworkManager.shared.isHost,
               !isGameInPlay else { return false }
         playerTypes[seat] = .disabled
@@ -915,7 +947,7 @@ final class GameModel: ObservableObject {
         guard playerTypes[player].isAI == isAIMove else { return }
         // No moves while the remote session is reconnecting or the host is away.
         guard !isRemoteSessionSuspended else { return }
-        let isConn = WebSocketNetworkManager.shared.isConnected
+        let isConn = isOnlineLinked
         let isHost = WebSocketNetworkManager.shared.isHost
 
         if isConn {
@@ -928,7 +960,7 @@ final class GameModel: ObservableObject {
             packet.col = column
             packet.playerIndex = player
 
-            if WebSocketNetworkManager.shared.isConnected {
+            if isOnlineLinked {
                 WebSocketNetworkManager.shared.sendPacket(packet)
                 if !WebSocketNetworkManager.shared.isHost { beginOnlineSnapshotRecovery() }
             }
@@ -1085,7 +1117,7 @@ final class GameModel: ObservableObject {
             } else {
                 advanceToNextTurn()
             }
-            if WebSocketNetworkManager.shared.isHost && WebSocketNetworkManager.shared.isConnected {
+            if WebSocketNetworkManager.shared.isHost && isOnlineLinked {
                 broadcastFullStateSnapshot()
             }
         } catch {
@@ -1154,7 +1186,7 @@ final class GameModel: ObservableObject {
         guard isGameInPlay else { return }
         guard !isRemoteSessionSuspended else { return }
 
-        let isWS = WebSocketNetworkManager.shared.isConnected
+        let isWS = isOnlineLinked
         if isWS && !WebSocketNetworkManager.shared.isHost {
             return
         }

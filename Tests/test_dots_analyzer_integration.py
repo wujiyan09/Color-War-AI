@@ -247,7 +247,7 @@ class NativeAnalyzerTests(unittest.TestCase):
         self.assertIn("var body: some View {\n        tabsWithPickersAndSheets", menu)
         self.assertIn("StartMenuView(", root)
         self.assertNotIn("Picker(\"主导航\"", menu)
-        self.assertIn("startGame(isLocalDuel: true)", menu)
+        self.assertIn("startGame(mode: .duel)", menu)
         self.assertIn("onChange(of: game.shouldNavigateToGame)", menu)
         self.assertNotIn("if isGameStarted", root)
 

@@ -11,13 +11,13 @@ def section(start, end):
 
 class LocalDuelSetupTests(unittest.TestCase):
     def test_duel_starts_directly_without_random_first_player_wheel(self):
-        start_game = section("private func startGame(isLocalDuel", "private func startDuelGame")
-        self.assertIn("if !isLocalDuel && game.isRandomFirstPlayer", start_game)
+        start_game = section("private func startGame(mode: GameMode", "private func startDuelGame")
+        self.assertIn("if mode != .duel && game.isRandomFirstPlayer", start_game)
         self.assertIn("game.resetGame()", start_game)
 
     def test_reset_seeds_both_corners_and_red_plays_first_only_for_local_duel(self):
         reset = section("func resetGame(chosenFirstPlayer", "func restartCurrentGame")
-        self.assertIn("let isLocalTwoPlayerDuel = isLocalDuelMode && active.count == 2 && !isOnlineMultiplayer", reset)
+        self.assertIn("let isLocalTwoPlayerDuel = gameMode == .duel && active.count == 2", reset)
         self.assertIn("board[0][0] = Cell(owner: first, count: 1)", reset)
         self.assertIn("board[boardSize - 1][boardSize - 1] = Cell(owner: second, count: 1)", reset)
         self.assertIn("hasEntered[first] = true", reset)
@@ -45,7 +45,7 @@ class LocalDuelSetupTests(unittest.TestCase):
         self.assertIn("Haptics.shared.lightImpact()", section("private func playerCard(", "    var body: some View {"))
 
     def test_duel_setup_defaults_both_players_to_human(self):
-        menu = section("struct StartMenuView", "private func startGame(isLocalDuel")
+        menu = section("struct StartMenuView", "private func startGame(mode: GameMode")
         self.assertIn("@State private var duelPlayerOneType: PlayerControlType = UserDefaults.standard.data(forKey: \"CW_Duel_PlayerOne\")", menu)
         self.assertIn("@State private var duelPlayerTwoType: PlayerControlType = UserDefaults.standard.data(forKey: \"CW_Duel_PlayerTwo\")", menu)
         self.assertIn("private let selectableBotTypes: [PlayerControlType] = [.human, .driveBot]", TEXT)

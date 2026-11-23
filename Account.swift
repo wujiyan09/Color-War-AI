@@ -756,6 +756,29 @@ struct MatchReplay: Codable, Identifiable, Equatable {
         return out
     }
 
+    /// 对局里实际下过棋的两个座位（按座位号排序）；第一个当红方，第二个当蓝方。
+    var duelSeats: [Int] {
+        var seats = Set(moves.map(\.player))
+        if let first = frames.first {
+            for r in 0..<boardSize { for c in 0..<boardSize { if let o = cellValue(first, r, c).owner { seats.insert(o) } } }
+        }
+        return seats.sorted()
+    }
+
+    /// 分析器只分析双人局（棋盘 5–12）。
+    var isAnalyzerImportable: Bool {
+        (5...12).contains(boardSize) && !moves.isEmpty && frames.count == moves.count + 1 && duelSeats.count == 2
+    }
+
+    private func cellValue(_ encoded: String, _ row: Int, _ column: Int) -> (owner: Int?, count: Int) {
+        let chars = Array(encoded.utf8)
+        let index = (row * boardSize + column) * 2
+        guard index + 1 < chars.count,
+              let value = Int(String(bytes: chars[index...index + 1], encoding: .utf8) ?? "", radix: 16),
+              value > 0 else { return (nil, 0) }
+        return (value / 16 - 1, value % 16)
+    }
+
     func cell(frame: Int, row: Int, column: Int) -> (owner: Int?, count: Int) {
         guard frames.indices.contains(frame) else { return (nil, 0) }
         let chars = Array(frames[frame].utf8)
@@ -772,6 +795,8 @@ final class MatchRecorder: ObservableObject {
     static let shared = MatchRecorder()
 
     @Published private(set) var replays: [MatchReplay] = []
+    /// 复盘页点“导入分析器”时设置，开始菜单收到后切到分析器并载入这一局。
+    @Published var analyzerImportID: String?
 
     private var current: MatchReplay?
     private var startedAt = Date()
@@ -813,7 +838,7 @@ final class MatchRecorder: ObservableObject {
         let types = game.playerTypes
         let humans = active.filter { types[safe: $0] == .human }
         let ais = active.filter { types[safe: $0]?.isAI == true }
-        let isOnline = game.activeOnlineMode == .remoteWS
+        let isOnline = game.gameMode == .online
         let winner = game.winnerIndex
         let winnerName = winner.flatMap { game.playerNames[safe: $0] }
 
@@ -1399,6 +1424,12 @@ private struct ReplayView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .navigationTitle("复盘")
             .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { recorder.analyzerImportID = replay.id } label: {
+                        Label("导入分析器", systemImage: "sparkle.magnifyingglass")
+                    }
+                    .disabled(!replay.isAnalyzerImportable)
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { recorder.toggleSaved(replay.id) } label: {
                         Label(replay.isSaved ? "已保存" : "保存", systemImage: replay.isSaved ? "bookmark.fill" : "bookmark")

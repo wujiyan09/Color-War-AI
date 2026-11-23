@@ -1286,8 +1286,7 @@ struct RemoteWebSocketSetupView: View {
                     .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
 
                     RoomLobbyView(game: game, onExitLobby: {
-                        wsManager.disconnect()
-                        game.activeOnlineMode = .none
+                        game.leaveOnlineMode()
                     }, onStartGame: onStartGame)
                 }
             } else {
@@ -1305,9 +1304,9 @@ struct RemoteWebSocketSetupView: View {
                     Button(action: {
                         let randomCode = String(Int.random(in: 100000...999999))
                         inputRoomCode = randomCode
+                        game.enterOnlineMode()
                         game.prepareLobbyForHosting()
                         game.playerTypes[1] = .p2pNetwork
-                        game.activeOnlineMode = .remoteWS
                         wsManager.connectAndJoinRoom(roomCode: randomCode, isHost: true, nickname: PlayerProfile.shared.myNickname)
                     }) {
                         Text("创建联机房间 (担任房主)")
@@ -1331,7 +1330,7 @@ struct RemoteWebSocketSetupView: View {
                         .textContentType(.oneTimeCode)
 
                         Button(action: {
-                            game.activeOnlineMode = .remoteWS
+                            game.enterOnlineMode()
                             wsManager.connectAndJoinRoom(roomCode: inputRoomCode, isHost: false, nickname: PlayerProfile.shared.myNickname)
                         }) {
                             Text("加入房间")
@@ -1573,6 +1572,13 @@ struct RoomLobbyView: View {
 }
 
 // MARK: - 19. 联机综合 Setup View
+
+/// 当前对局模式（唯一来源）。分析器有自己的视图状态，不经过 GameModel。
+enum GameMode: String, Equatable {
+    case duel      // 对弈：本地双人，对角开局
+    case party     // 派对：本地多人
+    case online    // 联机房间
+}
 
 enum ActiveOnlineMode {
     case none
@@ -1874,10 +1880,18 @@ private struct AnalyzerPlayView: View {
     private struct UndoState { let board: [[Cell]]; let moveCount: Int; let waitingForOpponent: Bool; let highlightedCell: Int? }
     @State private var undoStack: [UndoState] = []
     @State private var aiTask: Task<Void, Never>?
+    // 导入的整局：原始棋谱只读，拖动进度条看任意一步；在某一步改动就从那里分支，不会改坏原棋谱。
+    @Binding var importedReplay: MatchReplay?
+    @State private var replayLine: MatchReplay?
+    @State private var replayFrame = 0
+    @State private var onReplayLine = false
+    @State private var bestMoveText: String?
 
     init(game: GameModel, boardSize: Int, selfColor: Binding<Int>,
-         importedArchive: Binding<GameSaveArchive?>, initialArchive: GameSaveArchive?) {
+         importedArchive: Binding<GameSaveArchive?>, initialArchive: GameSaveArchive?,
+         importedReplay: Binding<MatchReplay?> = .constant(nil)) {
         self.game = game
+        self._importedReplay = importedReplay
         let validArchive = initialArchive.flatMap { [6, 9, 12].contains($0.boardSize) ? $0 : nil }
         let requestedSize = validArchive?.boardSize ?? boardSize
         let initialSize = [6, 9, 12].contains(requestedSize) ? requestedSize : 6
@@ -1923,6 +1937,7 @@ private struct AnalyzerPlayView: View {
     }
 
     private func tapCell(row: Int, column: Int) {
+        if onReplayLine { leaveReplayLine() }
         if !analysisStarted || isPaused {
             pushUndoSnapshot()
             switch selectedBrush {
@@ -2001,6 +2016,12 @@ private struct AnalyzerPlayView: View {
     }
 
     private func startOrResume() {
+        if onReplayLine {
+            // 从这一步分支：让引擎替“该走的一方”先走
+            if let side = replaySideToMove { selfColor = side }
+            leaveReplayLine()
+        }
+        bestMoveText = nil
         if !analysisStarted {
             analysisStarted = true
             isPaused = false
@@ -2028,6 +2049,165 @@ private struct AnalyzerPlayView: View {
         isPaused = true
     }
 
+    // MARK: 导入整局
+
+    private func replaySeatMap(_ replay: MatchReplay) -> [Int: Int] {
+        let seats = replay.duelSeats
+        return Dictionary(uniqueKeysWithValues: seats.prefix(2).enumerated().map { ($1, $0) })
+    }
+
+    private func replayBoard(_ replay: MatchReplay, frame: Int) -> [[Cell]] {
+        let map = replaySeatMap(replay)
+        return (0..<replay.boardSize).map { r in
+            (0..<replay.boardSize).map { c in
+                let v = replay.cell(frame: frame, row: r, column: c)
+                guard let o = v.owner, let owner = map[o], v.count > 0 else { return Cell(owner: nil, count: 0) }
+                return Cell(owner: owner, count: v.count)
+            }
+        }
+    }
+
+    /// 当前这一步该谁走（0 红 / 1 蓝）；最后一步之后对局已结束，返回 nil。
+    private var replaySideToMove: Int? {
+        guard let line = replayLine, let move = line.moves[safe: replayFrame] else { return nil }
+        return replaySeatMap(line)[move.player]
+    }
+
+    private func loadReplay(_ replay: MatchReplay) {
+        guard replay.isAnalyzerImportable else { return }
+        aiTask?.cancel()
+        replayLine = replay
+        boardSize = replay.boardSize
+        undoStack.removeAll()
+        waitingForOpponent = false
+        isThinking = false
+        analysisStarted = false
+        isPaused = false
+        showReplayFrame(replay.frames.count - 1)
+    }
+
+    private func showReplayFrame(_ frame: Int) {
+        guard let line = replayLine else { return }
+        aiTask?.cancel()
+        isThinking = false
+        analysisStarted = false
+        isPaused = false
+        waitingForOpponent = false
+        replayFrame = max(0, min(line.frames.count - 1, frame))
+        board = replayBoard(line, frame: replayFrame)
+        moveCount = replayFrame
+        highlightedCell = nil
+        bestMoveText = nil
+        onReplayLine = true
+    }
+
+    private func leaveReplayLine() {
+        guard onReplayLine else { return }
+        onReplayLine = false
+        undoStack.removeAll()
+        bestMoveText = nil
+    }
+
+    private func computeBestMoveForReplay() {
+        guard onReplayLine, let line = replayLine, let side = replaySideToMove, !isThinking else { return }
+        let map = replaySeatMap(line)
+        var entered = [false, false]
+        for move in line.moves.prefix(replayFrame) { if let o = map[move.player] { entered[o] = true } }
+        for row in board { for cell in row { if let o = cell.owner, o < 2 { entered[o] = true } } }
+        isThinking = true
+        highlightedCell = nil
+        bestMoveText = nil
+        let frameAtStart = replayFrame
+        // 和“开始分析”用同一个引擎、同样的参数，只算不落子
+        let solver = AISolver(
+            boardSize: boardSize,
+            activePlayers: [0, 1],
+            currentPlayer: side,
+            playerType: .driveBot,
+            aiLevel: .extreme,
+            board: board,
+            hasEntered: entered,
+            eliminated: [false, false],
+            isLocalDuelMode: false,
+            localDuelMovesPlayed: moveCount
+        )
+        aiTask = Task {
+            let move = await solver.calculateBestMove()
+            isThinking = false
+            guard !Task.isCancelled, onReplayLine, replayFrame == frameAtStart else { return }
+            guard let (row, column) = move else { bestMoveText = "这一步没有可走的位置"; return }
+            highlightedCell = row * boardSize + column
+            let actual = line.moves[safe: frameAtStart]
+            let same = actual.map { $0.row == row && $0.column == column } ?? false
+            bestMoveText = "\(side == 0 ? "红" : "蓝")方最优解：(\(row + 1), \(column + 1))" + (same ? " · 和实战一样" : (actual.map { " · 实战下在 (\($0.row + 1), \($0.column + 1))" } ?? ""))
+        }
+    }
+
+    private func replayButton(_ icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon).font(.title3).foregroundStyle(.white)
+                .frame(width: 48, height: 48)
+                .contentShape(Circle())
+                .glassEffect(.regular.interactive(), in: .circle)
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// 与复盘页相同的进度条和按钮
+    @ViewBuilder
+    private var replayControls: some View {
+        if let line = replayLine {
+            if onReplayLine {
+                VStack(spacing: 8) {
+                    if replayFrame > 0, let move = line.moves[safe: replayFrame - 1] {
+                        Text("第 \(replayFrame) 步：\(line.names[safe: move.player] ?? "玩家") 下在 (\(move.row + 1), \(move.column + 1))")
+                            .font(.subheadline).foregroundStyle(.white.opacity(0.85))
+                    } else {
+                        Text("开局").font(.subheadline).foregroundStyle(.white.opacity(0.85))
+                    }
+                    Slider(value: Binding(get: { Double(replayFrame) }, set: { showReplayFrame(Int($0.rounded())) }),
+                           in: 0...Double(max(line.frames.count - 1, 1)), step: 1)
+                        .frame(maxWidth: 520)
+                    HStack(spacing: 14) {
+                        replayButton("backward.end.fill") { showReplayFrame(0) }
+                        replayButton("chevron.left") { showReplayFrame(replayFrame - 1) }
+                        Text("\(replayFrame)/\(line.frames.count - 1)")
+                            .font(.headline.monospacedDigit()).foregroundStyle(.white).frame(minWidth: 70)
+                        replayButton("chevron.right") { showReplayFrame(replayFrame + 1) }
+                        replayButton("forward.end.fill") { showReplayFrame(line.frames.count - 1) }
+                    }
+                    Button {
+                        Haptics.shared.lightImpact()
+                        computeBestMoveForReplay()
+                    } label: {
+                        Label(isThinking ? "计算中…" : (replaySideToMove.map { "算\($0 == 0 ? "红" : "蓝")方最优解" } ?? "对局已结束"),
+                              systemImage: isThinking ? "hourglass" : "lightbulb.fill")
+                            .font(.subheadline.bold()).foregroundStyle(.white)
+                            .frame(maxWidth: 320).frame(height: 44)
+                            .contentShape(Capsule())
+                            .glassEffect(.regular.interactive().tint(.darkNavyBlue), in: .capsule)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isThinking || replaySideToMove == nil)
+                    if let bestMoveText {
+                        Text(bestMoveText).font(.footnote.bold()).foregroundStyle(.yellow)
+                    }
+                }
+            } else {
+                Button {
+                    showReplayFrame(replayFrame)
+                } label: {
+                    Label("回到导入的对局（第 \(replayFrame) 步）", systemImage: "arrow.uturn.backward.circle")
+                        .font(.subheadline.bold()).foregroundStyle(.white)
+                        .frame(maxWidth: 320).frame(height: 40)
+                        .contentShape(Capsule())
+                        .glassEffect(.regular.interactive(), in: .capsule)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
     private func toggleSelfColor() {
         guard !isThinking && (!analysisStarted || isPaused) else { return }
         selfColor = 1 - selfColor
@@ -2047,10 +2227,13 @@ private struct AnalyzerPlayView: View {
             GeometryReader { proxy in
                 let horizontal = proxy.size.width >= 900 && proxy.size.height >= 620
                 if horizontal {
-                    let boardSide = max(96, min(680, min(proxy.size.width - 280, proxy.size.height - 24)))
+                    let boardSide = max(96, min(680, min(proxy.size.width - 280, proxy.size.height - (replayLine == nil ? 24 : 240))))
                     HStack(spacing: 16) {
-                        AnalyzerBoardView(boardSize: boardSize, board: board, highlightedCell: highlightedCell,
-                                          maxSide: boardSide) { row, column in tapCell(row: row, column: column) }
+                        VStack(spacing: 10) {
+                            AnalyzerBoardView(boardSize: boardSize, board: board, highlightedCell: highlightedCell,
+                                              maxSide: boardSide) { row, column in tapCell(row: row, column: column) }
+                            replayControls
+                        }
                         AnalyzerToolPanel(compact: false,
                                           brush: $selectedBrush,
                                           isLocked: analysisStarted && !isPaused,
@@ -2069,10 +2252,12 @@ private struct AnalyzerPlayView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                     .padding(.horizontal, 12)
                 } else {
-                    let boardSide = max(96, min(proxy.size.width - 24, proxy.size.height - 374))
+                    let replayReserve: CGFloat = replayLine == nil ? 0 : (onReplayLine ? 216 : 52)
+                    let boardSide = max(96, min(proxy.size.width - 24, proxy.size.height - 374 - replayReserve))
                     VStack(spacing: 8) {
                         AnalyzerBoardView(boardSize: boardSize, board: board, highlightedCell: highlightedCell,
                                           maxSide: boardSide) { row, column in tapCell(row: row, column: column) }
+                        replayControls
                         AnalyzerToolPanel(compact: true,
                                           brush: $selectedBrush,
                                           isLocked: analysisStarted && !isPaused,
@@ -2093,7 +2278,17 @@ private struct AnalyzerPlayView: View {
             }
         }
         .onChange(of: importedArchive?.id) { _, _ in
-            if let archive = importedArchive { loadArchiveIntoAnalyzer(archive) }
+            if let archive = importedArchive {
+                replayLine = nil
+                onReplayLine = false
+                loadArchiveIntoAnalyzer(archive)
+            }
+        }
+        .onChange(of: importedReplay?.id) { _, _ in
+            if let replay = importedReplay { loadReplay(replay) }
+        }
+        .onAppear {
+            if let replay = importedReplay, replayLine?.id != replay.id { loadReplay(replay) }
         }
         .onDisappear { aiTask?.cancel() }
     }
@@ -2133,11 +2328,28 @@ struct StartMenuView: View {
     }()
     @State private var analyzerSelfColor = UserDefaults.standard.integer(forKey: "CW_Analyzer_SelfColor") == 1 ? 1 : 0
     @State private var pendingAnalyzerArchive: GameSaveArchive?
+    @State private var pendingAnalyzerReplay: MatchReplay?
+    @ObservedObject private var matchRecorder = MatchRecorder.shared
     @State private var unsupportedArchiveMessage: String?
 
-    private func startGame(isLocalDuel: Bool = false) {
-        game.isLocalDuelMode = isLocalDuel
-        if !isLocalDuel && game.isRandomFirstPlayer {
+    /// mode 显式决定这局是对弈 / 派对 / 联机。
+    private func startGame(mode: GameMode) {
+        if mode == .online {
+            guard game.gameMode == .online else { return }
+        } else {
+            let wasOnline = game.gameMode == .online || game.activeOnlineMode != .none
+            game.enterLocalMode(mode)
+            if wasOnline && mode == .party {
+                // 从联机回来：座位恢复成本地派对的设置，不沿用房间里的网络座位
+                if let saved = UserDefaults.standard.data(forKey: "CW_Party_PlayerTypes"),
+                   let values = try? JSONDecoder().decode([PlayerControlType].self, from: saved),
+                   values.count == PlayerPreset.maxPlayers {
+                    game.playerTypes = values
+                }
+                game.prepareLocalPlayerNamesForGame()
+            }
+        }
+        if mode != .duel && game.isRandomFirstPlayer {
             isSpinningRandomWheel = true
         } else {
             game.resetGame()
@@ -2149,7 +2361,7 @@ struct StartMenuView: View {
     private func startDuelGame() {
         UserDefaults.standard.set(duelBoardSize, forKey: "CW_Duel_BoardSize")
         UserDefaults.standard.set(partyBoardSize, forKey: "CW_Party_BoardSize")
-        game.isLocalDuelMode = true
+        game.enterLocalMode(.duel)
         game.boardSize = duelBoardSize
         // Old saved duel seats may still hold Bot 1/2; duel AI is Bot 3 only.
         if duelPlayerOneType.isAI && duelPlayerOneType != .driveBot { duelPlayerOneType = .driveBot }
@@ -2158,7 +2370,7 @@ struct StartMenuView: View {
         let second = duelPlayerTwoType
         game.playerTypes = [first, second] + Array(repeating: .disabled, count: max(0, PlayerPreset.maxPlayers - 2))
         game.prepareLocalPlayerNamesForGame()
-        startGame(isLocalDuel: true)
+        startGame(mode: .duel)
     }
 
     private var background: some View {
@@ -2209,12 +2421,13 @@ struct StartMenuView: View {
                 .foregroundStyle(.white)
             if selectedPartyMode == 0 {
                 LocalGameSetupView(game: game) {
+                    game.enterLocalMode(.party)
                     game.prepareLocalPlayerNamesForGame()
-                    startGame()
+                    startGame(mode: .party)
                 }
                 .frame(maxWidth: 440)
             } else {
-                RemoteWebSocketSetupView(game: game) { startGame() }
+                RemoteWebSocketSetupView(game: game) { startGame(mode: .online) }
                     .frame(maxWidth: 440)
             }
         }
@@ -2228,7 +2441,7 @@ struct StartMenuView: View {
             if let saved = UserDefaults.standard.data(forKey: "CW_Party_PlayerTypes"),
                let values = try? JSONDecoder().decode([PlayerControlType].self, from: saved),
                values.count == PlayerPreset.maxPlayers {
-                game.isLocalDuelMode = false
+                game.enterLocalMode(.party)
                 game.playerTypes = values
             } else if let data = try? JSONEncoder().encode(game.playerTypes) {
                 UserDefaults.standard.set(data, forKey: "CW_Party_PlayerTypes")
@@ -2246,13 +2459,12 @@ struct StartMenuView: View {
         }
         guard !game.isOnlineMultiplayer else { return }
         if newValue == 0 {
-            game.isLocalDuelMode = false
             game.boardSize = duelBoardSize
         } else if newValue == 1 {
             if let saved = UserDefaults.standard.data(forKey: "CW_Party_PlayerTypes"),
                let values = try? JSONDecoder().decode([PlayerControlType].self, from: saved),
                values.count == PlayerPreset.maxPlayers {
-                game.isLocalDuelMode = false
+                game.enterLocalMode(.party)
                 game.playerTypes = values
             }
             game.boardSize = partyBoardSize
@@ -2271,6 +2483,14 @@ struct StartMenuView: View {
     private func savePartyPlayerTypes(_ value: [PlayerControlType]) {
         guard selectedTab == 1, !game.isLocalDuelMode, !game.isOnlineMultiplayer else { return }
         save(value, forKey: "CW_Party_PlayerTypes")
+    }
+
+    private func importReplayToAnalyzer(_ replay: MatchReplay) {
+        guard replay.isAnalyzerImportable else { return }
+        pendingAnalyzerArchive = nil
+        pendingAnalyzerReplay = replay
+        selectedTab = 2
+        openAnalyzer()
     }
 
     private func openAnalyzer() {
@@ -2352,11 +2572,11 @@ struct StartMenuView: View {
             pendingAnalyzerArchive = archive
             openAnalyzer()
         case 0:
-            game.isLocalDuelMode = true
+            game.enterLocalMode(.duel)
             game.restoreArchive(archive)
             game.shouldNavigateToGame = true
         default:
-            game.isLocalDuelMode = false
+            game.enterLocalMode(.party)
             game.restoreArchive(archive)
             game.shouldNavigateToGame = true
         }
@@ -2388,8 +2608,9 @@ struct StartMenuView: View {
             AnalyzerPlayView(game: game, boardSize: analyzerBoardSize,
                              selfColor: $analyzerSelfColor,
                              importedArchive: $pendingAnalyzerArchive,
-                             initialArchive: pendingAnalyzerArchive)
-                .onDisappear { pendingAnalyzerArchive = nil }
+                             initialArchive: pendingAnalyzerArchive,
+                             importedReplay: $pendingAnalyzerReplay)
+                .onDisappear { pendingAnalyzerArchive = nil; pendingAnalyzerReplay = nil }
         }
     }
 
@@ -2424,7 +2645,8 @@ struct StartMenuView: View {
             AnalyzerLandingView(game: game,
                                 boardSize: $analyzerBoardSize,
                                 selfColor: $analyzerSelfColor,
-                                onStart: openAnalyzer)
+                                onStart: openAnalyzer,
+                                onImportReplay: importReplayToAnalyzer)
                 .background(background)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbarBackground(.visible, for: .navigationBar)
@@ -2483,15 +2705,15 @@ struct StartMenuView: View {
         switch request.kind {
         case .join(let code):
             if ws.isConnected { ws.disconnect() }
-            game.activeOnlineMode = .remoteWS
+            game.enterOnlineMode()
             ws.connectAndJoinRoom(roomCode: code, isHost: false, nickname: PlayerProfile.shared.myNickname)
         case .hostAndInvite(let friend):
             if !(ws.isConnected && ws.isHost) {
                 if ws.isConnected { ws.disconnect() }
                 let code = String(Int.random(in: 100000...999999))
+                game.enterOnlineMode()
                 game.prepareLobbyForHosting()
                 game.playerTypes[1] = .p2pNetwork
-                game.activeOnlineMode = .remoteWS
                 ws.connectAndJoinRoom(roomCode: code, isHost: true, nickname: PlayerProfile.shared.myNickname)
             }
             Task { @MainActor in
@@ -2580,6 +2802,11 @@ struct StartMenuView: View {
             .onChange(of: game.shouldNavigateToGame) { _, shouldNavigate in
                 if shouldNavigate { openGame() }
             }
+            .onChange(of: matchRecorder.analyzerImportID) { _, id in
+                guard let id else { return }
+                matchRecorder.analyzerImportID = nil
+                if let replay = matchRecorder.replay(for: id) { importReplayToAnalyzer(replay) }
+            }
     }
 
 }
@@ -2594,16 +2821,95 @@ private struct AnalyzerLandingView: View {
     @Binding var boardSize: Int
     @Binding var selfColor: Int
     let onStart: () -> Void
+    var onImportReplay: (MatchReplay) -> Void = { _ in }
+    @ObservedObject private var recorder = MatchRecorder.shared
 
     var body: some View {
-        VStack(spacing: 16) {
-            Text("COLOR WAR")
-                .font(.system(size: 36, weight: .black, design: .rounded))
-                .foregroundStyle(.white)
-            AnalyzerSetupView(boardSize: $boardSize, selfColor: $selfColor, onStart: onStart)
+        GeometryReader { proxy in
+            ScrollView {
+                VStack(spacing: 16) {
+                    Text("COLOR WAR")
+                        .font(.system(size: 36, weight: .black, design: .rounded))
+                        .foregroundStyle(.white)
+                    AnalyzerSetupView(boardSize: $boardSize, selfColor: $selfColor, onStart: onStart)
+                    RecentGamesCard(recorder: recorder, onImport: onImportReplay)
+                        .frame(maxWidth: 440)
+                        .padding(.horizontal, 20)
+                }
+                .frame(maxWidth: .infinity, minHeight: proxy.size.height)
+            }
+            .scrollBounceBehavior(.basedOnSize)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.clear)
+    }
+}
+
+/// 最近对局：自动保留最近 5 局完整棋谱（滚动替换）；收藏的长期保留，不占这 5 局的名额。
+private struct RecentGamesCard: View {
+    @ObservedObject var recorder: MatchRecorder
+    let onImport: (MatchReplay) -> Void
+
+    private static let dateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "zh_CN")
+        f.dateFormat = "M月d日 HH:mm"
+        return f
+    }()
+
+    private func row(_ replay: MatchReplay) -> some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(replay.title.isEmpty ? "\(replay.boardSize)×\(replay.boardSize) 对局" : replay.title)
+                    .font(.subheadline.bold()).foregroundStyle(.white).lineLimit(1)
+                Text(Self.dateFormatter.string(from: Date(timeIntervalSince1970: replay.playedAt / 1000))
+                     + (replay.isAnalyzerImportable ? "" : " · 多人局不能导入"))
+                    .font(.caption).foregroundStyle(.white.opacity(0.6))
+            }
+            Spacer(minLength: 4)
+            Button { recorder.toggleSaved(replay.id) } label: {
+                Image(systemName: replay.isSaved ? "star.fill" : "star")
+                    .foregroundStyle(replay.isSaved ? .yellow : .white.opacity(0.8))
+                    .frame(width: 34, height: 34)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(replay.isSaved ? "取消收藏" : "收藏")
+            Button { onImport(replay) } label: {
+                Text("导入分析器").font(.caption.bold()).foregroundStyle(.white)
+                    .padding(.horizontal, 10).frame(height: 32)
+                    .glassEffect(.regular.interactive().tint(.darkNavyBlue), in: .capsule)
+            }
+            .buttonStyle(.plain)
+            .disabled(!replay.isAnalyzerImportable)
+            .opacity(replay.isAnalyzerImportable ? 1 : 0.4)
+        }
+        .padding(.vertical, 4)
+        .contextMenu {
+            Button(role: .destructive) { recorder.delete(replay.id) } label: { Label("删除", systemImage: "trash") }
+        }
+    }
+
+    var body: some View {
+        let pinned = recorder.replays.filter(\.isSaved)
+        let recent = recorder.replays.filter { !$0.isSaved }
+        VStack(alignment: .leading, spacing: 8) {
+            Text("最近对局").font(.headline.bold()).foregroundStyle(.white)
+            Text("自动保留最近 5 局；点星标收藏后长期保留。长按可删除。")
+                .font(.caption).foregroundStyle(.white.opacity(0.6))
+            if recorder.replays.isEmpty {
+                Text("还没有对局记录，下完一局就会出现在这里。")
+                    .font(.footnote).foregroundStyle(.white.opacity(0.7)).padding(.vertical, 6)
+            }
+            if !pinned.isEmpty {
+                Text("已收藏").font(.caption.bold()).foregroundStyle(.yellow.opacity(0.9)).padding(.top, 4)
+                ForEach(pinned) { row($0) }
+            }
+            if !recent.isEmpty {
+                Text("最近 5 局").font(.caption.bold()).foregroundStyle(.white.opacity(0.8)).padding(.top, 4)
+                ForEach(recent) { row($0) }
+            }
+        }
+        .padding(12)
+        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
     }
 }
 
