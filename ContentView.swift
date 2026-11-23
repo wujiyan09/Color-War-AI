@@ -1750,7 +1750,7 @@ private struct AnalyzerToolPanel: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.85)
                 .frame(maxWidth: .infinity)
-                .frame(height: compact ? 56 : 48)
+                .frame(height: compact ? 46 : 44)
                 .contentShape(Capsule())
                 .glassEffect(.regular.interactive().tint(.darkNavyBlue), in: .capsule)
         }
@@ -1770,7 +1770,7 @@ private struct AnalyzerToolPanel: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.85)
                 .frame(maxWidth: .infinity)
-                .frame(height: compact ? 56 : 48)
+                .frame(height: compact ? 46 : 44)
                 .contentShape(Capsule())
                 .glassEffect(.regular.interactive(), in: .capsule)
         }
@@ -1835,7 +1835,7 @@ private struct AnalyzerToolPanel: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
                     .frame(maxWidth: .infinity)
-                    .frame(height: compact ? 56 : 48)
+                    .frame(height: compact ? 46 : 44)
                     .contentShape(Rectangle())
                     .glassEffect(.regular.interactive(), in: .capsule)
             }
@@ -1853,7 +1853,7 @@ private struct AnalyzerToolPanel: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
                     .frame(maxWidth: .infinity)
-                    .frame(height: compact ? 56 : 48)
+                    .frame(height: compact ? 46 : 44)
                     .contentShape(Rectangle())
                     .glassEffect(.regular.interactive(), in: .capsule)
             }
@@ -2146,7 +2146,7 @@ private struct AnalyzerPlayView: View {
     private func replayButton(_ icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: icon).font(.title3).foregroundStyle(.white)
-                .frame(width: 48, height: 48)
+                .frame(width: 44, height: 44)
                 .contentShape(Circle())
                 .glassEffect(.regular.interactive(), in: .circle)
         }
@@ -2199,7 +2199,7 @@ private struct AnalyzerPlayView: View {
                 } label: {
                     Label("回到导入的对局（第 \(replayFrame) 步）", systemImage: "arrow.uturn.backward.circle")
                         .font(.subheadline.bold()).foregroundStyle(.white)
-                        .frame(maxWidth: 320).frame(height: 40)
+                        .frame(maxWidth: 320).frame(height: 44)
                         .contentShape(Capsule())
                         .glassEffect(.regular.interactive(), in: .capsule)
                 }
