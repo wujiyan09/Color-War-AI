@@ -24,3 +24,9 @@ class PeriodsAndStatsTests(unittest.TestCase):
     def test_stats_refresh_after_upload(self):
         i = ACC.index("func uploadPendingMatches")
         self.assertIn("await refreshMe()", ACC[i:i + 1200])
+
+class FriendsCacheTests(unittest.TestCase):
+    def test_friends_cached_and_refreshed_on_open(self):
+        self.assertIn('forKey: "CW_Account_CachedFriends"', ACC)
+        self.assertIn("decode(FriendsResponse.self, from: data)", ACC)
+        self.assertIn("await store.refreshHistory()\n            await store.refreshFriends()", ACC)

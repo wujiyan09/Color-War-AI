@@ -304,7 +304,10 @@ final class AccountStore: ObservableObject {
     @Published var errorMessage: String?
     @Published var toast: String?
     @Published private(set) var history: [MatchRecord] = []
-    @Published private(set) var friends = FriendsResponse(friends: [], incoming: [], outgoing: [])
+    @Published private(set) var friends = FriendsResponse(friends: [], incoming: [], outgoing: []) {
+        // 存在本机：重新打开 App 时好友卡片马上有内容，打开「我的」时再刷新一次
+        didSet { UserDefaults.standard.set(try? JSONEncoder().encode(friends), forKey: "CW_Account_CachedFriends") }
+    }
     @Published private(set) var friendRequests: [FriendUser] = []
     @Published var incomingInvite: InviteItem?
     @Published var roomRequest: AccountRoomRequest?
@@ -322,6 +325,11 @@ final class AccountStore: ObservableObject {
 
     private init() {
         history = loadLocalHistory()
+        if let data = UserDefaults.standard.data(forKey: "CW_Account_CachedFriends"),
+           let cached = try? JSONDecoder().decode(FriendsResponse.self, from: data) {
+            friends = cached
+            friendRequests = cached.incoming
+        }
         if let saved = AccountKeychain.load() {
             token = saved
             if let data = UserDefaults.standard.data(forKey: cachedUserKey),
@@ -1057,6 +1065,7 @@ struct AccountTabView: View {
             await store.uploadPendingMatches()
             await store.refreshMe()
             await store.refreshHistory()
+            await store.refreshFriends()
         }
     }
 }
