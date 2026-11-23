@@ -156,14 +156,13 @@ private struct ErrorResponse: Codable { var error: String }
 private struct RespondInviteResponse: Codable { var status: String; var roomCode: String? }
 
 enum LeaderboardPeriod: String, CaseIterable, Identifiable {
-    case week, month, season, year
+    case week, month, all
     var id: String { rawValue }
     var title: String {
         switch self {
         case .week: return "周榜"
         case .month: return "月榜"
-        case .season: return "季榜"
-        case .year: return "年榜"
+        case .all: return "总榜"
         }
     }
 }
@@ -482,6 +481,8 @@ final class AccountStore: ObservableObject {
             let _: [String: Int] = try await AccountAPI.send("POST", "/api/matches", body: ["matches": payload], token: token)
             let uploaded = Set(pending.map(\.id))
             savePending(loadPending().filter { !uploaded.contains($0.id) })
+            // 传完战绩要刷新资料卡上的「N 局 · 胜 · 负」，否则一直显示缓存里的旧数字
+            await refreshMe()
         } catch {}
     }
 
@@ -1052,7 +1053,11 @@ struct AccountTabView: View {
                 }
             }
         }
-        .task { await store.refreshHistory() }
+        .task {
+            await store.uploadPendingMatches()
+            await store.refreshMe()
+            await store.refreshHistory()
+        }
     }
 }
 
@@ -1529,7 +1534,7 @@ private struct LeaderboardRow: View {
     }
 }
 
-/// 排行榜默认周期：没手动选过周期时，周榜没人就自动看月榜，再空就季榜、年榜。
+/// 排行榜默认周期：没手动选过周期时，周榜没人就自动看月榜，再空就看总榜。
 /// 手动选了周期就只查那个周期（空也照样显示）。
 @MainActor
 func loadLeaderboardWithFallback(store: AccountStore, period: LeaderboardPeriod, isAuto: Bool,

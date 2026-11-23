@@ -14,3 +14,13 @@ class LeaderboardPeriodTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class PeriodsAndStatsTests(unittest.TestCase):
+    def test_periods(self):
+        self.assertIn("case week, month, all", ACC)
+        self.assertIn('case .all: return "总榜"', ACC)
+        self.assertNotIn("季榜", ACC)
+
+    def test_stats_refresh_after_upload(self):
+        i = ACC.index("func uploadPendingMatches")
+        self.assertIn("await refreshMe()", ACC[i:i + 1200])
