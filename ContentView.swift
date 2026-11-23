@@ -1193,11 +1193,11 @@ struct DualPlayerSetupView: View {
 
             VStack(spacing: 10) {
                 HStack {
-                    Text("Bot 3 难度：\(Nov15DuelSearch.strengthName(game.duelBotStrength))")
+                    Text("Bot 3 难度：\(DuelBeginnerBot.displayName(game.duelBotStrength))")
                         .font(.subheadline.bold())
                         .foregroundColor(.white)
                     Spacer()
-                    Text(Nov15DuelSearch.strengthDetail(game.duelBotStrength))
+                    Text(DuelBeginnerBot.displayDetail(game.duelBotStrength))
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.7))
                 }
@@ -1206,7 +1206,7 @@ struct DualPlayerSetupView: View {
                         get: { Double(game.duelBotStrength) },
                         set: { game.duelBotStrength = Int($0.rounded()) }
                     ),
-                    in: 1...Double(Nov15DuelSearch.maxStrength),
+                    in: Double(DuelBeginnerBot.strength)...Double(Nov15DuelSearch.maxStrength),
                     step: 1
                 )
                 .tint(Color.darkNavyBlue)

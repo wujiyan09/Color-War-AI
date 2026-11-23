@@ -853,8 +853,13 @@ final class MatchRecorder: ObservableObject {
             mode = "vsAI"
             switch aiType {
             case .driveBot:
-                aiKey = "bot3-s\(game.duelBotStrength)"
-                aiLabel = "Bot 3 · 强度 \(game.duelBotStrength)"
+                if game.duelBotStrength == DuelBeginnerBot.strength {
+                    aiKey = DuelBeginnerBot.aiKey      // 入门单独一个榜
+                    aiLabel = DuelBeginnerBot.aiLabel
+                } else {
+                    aiKey = "bot3-s\(game.duelBotStrength)"
+                    aiLabel = "Bot 3 · 强度 \(game.duelBotStrength)"
+                }
             case .enhancedNightmare:
                 aiKey = "bot2-l\(game.aiDifficultyLevel.rawValue)"
                 aiLabel = "Bot 2 · \(game.aiDifficultyLevel.rawValue)档"

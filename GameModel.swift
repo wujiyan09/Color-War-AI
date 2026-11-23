@@ -23,12 +23,19 @@ final class GameModel: ObservableObject {
             }
         }
     }
-    /// Duel-mode Bot 3 strength slider (1...4, 4 = full Drive hard).
+    /// Duel-mode Bot 3 strength slider (0...4; 0 = 入门 wrapper, 4 = full Drive hard).
     @Published var duelBotStrength: Int = {
+        if UserDefaults.standard.bool(forKey: "CW_Duel_BotBeginner") { return DuelBeginnerBot.strength }
         let saved = UserDefaults.standard.integer(forKey: "CW_Duel_BotStrength")
         return (1...Nov15DuelSearch.maxStrength).contains(saved) ? saved : Nov15DuelSearch.maxStrength
     }() {
-        didSet { UserDefaults.standard.set(duelBotStrength, forKey: "CW_Duel_BotStrength") }
+        didSet {
+            // 0 在 UserDefaults 里等于“没存过”，入门单独用一个开关记住
+            UserDefaults.standard.set(duelBotStrength == DuelBeginnerBot.strength, forKey: "CW_Duel_BotBeginner")
+            if duelBotStrength != DuelBeginnerBot.strength {
+                UserDefaults.standard.set(duelBotStrength, forKey: "CW_Duel_BotStrength")
+            }
+        }
     }
     @Published var aiDifficultyLevel: AIDifficultyLevel {
         didSet {
@@ -1210,6 +1217,25 @@ final class GameModel: ObservableObject {
                        !self.isProcessingCascade
             }
             guard isCurrentTurnValid else { return }
+
+            // 双人「入门」：包在 Bot 3 规则外的弱化外壳，不经过引擎搜索
+            if currentType == .driveBot && self.isLocalDuelMode && !isWS && activePlayerIndices.count == 2
+                && self.duelBotStrength == DuelBeginnerBot.strength {
+                let snapshot = (board: board, players: activePlayerIndices, entered: hasEntered)
+                let move = await Task.detached(priority: .userInitiated) {
+                    DuelBeginnerBot.pick(board: snapshot.board, activePlayers: snapshot.players,
+                                         currentPlayer: targetPlayer, hasEntered: snapshot.entered)
+                }.value
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                if let move, !Task.isCancelled {
+                    await MainActor.run {
+                        if self.currentGameSessionID == sessionID && self.currentPlayer == targetPlayer && self.isGameInPlay {
+                            self.play(row: move.0, column: move.1, isAIMove: true)
+                        }
+                    }
+                }
+                return
+            }
 
             let solver = AISolver(
                 boardSize: boardSize,
