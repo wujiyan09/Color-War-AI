@@ -1,0 +1,16 @@
+from pathlib import Path
+import unittest
+ACC = (Path(__file__).resolve().parents[1] / "Account.swift").read_text()
+
+class LeaderboardPeriodTests(unittest.TestCase):
+    def test_auto_fallback_through_periods(self):
+        self.assertIn("for candidate in LeaderboardPeriod.allCases", ACC)
+        self.assertIn("if !response.entries.isEmpty { return (candidate, response) }", ACC)
+        self.assertEqual(ACC.count("loadLeaderboardWithFallback(store: store, period: period, isAuto: isAutoPeriod"), 2)
+
+    def test_manual_pick_disables_auto(self):
+        self.assertIn("isAuto.wrappedValue = false", ACC)
+        self.assertEqual(ACC.count("LeaderboardControls(period: manualPeriodBinding($period, isAuto: $isAutoPeriod, boardSize: $boardSize)"), 2)
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1529,6 +1529,33 @@ private struct LeaderboardRow: View {
     }
 }
 
+/// 排行榜默认周期：没手动选过周期时，周榜没人就自动看月榜，再空就季榜、年榜。
+/// 手动选了周期就只查那个周期（空也照样显示）。
+@MainActor
+func loadLeaderboardWithFallback(store: AccountStore, period: LeaderboardPeriod, isAuto: Bool,
+                                 aiKey: String?, boardSize: Int?, limit: Int) async throws -> (LeaderboardPeriod, LeaderboardResponse) {
+    guard isAuto else {
+        return (period, try await store.leaderboard(period: period, aiKey: aiKey, boardSize: boardSize, limit: limit))
+    }
+    var first: LeaderboardResponse?
+    for candidate in LeaderboardPeriod.allCases {
+        let response = try await store.leaderboard(period: candidate, aiKey: aiKey, boardSize: boardSize, limit: limit)
+        if first == nil { first = response }
+        if !response.entries.isEmpty { return (candidate, response) }
+    }
+    return (.week, first!)
+}
+
+/// 手动选周期：之后不再自动切换，棋盘大小回到该周期的默认（和以前一样）。
+private func manualPeriodBinding(_ period: Binding<LeaderboardPeriod>, isAuto: Binding<Bool>, boardSize: Binding<Int?>) -> Binding<LeaderboardPeriod> {
+    Binding(get: { period.wrappedValue }, set: { value in
+        guard value != period.wrappedValue else { return }
+        isAuto.wrappedValue = false
+        boardSize.wrappedValue = nil
+        period.wrappedValue = value
+    })
+}
+
 private struct LeaderboardControls: View {
     @Binding var period: LeaderboardPeriod
     @Binding var aiKey: String?
@@ -1541,7 +1568,6 @@ private struct LeaderboardControls: View {
             ForEach(LeaderboardPeriod.allCases) { Text($0.title).tag($0) }
         }
         .pickerStyle(.segmented)
-        .onChange(of: period) { boardSize = nil }
         if !levels.isEmpty {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
@@ -1582,6 +1608,7 @@ private struct LeaderboardControls: View {
 private struct LeaderboardPreviewCard: View {
     @ObservedObject var store = AccountStore.shared
     @State private var period: LeaderboardPeriod = .week
+    @State private var isAutoPeriod = true
     @State private var aiKey: String?
     @State private var boardSize: Int?
     @State private var data: LeaderboardResponse?
@@ -1594,7 +1621,7 @@ private struct LeaderboardPreviewCard: View {
                 Spacer()
                 Image(systemName: "chevron.right").foregroundStyle(.white.opacity(0.5))
             }
-            LeaderboardControls(period: $period, aiKey: $aiKey, boardSize: $boardSize, levels: data?.levels ?? [], boardSizes: data?.boardSizes ?? [])
+            LeaderboardControls(period: manualPeriodBinding($period, isAuto: $isAutoPeriod, boardSize: $boardSize), aiKey: $aiKey, boardSize: $boardSize, levels: data?.levels ?? [], boardSizes: data?.boardSizes ?? [])
             if let entries = data?.entries, !entries.isEmpty {
                 ForEach(entries.prefix(5)) { LeaderboardRow(entry: $0) }
             } else if let error {
@@ -1609,7 +1636,9 @@ private struct LeaderboardPreviewCard: View {
 
     private func load() async {
         do {
-            let response = try await store.leaderboard(period: period, aiKey: aiKey, boardSize: boardSize, limit: 5)
+            let (shown, response) = try await loadLeaderboardWithFallback(store: store, period: period, isAuto: isAutoPeriod,
+                                                                           aiKey: aiKey, boardSize: boardSize, limit: 5)
+            if shown != period { period = shown }
             data = response
             if aiKey == nil { aiKey = response.aiKey }
                 if boardSize == nil { boardSize = response.boardSize }
@@ -1623,6 +1652,7 @@ private struct LeaderboardPreviewCard: View {
 private struct LeaderboardFullView: View {
     @ObservedObject var store = AccountStore.shared
     @State private var period: LeaderboardPeriod = .week
+    @State private var isAutoPeriod = true
     @State private var aiKey: String?
     @State private var boardSize: Int?
     @State private var data: LeaderboardResponse?
@@ -1632,7 +1662,7 @@ private struct LeaderboardFullView: View {
         ScrollView {
             VStack(spacing: 12) {
                 AccountGlassCard {
-                    LeaderboardControls(period: $period, aiKey: $aiKey, boardSize: $boardSize, levels: data?.levels ?? [], boardSizes: data?.boardSizes ?? [])
+                    LeaderboardControls(period: manualPeriodBinding($period, isAuto: $isAutoPeriod, boardSize: $boardSize), aiKey: $aiKey, boardSize: $boardSize, levels: data?.levels ?? [], boardSizes: data?.boardSizes ?? [])
                     if let rule = data?.rule {
                         Text(rule).font(.caption2).foregroundStyle(.white.opacity(0.6))
                     }
@@ -1657,7 +1687,9 @@ private struct LeaderboardFullView: View {
         .navigationTitle("排行榜 · 前 100 名")
         .task(id: "\(period.rawValue)-\(aiKey ?? "")-\(boardSize ?? 0)") {
             do {
-                let response = try await store.leaderboard(period: period, aiKey: aiKey, boardSize: boardSize, limit: 100)
+                let (shown, response) = try await loadLeaderboardWithFallback(store: store, period: period, isAuto: isAutoPeriod,
+                                                                               aiKey: aiKey, boardSize: boardSize, limit: 100)
+                if shown != period { period = shown }
                 data = response
                 if aiKey == nil { aiKey = response.aiKey }
                 if boardSize == nil { boardSize = response.boardSize }
