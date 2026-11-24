@@ -526,12 +526,32 @@ struct AISolver: Sendable {
     }
 
     func calculateBestMove() async -> (Int, Int)? {
-        if playerType != .driveBot && searchStopped { return nil }
+        let isWeakBot2 = playerType == .enhancedNightmare && !isLocalDuelMode && !directBotpickSearch
+        if playerType != .driveBot && !isWeakBot2 && searchStopped { return nil }
         // The Drive botpick search is a two-player zero-sum engine. In party
         // games, continue into the shared multiplayer MaxN path instead of
         // returning nil before the bot can place its opening piece.
         // Bot 3 in party games (3+ seats): paranoid search while 3+ seats are
         // alive, then the unchanged Nov15 duel search once two remain.
+        // Bot 2 in party / online games (not duel): Bot 3's engines, weakened
+        // (see Bot2Weak.swift). Paranoid while 3+ alive, duel search once two remain.
+        if isWeakBot2 {
+            let alive = activePlayers.filter { !isPlayerEliminated($0, in: eliminated) }
+            if alive.count == 2 {
+                if let move = Nov15DuelSearch.bestMove(board: board, activePlayers: alive,
+                                                       currentPlayer: currentPlayer, hasEntered: hasEntered,
+                                                       level: 3, movesPlayed: localDuelMovesPlayed, weak: true) {
+                    return move
+                }
+            } else if alive.count > 2 {
+                if let move = Nov15ParanoidSearch.bestMove(board: board, players: alive,
+                                                           currentPlayer: currentPlayer, hasEntered: hasEntered,
+                                                           eliminated: eliminated, movesPlayed: localDuelMovesPlayed,
+                                                           weak: true) {
+                    return move
+                }
+            }
+        }
         if playerType == .driveBot && activePlayers.count > 2 && !directBotpickSearch {
             let alive = activePlayers.filter { !isPlayerEliminated($0, in: eliminated) }
             if alive.count == 2 {

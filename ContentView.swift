@@ -1138,6 +1138,10 @@ struct DualPlayerSetupView: View {
 
     // Duel mode: human or the Drive-method Bot 3 only. Bot 1/2 stay in party mode.
     private let selectableBotTypes: [PlayerControlType] = [.human, .driveBot]
+    /// 双人（对弈）里 Bot 3 显示为 Bot 0（只改显示，引擎和 aiKey 不变）。
+    private func duelDisplayName(_ type: PlayerControlType) -> String {
+        type == .driveBot ? "Bot 0" : type.displayName
+    }
 
     private func playerCard(title: String, type: Binding<PlayerControlType>, color: Color, icon: String) -> some View {
         Button {
@@ -1154,7 +1158,7 @@ struct DualPlayerSetupView: View {
                 Text(title)
                     .font(.headline.bold())
                     .foregroundStyle(.white)
-                Text(type.wrappedValue.displayName)
+                Text(duelDisplayName(type.wrappedValue))
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white.opacity(0.86))
                 Text("重复点按切换")
@@ -1166,7 +1170,7 @@ struct DualPlayerSetupView: View {
             .glassEffect(.regular.interactive().tint(color.opacity(0.18)), in: .rect(cornerRadius: PlayerPreset.cardCornerRadius))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(title)，\(type.wrappedValue.displayName)，重复点按切换")
+        .accessibilityLabel("\(title)，\(duelDisplayName(type.wrappedValue))，重复点按切换")
     }
 
     var body: some View {
@@ -1193,7 +1197,7 @@ struct DualPlayerSetupView: View {
 
             VStack(spacing: 10) {
                 HStack {
-                    Text("Bot 3 难度：\(DuelBeginnerBot.displayName(game.duelBotStrength))")
+                    Text("Bot 0 难度：\(DuelBeginnerBot.displayName(game.duelBotStrength))")
                         .font(.subheadline.bold())
                         .foregroundColor(.white)
                     Spacer()

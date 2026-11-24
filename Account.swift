@@ -171,9 +171,22 @@ enum LeaderboardPeriod: String, CaseIterable, Identifiable {
     }
 }
 
-/// 只改显示：Bot 3 强度 4（原 Drive 原版）显示为“困难+”，存储的 aiKey/aiLabel 不变
+/// 只改显示，存储的 aiKey/aiLabel 不变（2026-11-24）：
+/// 双人（对弈）的 Bot 3 显示为“Bot 0 · 难度名”（入门/简单/中等/困难/困难+）；
+/// 派对的 Bot 1/2 只显示“Bot N”，不带档位。网页 account.js 同一套规则。
 func displayAILabel(_ label: String) -> String {
-    label.replacingOccurrences(of: "Bot 3 · 强度 4", with: "Bot 3 · 困难+")
+    func duelName(_ strength: Int) -> String {
+        "Bot 0 · " + (strength == DuelBeginnerBot.strength ? DuelBeginnerBot.name : Nov15DuelSearch.strengthName(strength))
+    }
+    if label == DuelBeginnerBot.aiLabel { return duelName(DuelBeginnerBot.strength) }
+    for prefix in ["Bot 3 · 强度 ", "bot3-s"] where label.hasPrefix(prefix) {
+        if let n = Int(label.dropFirst(prefix.count)) { return duelName(n) }
+    }
+    for n in ["1", "2"] {
+        if label.hasPrefix("Bot \(n) · ") && label.hasSuffix("档") { return "Bot \(n)" }
+        if label.hasPrefix("bot\(n)-l") { return "Bot \(n)" }
+    }
+    return label
 }
 
 // MARK: - 账号：网络请求

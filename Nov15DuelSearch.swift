@@ -90,7 +90,7 @@ struct Nov15DuelSearch {
         var move: Int
     }
     private struct Context {
-        let deadline: Double
+        var deadline: Double
         var nodes = 0
         var stopped = false
         var table: [UInt64: Entry] = [:]
@@ -364,7 +364,7 @@ struct Nov15DuelSearch {
         }
     }
 
-    static func bestMove(board: AISolver.Board, activePlayers: [Int], currentPlayer: Int, hasEntered: [Bool], level: Int, movesPlayed: Int, openingSeed: String? = nil, strength: Int = maxStrength) -> (Int, Int)? {
+    static func bestMove(board: AISolver.Board, activePlayers: [Int], currentPlayer: Int, hasEntered: [Bool], level: Int, movesPlayed: Int, openingSeed: String? = nil, strength: Int = maxStrength, weak: Bool = false, rng: () -> Double = { Double.random(in: 0..<1) }) -> (Int, Int)? {
         guard (2...12).contains(board.size), activePlayers.count == 2, let side = activePlayers.firstIndex(of: currentPlayer) else { return nil }
         let size = board.size
         var cells = [UInt8](repeating: 0, count: size * size)
@@ -381,7 +381,15 @@ struct Nov15DuelSearch {
         let moves = legalMoves(cells, side, enteredMask, size)
         guard let first = moves.first else { return nil }
         if terminal(cells, side, enteredMask, 0) != nil { return nil }
-        let searchParameters = capped(parameters(level: level, movesPlayed: movesPlayed), strength: strength)
+        let searchParameters: SearchParameters
+        if weak {
+            // Bot 2 (party/online): weakened budgets, no randomize, no opening book.
+            let w = Bot2Weak.limits(movesPlayed: movesPlayed)
+            searchParameters = SearchParameters(timeMs: w.timeMs, softTimeMs: w.softTimeMs,
+                                                minTimeMs: w.minTimeMs, maxDepth: w.maxDepth, randomize: false)
+        } else {
+            searchParameters = capped(parameters(level: level, movesPlayed: movesPlayed), strength: strength)
+        }
         if searchParameters.randomize {
             let ranked = moves.map { ($0, quietHeuristic(cells, $0, side, enteredMask, size)) }.sorted { $0.1 > $1.1 }
             let candidates = Array(ranked.prefix(3))
@@ -391,7 +399,7 @@ struct Nov15DuelSearch {
         if moves.count == 1 { return (first / size, first % size) }
         // Drive's 12-move opening book (local duel only: both sides start entered
         // with one piece in opposite corners, exactly like dots-online).
-        if let seed = openingSeed, enteredMask == 3, movesPlayed < 30 {
+        if !weak, let seed = openingSeed, enteredMask == 3, movesPlayed < 30 {
             let firstSide = movesPlayed.isMultiple(of: 2) ? side : 1 - side
             let ownMoves = side == firstSide ? (movesPlayed + 1) / 2 : movesPlayed / 2
             if ownMoves < 12 {
@@ -426,6 +434,26 @@ struct Nov15DuelSearch {
                 if let stableMove = recentMoves.first,
                    recentMoves.allSatisfy({ $0 == stableMove }), scoreDelta <= 8 { break }
             }
+        }
+        if weak, depthCompleted > 0, let bestScore = completedScores.last, rng() < Bot2Weak.mistakeRate {
+            // Bot 2 mistake: null-window test of every other root move at the
+            // last completed depth; keep those scoring >= best - window.
+            let cutoff = bestScore - Bot2Weak.mistakeWindow
+            context.deadline = ProcessInfo.processInfo.systemUptime + searchParameters.timeMs / 1000
+            context.stopped = false
+            var candidates: [Int] = []
+            for move in ordered where move != best {
+                let next = simulate(cells, move, side, enteredMask, size)
+                let score: Int
+                if let result = terminal(next.cells, 1 - side, next.entered, depthCompleted) {
+                    score = -result
+                } else {
+                    score = -search(next.cells, 1 - side, next.entered, depthCompleted - 1, -cutoff, -(cutoff - 1), 1, &context, size, true).score
+                }
+                if context.stopped || Task.isCancelled { break }
+                if score >= cutoff { candidates.append(move) }
+            }
+            if let picked = Bot2Weak.pick(candidates, rng: rng) { best = picked }
         }
         _ = depthCompleted
         return (best / size, best % size)

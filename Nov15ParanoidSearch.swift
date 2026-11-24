@@ -44,7 +44,7 @@ struct Nov15ParanoidSearch {
 
     private struct Entry { var depth: Int; var score: Int; var flag: Int; var move: Int }
     private struct Context {
-        let deadline: Double
+        var deadline: Double
         let me: Int
         let sides: Int
         var nodes = 0
@@ -246,7 +246,7 @@ struct Nov15ParanoidSearch {
         return Result(score: best, move: bestMove)
     }
 
-    static func bestMove(board: AISolver.Board, players: [Int], currentPlayer: Int, hasEntered: [Bool], eliminated: [Bool], movesPlayed: Int) -> (Int, Int)? {
+    static func bestMove(board: AISolver.Board, players: [Int], currentPlayer: Int, hasEntered: [Bool], eliminated: [Bool], movesPlayed: Int, weak: Bool = false, rng: () -> Double = { Double.random(in: 0..<1) }) -> (Int, Int)? {
         guard (2...12).contains(board.size), (3...maxSides).contains(players.count),
               let me = players.firstIndex(of: currentPlayer) else { return nil }
         let size = board.size, sides = players.count
@@ -265,7 +265,14 @@ struct Nov15ParanoidSearch {
         let moves = legalMoves(root, me)
         guard let first = moves.first else { return nil }
         if moves.count == 1 { return (first / size, first % size) }
-        let params = parameters(movesPlayed: movesPlayed)
+        let params: SearchParameters
+        if weak {
+            // Bot 2 (party/online): weakened budgets.
+            let w = Bot2Weak.limits(movesPlayed: movesPlayed)
+            params = SearchParameters(timeMs: w.timeMs, softTimeMs: w.softTimeMs, minTimeMs: w.minTimeMs, maxDepth: w.maxDepth)
+        } else {
+            params = parameters(movesPlayed: movesPlayed)
+        }
         let startTime = ProcessInfo.processInfo.systemUptime
         var context = Context(deadline: startTime + params.timeMs / 1000, me: me, sides: sides,
                               history: Array(repeating: 0, count: sides * 144))
@@ -286,6 +293,22 @@ struct Nov15ParanoidSearch {
                 let delta = abs(result.score - completedScores[completedScores.count - 3])
                 if let stable = recent.first, recent.allSatisfy({ $0 == stable }), delta <= 8 { break }
             }
+        }
+        let depthCompleted = completedMoves.count
+        if weak, depthCompleted > 0, let bestScore = completedScores.last, rng() < Bot2Weak.mistakeRate {
+            // Bot 2 mistake: null-window test of every other root move at the
+            // last completed depth; keep those scoring >= best - window.
+            let cutoff = bestScore - Bot2Weak.mistakeWindow
+            context.deadline = ProcessInfo.processInfo.systemUptime + params.timeMs / 1000
+            context.stopped = false
+            var candidates: [Int] = []
+            for move in ordered where move != best {
+                let next = simulate(root, move, me, size, sides)
+                let score = search(next, nextSide(me, next, sides), depthCompleted - 1, cutoff - 1, cutoff, 1, &context, size).score
+                if context.stopped || Task.isCancelled { break }
+                if score >= cutoff { candidates.append(move) }
+            }
+            if let picked = Bot2Weak.pick(candidates, rng: rng) { best = picked }
         }
         return (best / size, best % size)
     }
