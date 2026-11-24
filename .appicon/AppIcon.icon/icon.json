@@ -20,11 +20,136 @@
       "blur-material": null,
       "layers": [
         {
+          "glass": false,
+          "image-name": "Rim1.svg",
+          "name": "Rim1",
+          "position": {
+            "scale": 1,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "glass": false,
+          "image-name": "Rim2.svg",
+          "name": "Rim2",
+          "position": {
+            "scale": 1,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "glass": false,
+          "image-name": "Rim3.svg",
+          "name": "Rim3",
+          "position": {
+            "scale": 1,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "glass": false,
+          "image-name": "Rim4.svg",
+          "name": "Rim4",
+          "position": {
+            "scale": 1,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "glass": false,
+          "image-name": "Rim5.svg",
+          "name": "Rim5",
+          "position": {
+            "scale": 1,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "glass": false,
+          "image-name": "Rim6.svg",
+          "name": "Rim6",
+          "position": {
+            "scale": 1,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "glass": false,
+          "image-name": "Rim7.svg",
+          "name": "Rim7",
+          "position": {
+            "scale": 1,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "glass": false,
+          "image-name": "Rim8.svg",
+          "name": "Rim8",
+          "position": {
+            "scale": 1,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "glass": false,
+          "image-name": "Rim9.svg",
+          "name": "Rim9",
+          "position": {
+            "scale": 1,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "lighting": "individual",
+      "name": "Highlights",
+      "opacity": 0.9,
+      "shadow": {
+        "kind": "none",
+        "opacity": 0.5
+      },
+      "specular": false,
+      "translucency": {
+        "enabled": false,
+        "value": 0.5
+      }
+    },
+    {
+      "blur-material": 0.3,
+      "layers": [
+        {
           "glass": true,
           "image-name": "Dot1.svg",
           "name": "Dot1",
           "fill": {
-            "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+            "solid": "srgb:1.00000,1.00000,1.00000,0.08000"
           },
           "position": {
             "scale": 1,
@@ -39,7 +164,7 @@
           "image-name": "Dot2.svg",
           "name": "Dot2",
           "fill": {
-            "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+            "solid": "srgb:1.00000,1.00000,1.00000,0.08000"
           },
           "position": {
             "scale": 1,
@@ -54,7 +179,7 @@
           "image-name": "Dot3.svg",
           "name": "Dot3",
           "fill": {
-            "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+            "solid": "srgb:1.00000,1.00000,1.00000,0.08000"
           },
           "position": {
             "scale": 1,
@@ -69,7 +194,7 @@
           "image-name": "Dot4.svg",
           "name": "Dot4",
           "fill": {
-            "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+            "solid": "srgb:1.00000,1.00000,1.00000,0.08000"
           },
           "position": {
             "scale": 1,
@@ -84,7 +209,7 @@
           "image-name": "Dot5.svg",
           "name": "Dot5",
           "fill": {
-            "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+            "solid": "srgb:1.00000,1.00000,1.00000,0.08000"
           },
           "position": {
             "scale": 1,
@@ -99,7 +224,7 @@
           "image-name": "Dot6.svg",
           "name": "Dot6",
           "fill": {
-            "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+            "solid": "srgb:1.00000,1.00000,1.00000,0.08000"
           },
           "position": {
             "scale": 1,
@@ -114,7 +239,7 @@
           "image-name": "Dot7.svg",
           "name": "Dot7",
           "fill": {
-            "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+            "solid": "srgb:1.00000,1.00000,1.00000,0.08000"
           },
           "position": {
             "scale": 1,
@@ -129,7 +254,7 @@
           "image-name": "Dot8.svg",
           "name": "Dot8",
           "fill": {
-            "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+            "solid": "srgb:1.00000,1.00000,1.00000,0.08000"
           },
           "position": {
             "scale": 1,
@@ -144,7 +269,7 @@
           "image-name": "Dot9.svg",
           "name": "Dot9",
           "fill": {
-            "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+            "solid": "srgb:1.00000,1.00000,1.00000,0.08000"
           },
           "position": {
             "scale": 1,
@@ -159,12 +284,12 @@
       "name": "Dots",
       "shadow": {
         "kind": "neutral",
-        "opacity": 0.5
+        "opacity": 1.2
       },
       "specular": true,
       "translucency": {
         "enabled": true,
-        "value": 0.2
+        "value": 0.8
       }
     }
   ],
