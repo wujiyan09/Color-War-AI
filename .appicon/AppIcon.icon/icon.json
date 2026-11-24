@@ -130,7 +130,7 @@
       ],
       "lighting": "individual",
       "name": "Highlights",
-      "opacity": 0.9,
+      "opacity": 0.45,
       "shadow": {
         "kind": "none",
         "opacity": 0.5
@@ -142,14 +142,14 @@
       }
     },
     {
-      "blur-material": 0.3,
+      "blur-material": 0.5,
       "layers": [
         {
           "glass": true,
           "image-name": "Dot1.svg",
           "name": "Dot1",
           "fill": {
-            "solid": "srgb:1.00000,1.00000,1.00000,0.00000"
+            "solid": "srgb:1.00000,1.00000,1.00000,0.18000"
           },
           "position": {
             "scale": 1,
@@ -164,7 +164,7 @@
           "image-name": "Dot2.svg",
           "name": "Dot2",
           "fill": {
-            "solid": "srgb:1.00000,1.00000,1.00000,0.00000"
+            "solid": "srgb:1.00000,1.00000,1.00000,0.18000"
           },
           "position": {
             "scale": 1,
@@ -179,7 +179,7 @@
           "image-name": "Dot3.svg",
           "name": "Dot3",
           "fill": {
-            "solid": "srgb:1.00000,1.00000,1.00000,0.00000"
+            "solid": "srgb:1.00000,1.00000,1.00000,0.18000"
           },
           "position": {
             "scale": 1,
@@ -194,7 +194,7 @@
           "image-name": "Dot4.svg",
           "name": "Dot4",
           "fill": {
-            "solid": "srgb:1.00000,1.00000,1.00000,0.00000"
+            "solid": "srgb:1.00000,1.00000,1.00000,0.18000"
           },
           "position": {
             "scale": 1,
@@ -209,7 +209,7 @@
           "image-name": "Dot5.svg",
           "name": "Dot5",
           "fill": {
-            "solid": "srgb:1.00000,1.00000,1.00000,0.00000"
+            "solid": "srgb:1.00000,1.00000,1.00000,0.18000"
           },
           "position": {
             "scale": 1,
@@ -224,7 +224,7 @@
           "image-name": "Dot6.svg",
           "name": "Dot6",
           "fill": {
-            "solid": "srgb:1.00000,1.00000,1.00000,0.00000"
+            "solid": "srgb:1.00000,1.00000,1.00000,0.18000"
           },
           "position": {
             "scale": 1,
@@ -239,7 +239,7 @@
           "image-name": "Dot7.svg",
           "name": "Dot7",
           "fill": {
-            "solid": "srgb:1.00000,1.00000,1.00000,0.00000"
+            "solid": "srgb:1.00000,1.00000,1.00000,0.18000"
           },
           "position": {
             "scale": 1,
@@ -254,7 +254,7 @@
           "image-name": "Dot8.svg",
           "name": "Dot8",
           "fill": {
-            "solid": "srgb:1.00000,1.00000,1.00000,0.00000"
+            "solid": "srgb:1.00000,1.00000,1.00000,0.18000"
           },
           "position": {
             "scale": 1,
@@ -269,7 +269,7 @@
           "image-name": "Dot9.svg",
           "name": "Dot9",
           "fill": {
-            "solid": "srgb:1.00000,1.00000,1.00000,0.00000"
+            "solid": "srgb:1.00000,1.00000,1.00000,0.18000"
           },
           "position": {
             "scale": 1,
@@ -289,7 +289,7 @@
       "specular": true,
       "translucency": {
         "enabled": true,
-        "value": 0.8
+        "value": 0.6
       }
     }
   ],
