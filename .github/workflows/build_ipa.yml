@@ -107,10 +107,58 @@ jobs:
             sips -z 1024 1024 AppIcon.png --out "$APP_DIR/iTunesArtwork@2x.png"
           fi
 
+          # Liquid Glass 图标：用 actool 编译 Icon Composer 的 .appicon/AppIcon.icon
+          if [ -d ".appicon/AppIcon.icon" ]; then
+            xcodebuild -version || true
+            mkdir -p build/icon_out
+            if xcrun actool ".appicon/AppIcon.icon" \
+                --compile build/icon_out \
+                --platform iphoneos \
+                --minimum-deployment-target 26.0 \
+                --target-device iphone --target-device ipad \
+                --app-icon AppIcon \
+                --include-all-app-icons \
+                --output-partial-info-plist build/icon_partial.plist \
+                --output-format human-readable-text --notices --warnings --errors; then
+              echo "== actool output =="
+              ls -la build/icon_out
+              plutil -p build/icon_partial.plist || true
+              if [ -f build/icon_out/Assets.car ]; then
+                cp -R build/icon_out/. "$APP_DIR/"
+                for KEY in CFBundleIcons "CFBundleIcons~ipad"; do
+                  VAL=$(plutil -extract "$KEY" json -o - build/icon_partial.plist 2>/dev/null || true)
+                  if [ -n "$VAL" ]; then
+                    plutil -replace "$KEY" -json "$VAL" "$PLIST_PATH"
+                  fi
+                done
+                xcrun assetutil --info "$APP_DIR/Assets.car" > build/icon_assetutil.json || true
+                head -c 4000 build/icon_assetutil.json || true
+                echo "ICON_COMPILE_OK"
+              else
+                echo "ICON_COMPILE_FAILED: no Assets.car"
+              fi
+            else
+              echo "ICON_COMPILE_FAILED: actool error, keeping legacy PNG icons"
+            fi
+          fi
+
           cd build
           zip -r -y ColorWarAI.ipa Payload
 
+      - name: Upload icon build output (non-main)
+        if: github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master'
+        uses: actions/upload-artifact@v4
+        with:
+          name: icon-test
+          path: |
+            build/ColorWarAI.ipa
+            build/icon_out
+            build/icon_partial.plist
+            build/icon_assetutil.json
+          if-no-files-found: warn
+
       - name: Create Release
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
