@@ -1630,7 +1630,7 @@ private struct LeaderboardControls: View {
                 HStack(spacing: 8) {
                     ForEach(levels) { level in
                         Button { aiKey = level.aiKey; boardSize = nil } label: {
-                            Text(displayAILabel(level.aiLabel ?? level.aiKey))
+                            Text(displayAILabel(level.aiKey) != level.aiKey ? displayAILabel(level.aiKey) : displayAILabel(level.aiLabel ?? level.aiKey))
                                 .font(.caption.bold())
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 10).padding(.vertical, 6)
