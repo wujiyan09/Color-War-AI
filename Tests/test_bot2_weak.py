@@ -60,3 +60,10 @@ class Bot0LabelTests(unittest.TestCase):
         self.assertIn('type == .driveBot ? "Bot 0" : type.displayName', cv)
         self.assertIn('Text("Bot 0 难度：', cv)
         self.assertIn('case .driveBot: return "Bot 3"', cv)  # party label unchanged
+
+
+class PartyBoardSizeLabelTests(unittest.TestCase):
+    def test_non_duel_sizes_show_bot3(self):
+        acct = (ROOT / "Account.swift").read_text()
+        self.assertIn("![6, 9, 12].contains(boardSize)", acct)
+        self.assertIn("displayAILabel(aiLabel, boardSize: boardSize)", acct)

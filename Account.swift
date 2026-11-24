@@ -74,7 +74,7 @@ struct MatchRecord: Codable, Identifiable, Equatable {
 
     var summary: String {
         var parts = ["\(modeText)", "\(players)人", "\(boardSize)×\(boardSize)"]
-        if let aiLabel, !aiLabel.isEmpty { parts.append(displayAILabel(aiLabel)) }
+        if let aiLabel, !aiLabel.isEmpty { parts.append(displayAILabel(aiLabel, boardSize: boardSize)) }
         parts.append("\(moves)步")
         return parts.joined(separator: " · ")
     }
@@ -174,7 +174,10 @@ enum LeaderboardPeriod: String, CaseIterable, Identifiable {
 /// 只改显示，存储的 aiKey/aiLabel 不变（2026-11-24）：
 /// 双人（对弈）的 Bot 3 显示为“Bot 0 · 难度名”（入门/简单/中等/困难/困难+）；
 /// 派对的 Bot 1/2 只显示“Bot N”，不带档位。网页 account.js 同一套规则。
-func displayAILabel(_ label: String) -> String {
+func displayAILabel(_ label: String, boardSize: Int? = nil) -> String {
+    // 对弈 tab 一直只能用 6/9/12 棋盘，其他尺寸的 Bot 3 记录一定是派对局 → 只显示“Bot 3”。
+    if let boardSize, ![6, 9, 12].contains(boardSize),
+       label.hasPrefix("Bot 3 · ") || label.hasPrefix("Bot 0 · ") || label.hasPrefix("bot3-s") { return "Bot 3" }
     func duelName(_ strength: Int) -> String {
         "Bot 0 · " + (strength == DuelBeginnerBot.strength ? DuelBeginnerBot.name : Nov15DuelSearch.strengthName(strength))
     }
