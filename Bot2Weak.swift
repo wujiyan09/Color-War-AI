@@ -7,7 +7,7 @@ import Foundation
 // Mirrored on the web in bot2-weak.js (keep the numbers identical).
 enum Bot2Weak {
     /// Chance per move to play a near-best root move instead of the best one.
-    static let mistakeRate = 0.05
+    static let mistakeRate = 0.15
     /// A root move qualifies for a mistake when it scores >= best - mistakeWindow.
     static let mistakeWindow = 30
 

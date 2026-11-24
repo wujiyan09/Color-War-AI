@@ -13,7 +13,7 @@ class Bot2WeakTests(unittest.TestCase):
     """Bot 2 in party/online = Bot 3's engines, weakened (2026-11-24). Mirrors web bot2-weak.js."""
 
     def test_parameters(self):
-        self.assertIn("static let mistakeRate = 0.05", WEAK)
+        self.assertIn("static let mistakeRate = 0.15", WEAK)
         self.assertIn("static let mistakeWindow = 30", WEAK)
         self.assertIn("movesPlayed < 30", WEAK)
         self.assertIn("Limits(timeMs: 150, softTimeMs: 50, minTimeMs: 20, maxDepth: 4)", WEAK)
@@ -67,3 +67,29 @@ class PartyBoardSizeLabelTests(unittest.TestCase):
         acct = (ROOT / "Account.swift").read_text()
         self.assertIn("![6, 9, 12].contains(boardSize)", acct)
         self.assertIn("displayAILabel(aiLabel, boardSize: boardSize)", acct)
+
+
+class AntiMemorisationTests(unittest.TestCase):
+    """Bot 0 / party Bot 3 vs-AI variety (2026-11-24). Mirrors web drive-duel-ai.js VARY_* / seededUnit."""
+
+    def test_constants_and_routing(self):
+        self.assertIn("static let varyPlies = 20", DUEL)
+        self.assertIn("static let varyMargin = 20", DUEL)
+        self.assertIn("if !weak, let varySeed, movesPlayed < varyPlies", DUEL)
+        self.assertIn("abs(bestScore) < 900_000", DUEL)
+        self.assertIn("varySeed: varySeed)", AI)
+        gm = (ROOT / "GameModel.swift").read_text()
+        self.assertIn("varySeed: !isWS && activePlayerIndices.count == 2", gm)
+
+    def test_seeded_unit_matches_web(self):
+        M = 0xffffffff
+        def su(seed, ply):
+            h = 2166136261
+            for b in seed.encode(): h ^= b; h = (h * 16777619) & M
+            t = h ^ (((ply + 1) * 0x9E3779B1) & M)
+            t = (t + 0x6D2B79F5) & M
+            r = ((t ^ (t >> 15)) * (1 | t)) & M
+            r = ((r + (((r ^ (r >> 7)) * (61 | r)) & M)) & M) ^ r
+            return (r ^ (r >> 14)) / 4294967296
+        self.assertEqual(su("abc", 0), 0.4710382928606123)  # same value asserted in web vary.test.js
+        self.assertIn("for byte in seed.utf8 { h ^= UInt32(byte); h = h &* 16777619 }", DUEL)
