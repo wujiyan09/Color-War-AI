@@ -896,6 +896,10 @@ final class MatchRecorder: ObservableObject {
         } else if active.count == 2 && humans.count == 1 && ais.count == 1, let aiSeat = ais.first, let aiType = types[safe: aiSeat] {
             mode = "vsAI"
             switch aiType {
+            case .driveBot where !game.isLocalDuelMode:
+                // 派对里的 1v1 Bot 3：标签只写“Bot 3”（不是双人的 Bot 0 · 难度）；aiKey 暂不变，不动排行榜
+                aiKey = "bot3-s\(game.duelBotStrength)"
+                aiLabel = "Bot 3"
             case .driveBot:
                 if game.duelBotStrength == DuelBeginnerBot.strength {
                     aiKey = DuelBeginnerBot.aiKey      // 入门单独一个榜
