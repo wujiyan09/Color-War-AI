@@ -1,43 +1,20 @@
 {
-  "fill-specializations": [
-    {
-      "value": {
-        "linear-gradient": [
-          "srgb:0.18039,0.19608,0.39216,1.00000",
-          "srgb:0.10196,0.10588,0.21961,1.00000"
-        ],
-        "orientation": {
-          "start": {
-            "x": 0,
-            "y": 0
-          },
-          "stop": {
-            "x": 1,
-            "y": 1
-          }
-        }
-      }
-    },
-    {
-      "appearance": "dark",
-      "value": {
-        "linear-gradient": [
-          "srgb:0.11765,0.12941,0.26667,1.00000",
-          "srgb:0.04706,0.05098,0.10980,1.00000"
-        ],
-        "orientation": {
-          "start": {
-            "x": 0,
-            "y": 0
-          },
-          "stop": {
-            "x": 1,
-            "y": 1
-          }
-        }
+  "fill": {
+    "linear-gradient": [
+      "srgb:0.18039,0.19608,0.39216,1.00000",
+      "srgb:0.10196,0.10588,0.21961,1.00000"
+    ],
+    "orientation": {
+      "start": {
+        "x": 0,
+        "y": 0
+      },
+      "stop": {
+        "x": 1,
+        "y": 1
       }
     }
-  ],
+  },
   "groups": [
     {
       "blur-material": null,
