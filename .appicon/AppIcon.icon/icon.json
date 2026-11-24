@@ -17,131 +17,6 @@
   },
   "groups": [
     {
-      "blur-material": null,
-      "layers": [
-        {
-          "glass": false,
-          "image-name": "Rim1.svg",
-          "name": "Rim1",
-          "position": {
-            "scale": 1,
-            "translation-in-points": [
-              0,
-              0
-            ]
-          }
-        },
-        {
-          "glass": false,
-          "image-name": "Rim2.svg",
-          "name": "Rim2",
-          "position": {
-            "scale": 1,
-            "translation-in-points": [
-              0,
-              0
-            ]
-          }
-        },
-        {
-          "glass": false,
-          "image-name": "Rim3.svg",
-          "name": "Rim3",
-          "position": {
-            "scale": 1,
-            "translation-in-points": [
-              0,
-              0
-            ]
-          }
-        },
-        {
-          "glass": false,
-          "image-name": "Rim4.svg",
-          "name": "Rim4",
-          "position": {
-            "scale": 1,
-            "translation-in-points": [
-              0,
-              0
-            ]
-          }
-        },
-        {
-          "glass": false,
-          "image-name": "Rim5.svg",
-          "name": "Rim5",
-          "position": {
-            "scale": 1,
-            "translation-in-points": [
-              0,
-              0
-            ]
-          }
-        },
-        {
-          "glass": false,
-          "image-name": "Rim6.svg",
-          "name": "Rim6",
-          "position": {
-            "scale": 1,
-            "translation-in-points": [
-              0,
-              0
-            ]
-          }
-        },
-        {
-          "glass": false,
-          "image-name": "Rim7.svg",
-          "name": "Rim7",
-          "position": {
-            "scale": 1,
-            "translation-in-points": [
-              0,
-              0
-            ]
-          }
-        },
-        {
-          "glass": false,
-          "image-name": "Rim8.svg",
-          "name": "Rim8",
-          "position": {
-            "scale": 1,
-            "translation-in-points": [
-              0,
-              0
-            ]
-          }
-        },
-        {
-          "glass": false,
-          "image-name": "Rim9.svg",
-          "name": "Rim9",
-          "position": {
-            "scale": 1,
-            "translation-in-points": [
-              0,
-              0
-            ]
-          }
-        }
-      ],
-      "lighting": "individual",
-      "name": "Highlights",
-      "opacity": 0.45,
-      "shadow": {
-        "kind": "none",
-        "opacity": 0.5
-      },
-      "specular": false,
-      "translucency": {
-        "enabled": false,
-        "value": 0.5
-      }
-    },
-    {
       "blur-material": 0.5,
       "layers": [
         {
@@ -286,7 +161,7 @@
         "kind": "neutral",
         "opacity": 1.2
       },
-      "specular": true,
+      "specular": false,
       "translucency": {
         "enabled": true,
         "value": 0.6

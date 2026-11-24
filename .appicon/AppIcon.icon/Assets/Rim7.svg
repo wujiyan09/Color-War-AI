@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <path d="M 154 762 A 108 108 0 0 1 262 654 A 128 118 0 0 0 154 762 Z" fill="#FFFFFF"/>
-  <path d="M 370 762 A 108 108 0 0 1 262 870 A 148 148 0 0 0 370 762 Z" fill="#FFFFFF" fill-opacity="0.5"/>
-  <circle cx="215.8" cy="715.8" r="13.2" fill="#FFFFFF"/>
-</svg>
