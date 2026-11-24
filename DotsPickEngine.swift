@@ -70,20 +70,24 @@ enum DotsPickEngine {
         var b = board
         let cur = b[y * n + x]
         b[y * n + x] = cur != 0 ? cell(col, charge(cur) + 1) : cell(col, 1)
-        var guardCount = 5000
-        while guardCount > 0 {
+        // Color War rules (2026-11-24, same as GameModel executeMove): simultaneous waves, an exploding cell keeps
+        // its remainder (count - 4), neighbours become the mover's, cascade runs to the end.
+        var wave: [Int] = charge(b[y * n + x]) >= criticality ? [y * n + x] : []
+        var guardCount = n * n * 64
+        while !wave.isEmpty && guardCount > 0 {
             guardCount -= 1
-            var crit: [(Int, Int)] = []
-            for yy in 0..<n { for xx in 0..<n {
-                let v = b[yy * n + xx]
-                if v != 0 && charge(v) >= criticality { crit.append((xx, yy)) }
-            } }
-            if crit.isEmpty { break }
-            for (xx, yy) in crit {
-                chargeOut(&b, n, xx, yy)
-                let c = countColors(b)
-                if c.red == 0 || c.blue == 0 { return b }
+            let exploding = wave.filter { charge(b[$0]) >= criticality }
+            if exploding.isEmpty { break }
+            for e in exploding { let left = charge(b[e]) - criticality; b[e] = left > 0 ? cell(col, left) : 0 }
+            var changed: [Int] = []
+            for e in exploding {
+                for (nx, ny) in neighbors(e % n, e / n, n) {
+                    let i = ny * n + nx
+                    b[i] = cell(col, min(15, charge(b[i]) + 1))
+                    if !changed.contains(i) { changed.append(i) }
+                }
             }
+            wave = changed.filter { charge(b[$0]) >= criticality }
         }
         return b
     }

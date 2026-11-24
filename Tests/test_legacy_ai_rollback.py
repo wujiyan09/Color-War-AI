@@ -56,11 +56,11 @@ class Bot3DriveParityTests(unittest.TestCase):
         self.assertNotIn("animateDriveBotTransition", MODEL)
 
     def test_drive_transition_uses_source_charge_reset_and_queue_order(self):
-        self.assertIn("DriveBotpickEngine.neighbors(explodingIndex, size)", DRIVE)
-        self.assertIn("let wave = cells.indices.filter", DRIVE)
-        self.assertIn("setCell(explodingIndex, 0)", DRIVE)
+        # 2026-11-24: analyzer switched from Dots to Color War rules (remainder kept, full cascades).
+        self.assertIn("DriveBotpickEngine.neighbors(e, size)", DRIVE)
+        self.assertIn("setCell(e, left > 0 ? DriveBotpickEngine.encode(mover, left) : 0)", DRIVE)
         self.assertIn("DriveBotpickEngine.charge(cells[adjacent]) + 1", DRIVE)
-        self.assertIn("if redCount == 0 || blueCount == 0", DRIVE)
+        self.assertIn("if redCount == 0 && blueCount > 0", DRIVE)
         self.assertIn("captureCascade", DRIVE)
         self.assertIn("cascadeFrames: trace.waves", DRIVE)
 

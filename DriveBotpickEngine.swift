@@ -139,30 +139,28 @@ enum DriveBotpickEngine {
             let placementCells = captureCascade ? cells : []
             var capturedWaves: [CascadeFrame] = []
 
-            var resolved = false
-            for _ in 0..<(size * size * 8) {
-                let wave = cells.indices.filter { cells[$0] != 0 && DriveBotpickEngine.charge(cells[$0]) >= 4 }
-                if wave.isEmpty { break }
-                var explodedThisWave: [Int] = []
-                for explodingIndex in wave {
-                    let source = cells[explodingIndex]
-                    guard source != 0 && DriveBotpickEngine.charge(source) >= 4 else { continue }
-                    let sourceOwner = DriveBotpickEngine.owner(source)
-                    explodedThisWave.append(explodingIndex)
-                    setCell(explodingIndex, 0)
-                    for adjacent in DriveBotpickEngine.neighbors(explodingIndex, size) {
-                        setCell(adjacent, DriveBotpickEngine.encode(sourceOwner,
-                                  DriveBotpickEngine.charge(cells[adjacent]) + 1))
-                    }
-                    if redCount == 0 || blueCount == 0 {
-                        resolved = true
-                        break
+            // Color War rules (2026-11-24, same as GameModel executeMove / web index.html): each wave explodes all
+            // cells at >= 4 at once, an exploding cell keeps its remainder (count - 4), neighbours become the mover's;
+            // the next wave is the cells that received orbs and now hold >= 4. Cascades always run to the end.
+            var wave: [Int] = DriveBotpickEngine.charge(cells[index]) >= 4 ? [index] : []
+            var guardCount = 0
+            while !wave.isEmpty && guardCount < size * size * 64 {
+                guardCount += 1
+                let exploding = wave.filter { DriveBotpickEngine.charge(cells[$0]) >= 4 }
+                if exploding.isEmpty { break }
+                for e in exploding {
+                    let left = DriveBotpickEngine.charge(cells[e]) - 4
+                    setCell(e, left > 0 ? DriveBotpickEngine.encode(mover, left) : 0)
+                }
+                var changed: [Int] = []
+                for e in exploding {
+                    for adjacent in DriveBotpickEngine.neighbors(e, size) {
+                        setCell(adjacent, DriveBotpickEngine.encode(mover, min(15, DriveBotpickEngine.charge(cells[adjacent]) + 1)))
+                        if !changed.contains(adjacent) { changed.append(adjacent) }
                     }
                 }
-                if captureCascade && !explodedThisWave.isEmpty {
-                    capturedWaves.append(CascadeFrame(cells: cells, exploding: explodedThisWave))
-                }
-                if resolved { break }
+                if captureCascade { capturedWaves.append(CascadeFrame(cells: cells, exploding: exploding)) }
+                wave = changed.filter { DriveBotpickEngine.charge(cells[$0]) >= 4 }
             }
 
             if mover == 0 { movesRed += 1 } else { movesBlue += 1 }
