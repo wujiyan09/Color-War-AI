@@ -364,7 +364,7 @@ struct Nov15DuelSearch {
         }
     }
 
-    static func bestMove(board: AISolver.Board, activePlayers: [Int], currentPlayer: Int, hasEntered: [Bool], level: Int, movesPlayed: Int, openingSeed: String? = nil, strength: Int = maxStrength, weak: Bool = false, rng: () -> Double = { Double.random(in: 0..<1) }) -> (Int, Int)? {
+    static func bestMove(board: AISolver.Board, activePlayers: [Int], currentPlayer: Int, hasEntered: [Bool], level: Int, movesPlayed: Int, openingSeed: String? = nil, strength: Int = maxStrength, weak: Bool = false, rng: () -> Double = { Double.random(in: 0..<1) }, varySeed: String? = nil) -> (Int, Int)? {
         guard (2...12).contains(board.size), activePlayers.count == 2, let side = activePlayers.firstIndex(of: currentPlayer) else { return nil }
         let size = board.size
         var cells = [UInt8](repeating: 0, count: size * size)
@@ -455,8 +455,47 @@ struct Nov15DuelSearch {
             }
             if let picked = Bot2Weak.pick(candidates, rng: rng) { best = picked }
         }
+        // Anti-memorisation (2026-11-24): Bot 0 / party Bot 3 in vs-AI games. Only in the first varyPlies plies,
+        // pick uniformly (per-game seeded) among root moves within varyMargin of the best at the last completed
+        // depth. Never outside the margin; decided (mate / forced win) positions always play the best move.
+        // Mirrors web drive-duel-ai.js (VARY_PLIES / VARY_MARGIN / seededUnit).
+        if !weak, let varySeed, movesPlayed < varyPlies, depthCompleted > 0, let bestScore = completedScores.last,
+           abs(bestScore) < 900_000 {
+            let cutoff = bestScore - varyMargin
+            context.deadline = ProcessInfo.processInfo.systemUptime + searchParameters.timeMs / 1000
+            context.stopped = false
+            var candidates: [Int] = [best]
+            for move in ordered where move != best {
+                let next = simulate(cells, move, side, enteredMask, size)
+                let score: Int
+                if let result = terminal(next.cells, 1 - side, next.entered, depthCompleted) {
+                    score = -result
+                } else {
+                    score = -search(next.cells, 1 - side, next.entered, depthCompleted - 1, -cutoff, -(cutoff - 1), 1, &context, size, true).score
+                }
+                if context.stopped || Task.isCancelled { break }
+                if score >= cutoff { candidates.append(move) }
+            }
+            if !context.stopped && !Task.isCancelled && candidates.count > 1 {
+                best = candidates[Int(seededUnit(varySeed, movesPlayed) * Double(candidates.count)) % candidates.count]
+            }
+        }
         _ = depthCompleted
         return (best / size, best % size)
+    }
+
+    static let varyPlies = 20
+    static let varyMargin = 20
+
+    /// Deterministic [0,1) from (seed, ply): FNV-1a over the seed bytes, mixed with ply, then mulberry32 (same as web).
+    static func seededUnit(_ seed: String, _ ply: Int) -> Double {
+        var h: UInt32 = 2166136261
+        for byte in seed.utf8 { h ^= UInt32(byte); h = h &* 16777619 }
+        var t = h ^ (UInt32(truncatingIfNeeded: ply + 1) &* 0x9E3779B1)
+        t = t &+ 0x6D2B79F5
+        var r = (t ^ (t >> 15)) &* (1 | t)
+        r = (r &+ ((r ^ (r >> 7)) &* (61 | r))) ^ r
+        return Double(r ^ (r >> 14)) / 4294967296.0
     }
 }
 

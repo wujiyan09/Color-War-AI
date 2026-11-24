@@ -458,6 +458,8 @@ struct AISolver: Sendable {
     let localDuelMovesPlayed: Int
     let duelStrength: Int
     let openingSeed: String
+    /// Anti-memorisation seed (local vs-AI games only; see Nov15DuelSearch.varyPlies).
+    let varySeed: String?
     private let searchTimeLimitOverride: TimeInterval?
     private let directBotpickSearch: Bool
     private let searchDeadline: TimeInterval
@@ -479,7 +481,9 @@ struct AISolver: Sendable {
          duelStrength: Int = Nov15DuelSearch.maxStrength,
          openingSeed: String = "local",
          searchTimeLimitOverride: TimeInterval? = nil,
-         directBotpickSearch: Bool = false) {
+         directBotpickSearch: Bool = false,
+         varySeed: String? = nil) {
+        self.varySeed = varySeed
         self.boardSize = boardSize
         self.activePlayers = activePlayers
         self.currentPlayer = currentPlayer
@@ -557,7 +561,8 @@ struct AISolver: Sendable {
             if alive.count == 2 {
                 if let move = Nov15DuelSearch.bestMove(board: board, activePlayers: alive,
                                                        currentPlayer: currentPlayer, hasEntered: hasEntered,
-                                                       level: 3, movesPlayed: localDuelMovesPlayed) {
+                                                       level: 3, movesPlayed: localDuelMovesPlayed,
+                                                       varySeed: activePlayers.count == 2 ? varySeed : nil) {
                     return move
                 }
             } else if alive.count > 2 {
@@ -575,7 +580,8 @@ struct AISolver: Sendable {
                                                 currentPlayer: currentPlayer, hasEntered: hasEntered,
                                                 level: 3, movesPlayed: localDuelMovesPlayed,
                                                 openingSeed: isLocalDuelMode ? openingSeed : nil,
-                                                strength: isLocalDuelMode ? duelStrength : Nov15DuelSearch.maxStrength)
+                                                strength: isLocalDuelMode ? duelStrength : Nov15DuelSearch.maxStrength,
+                                                varySeed: varySeed)
             }
             return DriveDuelSearch.bestMove(board: board, activePlayers: activePlayers,
                                             currentPlayer: currentPlayer,

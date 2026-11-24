@@ -1250,7 +1250,11 @@ final class GameModel: ObservableObject {
                 isLocalDuelMode: self.isLocalDuelMode && !isWS && activePlayerIndices.count == 2,
                 localDuelMovesPlayed: self.localDuelMoveCount,
                 duelStrength: self.duelBotStrength,
-                openingSeed: "local-\(self.currentGameSessionID.uuidString)"
+                openingSeed: "local-\(self.currentGameSessionID.uuidString)",
+                // Anti-memorisation: local vs-AI games only (2 seats, exactly 1 human). Same as web.
+                varySeed: !isWS && activePlayerIndices.count == 2
+                    && activePlayerIndices.filter({ self.playerTypes[safe: $0] == .human }).count == 1
+                    ? "local-\(self.currentGameSessionID.uuidString)" : nil
             )
 
             if let bestMove = await solver.calculateBestMove() {
